@@ -708,7 +708,12 @@ class SettingsScreen extends StatelessWidget {
               ScaffoldMessenger.of(context).showSnackBar(
                 const SnackBar(content: Text('取得中...')),
               );
-              final result = await syncGmail(appState);
+              var result = await syncGmail(appState);
+              // 許可が無ければこの場で求めてから再試行（ポップアップは操作中のみ開ける）
+              if (result.needsPermission &&
+                  await GmailService.instance.requestGmailAccess()) {
+                result = await syncGmail(appState);
+              }
               if (context.mounted) {
                 ScaffoldMessenger.of(context)
                   ..hideCurrentSnackBar()
@@ -724,7 +729,12 @@ class SettingsScreen extends StatelessWidget {
               ScaffoldMessenger.of(context).showSnackBar(
                 const SnackBar(content: Text('全期間を取得中... 少し時間がかかります')),
               );
-              final result = await syncGmail(appState, full: true);
+              var result = await syncGmail(appState, full: true);
+              // 許可が無ければこの場で求めてから再試行（ポップアップは操作中のみ開ける）
+              if (result.needsPermission &&
+                  await GmailService.instance.requestGmailAccess()) {
+                result = await syncGmail(appState, full: true);
+              }
               if (context.mounted) {
                 ScaffoldMessenger.of(context)
                   ..hideCurrentSnackBar()

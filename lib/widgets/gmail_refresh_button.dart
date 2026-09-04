@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../app_state.dart';
+import '../gmail_service.dart';
 import '../gmail_sync.dart';
 
 // 💡 どの画面にも置けるGmail取得ボタン（AppBarのアクション用）。
@@ -19,7 +20,14 @@ class _GmailRefreshButtonState extends State<GmailRefreshButton> {
     if (_loading) return;
     setState(() => _loading = true);
     final appState = context.read<AppState>();
-    final result = await syncGmail(appState);
+    var result = await syncGmail(appState);
+    // 💡 Webで読み取り許可が無いときは、この場（ボタン操作の延長）で許可を求めて
+    //   もう一度だけ同期する。ここを逃すとポップアップがブロックされる。
+    if (result.needsPermission) {
+      if (await GmailService.instance.requestGmailAccess()) {
+        result = await syncGmail(appState);
+      }
+    }
     if (!mounted) return;
     setState(() => _loading = false);
     ScaffoldMessenger.of(context)

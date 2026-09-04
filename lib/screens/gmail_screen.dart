@@ -14,6 +14,7 @@ class GmailScreen extends StatefulWidget {
 class _GmailScreenState extends State<GmailScreen> {
   final _gmail = GmailService.instance;
   bool _loading = false;
+  bool _hasAccess = false; // Webはサインイン済みでもスコープ許可が別途必要
   String? _error;
   List<ParsedPayment> _results = [];
 
@@ -43,7 +44,10 @@ class _GmailScreenState extends State<GmailScreen> {
   @override
   void initState() {
     super.initState();
-    _gmail.signInSilently().then((_) => mounted ? setState(() {}) : null);
+    _gmail.signInSilently().then((_) async {
+      final ok = await _gmail.hasGmailAccess();
+      if (mounted) setState(() => _hasAccess = ok);
+    });
   }
 
   Future<void> _connect() async {
@@ -55,9 +59,30 @@ class _GmailScreenState extends State<GmailScreen> {
       final acc = await _gmail.signIn();
       if (acc == null) {
         setState(() => _error = 'ログインがキャンセルされました');
+      } else {
+        _hasAccess = await _gmail.hasGmailAccess();
       }
     } catch (e) {
       setState(() => _error = 'ログイン失敗: $e');
+    } finally {
+      setState(() => _loading = false);
+    }
+  }
+
+  // 💡 Gmail読み取りの許可を求める（ポップアップが開くのでボタン操作から呼ぶ）
+  Future<void> _grant() async {
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      final ok = await _gmail.requestGmailAccess();
+      setState(() {
+        _hasAccess = ok;
+        if (!ok) _error = '許可されませんでした。ポップアップがブロックされていないか確認してください。';
+      });
+    } catch (e) {
+      setState(() => _error = '許可の取得に失敗: $e');
     } finally {
       setState(() => _loading = false);
     }
@@ -72,6 +97,17 @@ class _GmailScreenState extends State<GmailScreen> {
     // await前にAppStateを取得（context.read を非同期境界をまたいで使わない）
     final appState = context.read<AppState>();
     try {
+      // 許可が無いとAPIが403を返すので、先にここで求める（ボタン操作の延長）
+      if (!await _gmail.hasGmailAccess()) {
+        final ok = await _gmail.requestGmailAccess();
+        if (!mounted) return;
+        setState(() => _hasAccess = ok);
+        if (!ok) {
+          setState(() => _error = 'Gmailの読み取りが許可されていません。'
+              '「Gmailのアクセスを許可」を押して許可してください。');
+          return;
+        }
+      }
       final list = await _gmail.fetchCardPayments();
       // 💡 銀行確定を正本として照合・自動追加（重複は除外）
       final r = appState.reconcilePayments(list.map((p) => (
@@ -129,6 +165,14 @@ class _GmailScreenState extends State<GmailScreen> {
                 onPressed: _loading ? null : _connect,
                 icon: const Icon(Icons.login),
                 label: const Text('Googleでログイン'),
+              )
+            else if (!_hasAccess)
+              ElevatedButton.icon(
+                style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.orange, foregroundColor: Colors.white),
+                onPressed: _loading ? null : _grant,
+                icon: const Icon(Icons.lock_open),
+                label: const Text('Gmailのアクセスを許可'),
               )
             else
               ElevatedButton.icon(

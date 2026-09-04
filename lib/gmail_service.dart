@@ -56,16 +56,61 @@ class GmailService {
   static const List<String> _scopes = <String>[gmail.GmailApi.gmailReadonlyScope];
   final GoogleSignIn _googleSignIn = GoogleSignIn(scopes: _scopes);
 
-  // 💡 Webはサインインとスコープ許可が別扱いになることがあるので、
-  //   足りなければ明示的にスコープを要求する。
-  Future<void> _ensureScopes() async {
-    if (!kIsWeb) return;
+  // 💡 Webは「サインイン（本人確認）」と「スコープ許可（Gmailの読み取り）」が別物。
+  //   requestScopes はポップアップを開くので、ユーザーの操作の中からしか呼べない。
+  //   自動同期の経路で黙って呼ぶとブロックされ、許可なしのトークンのまま
+  //   API が 403 を返してしまうため、確認(hasGmailAccess)と要求(requestGmailAccess)を分ける。
+  bool _scopeGranted = false;
+
+  // Gmailを読める状態か（Webはスコープ許可まで確認する）
+  Future<bool> hasGmailAccess() async {
+    if (_googleSignIn.currentUser == null) return false;
+    if (!kIsWeb) return true;
     try {
-      if (await _googleSignIn.canAccessScopes(_scopes)) return;
-      await _googleSignIn.requestScopes(_scopes);
+      _scopeGranted = await _googleSignIn.canAccessScopes(_scopes);
     } catch (_) {
-      // 取得できなければ後続のAPI呼び出しでエラーになるのでここでは握りつぶす
+      _scopeGranted = false;
     }
+    return _scopeGranted;
+  }
+
+  // 💡 スコープ許可を求める。必ずボタンなどユーザー操作から呼ぶこと。
+  Future<bool> requestGmailAccess() async {
+    if (_googleSignIn.currentUser == null) {
+      if (await _googleSignIn.signIn() == null) return false;
+    }
+    if (!kIsWeb) return true;
+    try {
+      if (await _googleSignIn.canAccessScopes(_scopes)) {
+        _scopeGranted = true;
+        return true;
+      }
+      _scopeGranted = await _googleSignIn.requestScopes(_scopes);
+      return _scopeGranted;
+    } catch (_) {
+      _scopeGranted = false;
+      return false;
+    }
+  }
+
+  // 💡 APIのエラーを「次に何をすればいいか」が分かる文言に直す。
+  //   403は原因が複数あるので、メッセージで切り分ける。
+  Object _describeApiError(Object e) {
+    final text = e.toString();
+    final is403 = (e is gmail.DetailedApiRequestError && e.status == 403) ||
+        text.contains('403');
+    if (!is403) return e;
+    final lower = text.toLowerCase();
+    if (lower.contains('scope') || lower.contains('insufficient')) {
+      _scopeGranted = false;
+      return Exception('Gmailの読み取りが許可されていません（403）。'
+          '「Gmailのアクセスを許可」を押して、Googleの画面で許可してください。');
+    }
+    if (lower.contains('has not been used') || lower.contains('disabled')) {
+      return Exception('Gmail APIが無効になっています（403）。'
+          'Google CloudでGmail APIを有効にしてください。');
+    }
+    return Exception('Gmailにアクセスできませんでした（403）。$text');
   }
 
   GoogleSignInAccount? get account => _googleSignIn.currentUser;
@@ -82,7 +127,7 @@ class GmailService {
 
   Future<GoogleSignInAccount?> signIn() async {
     final account = await _googleSignIn.signIn();
-    if (account != null) await _ensureScopes();
+    if (account != null) await requestGmailAccess();
     return account;
   }
 
@@ -123,7 +168,8 @@ class GmailService {
 
   Future<bool> signInSilently() async {
     final acc = await _googleSignIn.signInSilently();
-    if (acc != null) await _ensureScopes();
+    // 💡 ここでは許可を「要求」しない（操作外なのでポップアップが塞がれる）。確認だけ。
+    if (acc != null) await hasGmailAccess();
     return acc != null;
   }
 
@@ -137,6 +183,14 @@ class GmailService {
 
   // 💡 入金通知メールを取得（メールIDと入金日だけ）。
   Future<List<({String sourceId, DateTime date})>> fetchDepositNotices({DateTime? since}) async {
+    try {
+      return await _fetchDepositNotices(since: since);
+    } catch (e) {
+      throw _describeApiError(e);
+    }
+  }
+
+  Future<List<({String sourceId, DateTime date})>> _fetchDepositNotices({DateTime? since}) async {
     final from = since?.subtract(const Duration(days: 1));
     final window =
         from != null ? 'after:${from.year}/${from.month}/${from.day}' : 'newer_than:90d';
@@ -163,6 +217,14 @@ class GmailService {
   // 💡 カード関連メール＋銀行の引落確定メールを取得して支払い候補を抽出
   //   since を渡すとその日付以降だけ取得（2回目以降の差分更新用）
   Future<List<ParsedPayment>> fetchCardPayments({DateTime? since}) async {
+    try {
+      return await _fetchCardPayments(since: since);
+    } catch (e) {
+      throw _describeApiError(e);
+    }
+  }
+
+  Future<List<ParsedPayment>> _fetchCardPayments({DateTime? since}) async {
     // after: の境界で取りこぼさないよう1日前から検索
     final from = since?.subtract(const Duration(days: 1));
     _window = from != null

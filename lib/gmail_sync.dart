@@ -9,6 +9,8 @@ class GmailSyncResult {
   final String? error;
   final bool notSignedIn;
   final int missed; // 取得できなかったメール数（>0なら反映を中止している）
+  // 💡 Web用。サインイン済みだがGmail読み取りの許可が無い（403の原因）。
+  final bool needsPermission;
 
   GmailSyncResult({
     this.added = 0,
@@ -17,6 +19,7 @@ class GmailSyncResult {
     this.error,
     this.notSignedIn = false,
     this.missed = 0,
+    this.needsPermission = false,
   });
 
   // 取りこぼしがあり、データを守るため反映を見送ったか
@@ -24,6 +27,10 @@ class GmailSyncResult {
 
   String get message {
     if (notSignedIn) return 'Gmail未連携です（設定から連携してください）';
+    if (needsPermission) {
+      return 'Gmailの読み取りが許可されていません。設定→Gmail連携で'
+          '「Gmailのアクセスを許可」を押してください';
+    }
     if (error != null) return '取得失敗: $error';
     if (skipped) {
       return 'メールを$missed件取得できなかったため、今回は反映を見送りました（電波の良い場所でもう一度お試しください）';
@@ -53,6 +60,11 @@ Future<GmailSyncResult> syncGmail(AppState appState, {bool full = false}) async 
   if (!gmail.isSignedIn) {
     final ok = await gmail.signInSilently();
     if (!ok) return GmailSyncResult(notSignedIn: true);
+  }
+  // 💡 許可が無いまま取得すると403になるので、先に確認して案内を返す。
+  //   （許可要求はポップアップを開くのでボタン操作からしか呼べない）
+  if (!await gmail.hasGmailAccess()) {
+    return GmailSyncResult(needsPermission: true);
   }
   final doFull = full || !appState.gmailFirstSyncDone;
   final now = DateTime.now();
