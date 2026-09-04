@@ -33,7 +33,7 @@ jobs:
 
       # 💡 どのビルドが動いているか設定画面で確認できるように埋め込む
       - id: stamp
-        run: echo "at=$(date -u '+%Y-%m-%d %H:%M UTC')" >> "$GITHUB_OUTPUT"
+        run: echo "at=$(TZ=Asia/Tokyo date '+%Y-%m-%d %H:%M')" >> "$GITHUB_OUTPUT"
 
       # プロジェクトページは /future-app/ 配下で配信されるので base-href を合わせる
       - run: |
