@@ -1,0 +1,768 @@
+import 'dart:convert';
+import 'dart:io';
+import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:intl/intl.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:share_plus/share_plus.dart';
+import 'package:file_picker/file_picker.dart';
+import 'package:provider/provider.dart';
+import '../app_state.dart';
+import '../background_themes.dart';
+import '../notification_service.dart';
+import '../gmail_service.dart';
+import '../gmail_sync.dart';
+import 'gmail_screen.dart';
+import 'card_settings_screen.dart';
+import 'workplace_list_screen.dart';
+import 'budget_screen.dart';
+
+class SettingsScreen extends StatelessWidget {
+  const SettingsScreen({super.key});
+
+  // 🔧 デバッグ情報をダイアログ表示（パーサー調整用）
+  Future<void> _showDebug(BuildContext context, String title, Future<String> Function() load) async {
+    showDialog(
+      context: context,
+      builder: (_) => const AlertDialog(content: Center(child: Padding(
+        padding: EdgeInsets.all(24), child: CircularProgressIndicator()))),
+    );
+    final raw = await load();
+    if (!context.mounted) return;
+    Navigator.pop(context); // ローディングを閉じる
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: Text(title),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: SingleChildScrollView(child: SelectableText(raw)),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              Clipboard.setData(ClipboardData(text: raw));
+              ScaffoldMessenger.of(context)
+                  .showSnackBar(const SnackBar(content: Text('コピーしました')));
+            },
+            child: const Text('コピー'),
+          ),
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('閉じる')),
+        ],
+      ),
+    );
+  }
+
+  String _fmtDt(DateTime dt) => DateFormat('M/d HH:mm').format(dt);
+
+  // 背景色（グラデーション）を選ぶ
+  void _showBackgroundPicker(BuildContext context, AppState appState) {
+    showModalBottomSheet(
+      context: context,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (_) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('アプリの背景色', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 12),
+              GridView.count(
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                crossAxisCount: 4,
+                mainAxisSpacing: 12,
+                crossAxisSpacing: 12,
+                childAspectRatio: 0.8,
+                children: kBackgroundThemes.map((t) {
+                  final selected = t.key == appState.backgroundTheme;
+                  return GestureDetector(
+                    onTap: () {
+                      appState.setBackgroundTheme(t.key);
+                      Navigator.pop(context);
+                    },
+                    child: Column(
+                      children: [
+                        Container(
+                          width: 56,
+                          height: 56,
+                          decoration: BoxDecoration(
+                            gradient: LinearGradient(
+                              begin: Alignment.topCenter,
+                              end: Alignment.bottomCenter,
+                              colors: t.colors,
+                            ),
+                            shape: BoxShape.circle,
+                            border: Border.all(
+                              color: selected ? Colors.pink : Colors.grey.shade300,
+                              width: selected ? 3 : 1,
+                            ),
+                          ),
+                          child: selected
+                              ? const Icon(Icons.check, color: Colors.pink)
+                              : null,
+                        ),
+                        const SizedBox(height: 4),
+                        Text(t.label, style: const TextStyle(fontSize: 11)),
+                      ],
+                    ),
+                  );
+                }).toList(),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _showCardPaymentDaySettings(BuildContext context, AppState appState) {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setLocal) => Padding(
+          padding: const EdgeInsets.fromLTRB(20, 20, 20, 32),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('カード引き落とし日', style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 4),
+              const Text(
+                  '毎月何日に引き落とされるか設定します。カレンダーに表示され、'
+                  'その日が過ぎると「口座から引く」お知らせが出ます'
+                  '（銀行の事前お知らせメールが届いている場合は、そちらの金額を優先）。',
+                  style: TextStyle(fontSize: 12, color: Colors.black54)),
+              const SizedBox(height: 12),
+              ...appState.cardPaymentDays.entries.map((e) => ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.credit_card, size: 20, color: Colors.red),
+                title: Text(e.key),
+                trailing: TextButton(
+                  child: Text('毎月${e.value}日', style: const TextStyle(fontSize: 15)),
+                  onPressed: () async {
+                    final ctrl = TextEditingController(text: e.value.toString());
+                    final ok = await showDialog<bool>(
+                      context: context,
+                      builder: (_) => AlertDialog(
+                        title: Text('${e.key} 引き落とし日'),
+                        content: TextField(
+                          controller: ctrl,
+                          keyboardType: TextInputType.number,
+                          decoration: const InputDecoration(labelText: '日（1〜31）', suffixText: '日'),
+                          autofocus: true,
+                        ),
+                        actions: [
+                          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('キャンセル')),
+                          ElevatedButton(onPressed: () => Navigator.pop(context, true), child: const Text('保存')),
+                        ],
+                      ),
+                    );
+                    if (ok == true) {
+                      final day = int.tryParse(ctrl.text) ?? e.value;
+                      appState.setCardPaymentDay(e.key, day.clamp(1, 31));
+                      setLocal(() {});
+                    }
+                  },
+                ),
+              )),
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.add, color: Colors.blue),
+                title: const Text('カードを追加'),
+                onTap: () async {
+                  final nameCtrl = TextEditingController();
+                  final dayCtrl = TextEditingController(text: '27');
+                  final ok = await showDialog<bool>(
+                    context: context,
+                    builder: (_) => AlertDialog(
+                      title: const Text('カードを追加'),
+                      content: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          TextField(controller: nameCtrl, decoration: const InputDecoration(labelText: 'カード名')),
+                          TextField(controller: dayCtrl, keyboardType: TextInputType.number,
+                              decoration: const InputDecoration(labelText: '引き落とし日', suffixText: '日')),
+                        ],
+                      ),
+                      actions: [
+                        TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('キャンセル')),
+                        ElevatedButton(onPressed: () => Navigator.pop(context, true), child: const Text('追加')),
+                      ],
+                    ),
+                  );
+                  if (ok == true && nameCtrl.text.isNotEmpty) {
+                    final day = int.tryParse(dayCtrl.text) ?? 27;
+                    appState.setCardPaymentDay(nameCtrl.text, day.clamp(1, 31));
+                    setLocal(() {});
+                  }
+                },
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  // バックアップから復元（自動保存ファイル一覧）
+  Future<void> _showRestoreBackup(BuildContext context, AppState appState) async {
+    final files = await appState.listBackupFiles();
+    if (!context.mounted) return;
+    if (files.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('バックアップファイルがありません')),
+      );
+      return;
+    }
+    showModalBottomSheet(
+      context: context,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (_) => Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Padding(
+            padding: EdgeInsets.all(16),
+            child: Text('バックアップから復元', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+          ),
+          const Divider(height: 1),
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxHeight: 300),
+            child: ListView(
+              shrinkWrap: true,
+              children: files.map((f) {
+                final name = f.path.split('/').last;
+                final dtStr = name.replaceAll('pocket_maid_', '').replaceAll('.json', '');
+                return ListTile(
+                  leading: const Icon(Icons.insert_drive_file, color: Colors.teal),
+                  title: Text(dtStr.length >= 15
+                      ? '${dtStr.substring(0, 4)}/${dtStr.substring(4, 6)}/${dtStr.substring(6, 8)} ${dtStr.substring(9, 11)}:${dtStr.substring(11, 13)}'
+                      : name),
+                  trailing: TextButton(
+                    child: const Text('復元', style: TextStyle(color: Colors.red)),
+                    onPressed: () async {
+                      Navigator.pop(context);
+                      final ok = await showDialog<bool>(
+                        context: context,
+                        builder: (_) => AlertDialog(
+                          title: const Text('復元の確認'),
+                          content: const Text('このバックアップで現在のデータをすべて上書きします。続けますか？'),
+                          actions: [
+                            TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('キャンセル')),
+                            ElevatedButton(
+                              style: ElevatedButton.styleFrom(backgroundColor: Colors.red, foregroundColor: Colors.white),
+                              onPressed: () => Navigator.pop(context, true),
+                              child: const Text('復元する'),
+                            ),
+                          ],
+                        ),
+                      );
+                      if (ok == true && context.mounted) {
+                        try {
+                          await appState.restoreFromBackup(f);
+                          if (context.mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(content: Text('復元しました')),
+                            );
+                          }
+                        } catch (e) {
+                          if (context.mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(content: Text('復元失敗: $e')),
+                            );
+                          }
+                        }
+                      }
+                    },
+                  ),
+                );
+              }).toList(),
+            ),
+          ),
+          const SizedBox(height: 12),
+        ],
+      ),
+    );
+  }
+
+  // バックアップ（エクスポート/インポート）のメニュー
+  void _showBackup(BuildContext context, AppState appState) {
+    showModalBottomSheet(
+      context: context,
+      builder: (_) => Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Padding(
+            padding: EdgeInsets.all(16),
+            child: Text('データのバックアップ', style: TextStyle(fontWeight: FontWeight.bold)),
+          ),
+          ListTile(
+            leading: const Icon(Icons.ios_share, color: Colors.green),
+            title: const Text('ファイルに書き出し（JSON）'),
+            subtitle: const Text('ファイルとして保存・共有'),
+            onTap: () {
+              Navigator.pop(context);
+              _exportToFile(context, appState, 'pocket_maid_backup', 'json', appState.exportJson());
+            },
+          ),
+          ListTile(
+            leading: const Icon(Icons.grid_on, color: Colors.teal),
+            title: const Text('シフトをCSVファイルに書き出し'),
+            onTap: () {
+              Navigator.pop(context);
+              _exportToFile(context, appState, 'pocket_maid_shifts', 'csv', appState.exportShiftsCsv());
+            },
+          ),
+          ListTile(
+            leading: const Icon(Icons.file_open, color: Colors.blue),
+            title: const Text('ファイルから読み込み（JSON）'),
+            subtitle: const Text('保存したJSONファイルを選んで復元'),
+            onTap: () {
+              Navigator.pop(context);
+              _importFromFile(context, appState);
+            },
+          ),
+          const Divider(),
+          ListTile(
+            dense: true,
+            leading: const Icon(Icons.content_paste, color: Colors.grey),
+            title: const Text('コピー/貼り付けで入出力'),
+            subtitle: const Text('テキストでエクスポート・インポート'),
+            onTap: () {
+              Navigator.pop(context);
+              _showTextBackup(context, appState);
+            },
+          ),
+          const SizedBox(height: 12),
+        ],
+      ),
+    );
+  }
+
+  // #1 ファイルに書き出して共有（保存）シートを開く
+  Future<void> _exportToFile(BuildContext context, AppState appState,
+      String baseName, String ext, String content) async {
+    try {
+      if (kIsWeb) {
+        // Webは端末にファイルを書けないので、コピーできるテキストで出す
+        if (context.mounted) _showText(context, 'エクスポート', content);
+        return;
+      }
+      final dir = await getTemporaryDirectory();
+      final ts = DateFormat('yyyyMMdd_HHmmss').format(DateTime.now());
+      final file = File('${dir.path}/${baseName}_$ts.$ext');
+      await file.writeAsString(content);
+      // iOS/iPad の共有シートは元の位置(sharePositionOrigin)が必須。画面の矩形を渡す。
+      final box = context.findRenderObject() as RenderBox?;
+      final origin = (box != null && box.hasSize)
+          ? (box.localToGlobal(Offset.zero) & box.size)
+          : const Rect.fromLTWH(0, 0, 1, 1);
+      await Share.shareXFiles(
+        [XFile(file.path)],
+        subject: 'ポケットメイド バックアップ',
+        sharePositionOrigin: origin,
+      );
+    } catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('書き出し失敗: $e')));
+      }
+    }
+  }
+
+  // #1 ファイルを選んで読み込み（JSON）
+  Future<void> _importFromFile(BuildContext context, AppState appState) async {
+    try {
+      final result = await FilePicker.platform.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: ['json'],
+      );
+      if (result == null) return;
+      final picked = result.files.single;
+      // Webは path が取れないのでバイト列から読む
+      final String text;
+      if (picked.bytes != null) {
+        text = utf8.decode(picked.bytes!);
+      } else if (picked.path != null) {
+        text = await File(picked.path!).readAsString();
+      } else {
+        return;
+      }
+      if (!context.mounted) return;
+      final ok = await showDialog<bool>(
+        context: context,
+        builder: (_) => AlertDialog(
+          title: const Text('インポートの確認'),
+          content: const Text('このファイルで現在のデータをすべて上書きします。続けますか？'),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('キャンセル')),
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(backgroundColor: Colors.red, foregroundColor: Colors.white),
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('取り込む（全置換）'),
+            ),
+          ],
+        ),
+      );
+      if (ok == true) {
+        appState.importJson(text);
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('インポートしました')));
+        }
+      }
+    } catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('読み込み失敗: $e')));
+      }
+    }
+  }
+
+  // コピー/貼り付け方式（従来）のメニュー
+  void _showTextBackup(BuildContext context, AppState appState) {
+    showModalBottomSheet(
+      context: context,
+      builder: (_) => Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Padding(
+            padding: EdgeInsets.all(16),
+            child: Text('コピー/貼り付けで入出力', style: TextStyle(fontWeight: FontWeight.bold)),
+          ),
+          ListTile(
+            leading: const Icon(Icons.upload_file, color: Colors.green),
+            title: const Text('エクスポート（JSON・コピー）'),
+            onTap: () {
+              Navigator.pop(context);
+              _showText(context, 'エクスポート（JSON）', appState.exportJson());
+            },
+          ),
+          ListTile(
+            leading: const Icon(Icons.download, color: Colors.blue),
+            title: const Text('インポート（JSON・貼り付け）'),
+            onTap: () {
+              Navigator.pop(context);
+              _showImport(context, appState);
+            },
+          ),
+          const SizedBox(height: 12),
+        ],
+      ),
+    );
+  }
+
+  // テキストをコピー可能に表示
+  void _showText(BuildContext context, String title, String text) {
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: Text(title),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: SingleChildScrollView(child: SelectableText(text)),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              Clipboard.setData(ClipboardData(text: text));
+              ScaffoldMessenger.of(context)
+                  .showSnackBar(const SnackBar(content: Text('コピーしました')));
+            },
+            child: const Text('コピー'),
+          ),
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('閉じる')),
+        ],
+      ),
+    );
+  }
+
+  // JSONを貼り付けてインポート
+  void _showImport(BuildContext context, AppState appState) {
+    final ctrl = TextEditingController();
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('インポート（JSON）'),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: TextField(
+            controller: ctrl,
+            maxLines: 8,
+            decoration: const InputDecoration(
+                border: OutlineInputBorder(), hintText: 'エクスポートしたJSONを貼り付け'),
+          ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('キャンセル')),
+          ElevatedButton(
+            onPressed: () {
+              try {
+                appState.importJson(ctrl.text);
+                Navigator.pop(context);
+                ScaffoldMessenger.of(context)
+                    .showSnackBar(const SnackBar(content: Text('インポートしました')));
+              } catch (e) {
+                ScaffoldMessenger.of(context)
+                    .showSnackBar(SnackBar(content: Text('読み込み失敗: $e')));
+              }
+            },
+            child: const Text('取り込む（全置換）'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final appState = context.watch<AppState>();
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('設定'),
+      ),
+      body: ListView(
+        children: [
+          ListTile(
+            leading: const Icon(Icons.work, color: Colors.blue),
+            title: const Text('勤務先の管理'),
+            subtitle: const Text('バイト先・時給・交通費・各種手当の登録'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const WorkplaceListScreen()),
+            ),
+          ),
+          ListTile(
+            leading: const Icon(Icons.credit_card, color: Colors.red),
+            title: const Text('カード引き落とし日の設定'),
+            subtitle: const Text('カレンダー表示と、引き落としのお知らせに使います'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => _showCardPaymentDaySettings(context, appState),
+          ),
+          ListTile(
+            leading: const Icon(Icons.savings, color: Colors.teal),
+            title: const Text('予算の設定'),
+            subtitle: const Text('カテゴリ別の月予算と超過チェック'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const BudgetScreen()),
+            ),
+          ),
+          ListTile(
+            leading: const Icon(Icons.backup, color: Colors.blueGrey),
+            title: const Text('データのバックアップ'),
+            subtitle: const Text('エクスポート（JSON/CSV）・インポート'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => _showBackup(context, appState),
+          ),
+          if (!kIsWeb)
+          SwitchListTile(
+            secondary: const Icon(Icons.cloud_done, color: Colors.teal),
+            title: const Text('自動バックアップ'),
+            subtitle: Text(appState.lastAutoBackupAt != null
+                ? '最終: ${_fmtDt(appState.lastAutoBackupAt!)}'
+                : '1日1回、アプリ内に自動保存'),
+            value: appState.autoBackupEnabled,
+            onChanged: (v) => appState.setAutoBackupEnabled(v),
+          ),
+          if (!kIsWeb)
+          ListTile(
+            leading: const Icon(Icons.restore, color: Colors.orange),
+            title: const Text('バックアップから復元'),
+            subtitle: const Text('自動保存されたバックアップ一覧'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => _showRestoreBackup(context, appState),
+          ),
+          const Divider(),
+          ListTile(
+            leading: const Icon(Icons.palette, color: Colors.deepPurple),
+            title: const Text('アプリの背景色'),
+            subtitle: Text('現在: ${backgroundThemeByKey(appState.backgroundTheme).label}'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => _showBackgroundPicker(context, appState),
+          ),
+          SwitchListTile(
+            secondary: const Icon(Icons.calendar_month, color: Colors.pink),
+            title: const Text('翌々月の予想残高を表示'),
+            subtitle: const Text('残高画面に翌々月末の予想も表示する'),
+            value: appState.showMonthAfterNext,
+            onChanged: (v) => appState.setShowMonthAfterNext(v),
+          ),
+          SwitchListTile(
+            secondary: const Icon(Icons.wallet, color: Colors.brown),
+            title: const Text('財布の現金を使う'),
+            subtitle: const Text('残高画面に「財布の現金」を表示して予想残高に加算'),
+            value: appState.showWalletCash,
+            onChanged: (v) => appState.setShowWalletCash(v),
+          ),
+          if (!kIsWeb)
+          SwitchListTile(
+            secondary: const Icon(Icons.event_available, color: Colors.red),
+            title: const Text('Appleカレンダーに自動連携'),
+            subtitle: const Text('シフト・予定の追加/編集/削除を純正カレンダーへ自動反映'),
+            value: appState.calendarAutoSync,
+            onChanged: (v) async {
+              if (v) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('カレンダーへ同期中...')),
+                );
+              }
+              final ok = await appState.setCalendarAutoSync(v);
+              if (context.mounted && v) {
+                ScaffoldMessenger.of(context)
+                  ..hideCurrentSnackBar()
+                  ..showSnackBar(SnackBar(
+                      content: Text(ok
+                          ? 'Appleカレンダーに連携しました'
+                          : 'カレンダーの許可が必要です（設定アプリで許可してください）')));
+              }
+            },
+          ),
+          const Divider(),
+          const ListTile(
+            leading: Icon(Icons.account_balance, color: Colors.green),
+            title: Text('三井住友銀行 連携設定'),
+            subtitle: Text('未連携'),
+          ),
+          ListTile(
+            leading: const Icon(Icons.sync, color: Colors.red),
+            title: const Text('カード利用メールを今すぐ取得'),
+            subtitle: const Text('先月＋今月の差分をすばやく取り込み'),
+            onTap: () async {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('取得中...')),
+              );
+              final result = await syncGmail(appState);
+              if (context.mounted) {
+                ScaffoldMessenger.of(context)
+                  ..hideCurrentSnackBar()
+                  ..showSnackBar(SnackBar(content: Text(result.message)));
+              }
+            },
+          ),
+          ListTile(
+            leading: const Icon(Icons.history, color: Colors.indigo),
+            title: const Text('過去2年分をすべて取り込み直す'),
+            subtitle: const Text('時間がかかります（漏れた過去分もまとめて取得）'),
+            onTap: () async {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('全期間を取得中... 少し時間がかかります')),
+              );
+              final result = await syncGmail(appState, full: true);
+              if (context.mounted) {
+                ScaffoldMessenger.of(context)
+                  ..hideCurrentSnackBar()
+                  ..showSnackBar(SnackBar(content: Text(result.message)));
+              }
+            },
+          ),
+          ListTile(
+            leading: const Icon(Icons.mail, color: Colors.red),
+            title: const Text('Gmail連携の設定 / 取得結果'),
+            subtitle: const Text('ログイン・連携状態の確認'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const GmailScreen()),
+            ),
+          ),
+          ListTile(
+            leading: const Icon(Icons.percent, color: Colors.deepOrange),
+            title: const Text('カードの金利設定'),
+            subtitle: const Text('分割払いに使う年率を設定'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const CardSettingsScreen()),
+            ),
+          ),
+          const Divider(),
+          ListTile(
+            leading: const Icon(Icons.notifications_active, color: Colors.orange),
+            title: const Text('メイドの通知を許可'),
+            subtitle: const Text('支払い・Todoのリマインダーを受け取る'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () async {
+              final granted = await NotificationService.instance.requestPermission();
+              if (granted) {
+                await NotificationService.instance.rescheduleAll(appState);
+              }
+              if (context.mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(content: Text(granted ? '通知を許可しました 🔔' : '通知が許可されませんでした')),
+                );
+              }
+            },
+          ),
+          ListTile(
+            leading: const Icon(Icons.warning_amber, color: Colors.red),
+            title: const Text('残高不足チェック'),
+            subtitle: const Text('今月末がマイナスなら通知でお知らせ'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () async {
+              final balance = appState.thisMonthBalance;
+              if (balance < 0) {
+                await NotificationService.instance.notifyShortage(balance);
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('残高不足の通知を送りました ⚠')),
+                  );
+                }
+              } else {
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text('今月末の予想残高は ¥$balance です 👍')),
+                  );
+                }
+              }
+            },
+          ),
+          const Divider(),
+          ListTile(
+            leading: const Icon(Icons.bug_report, color: Colors.indigo),
+            title: const Text('🔧 楽天メールの中身を確認'),
+            subtitle: const Text('最新の楽天メール本文を表示'),
+            onTap: () => _showDebug(context, '楽天メール 生テキスト',
+                () => GmailService.instance.debugRawBody('from:rakuten-card.co.jp カード利用のお知らせ')),
+          ),
+          ListTile(
+            leading: const Icon(Icons.bug_report, color: Colors.indigo),
+            title: const Text('🔧 Amazonの取得状況を確認'),
+            subtitle: const Text('発送・注文メール件数と抽出結果を表示'),
+            onTap: () => _showDebug(context, 'Amazon 取得状況',
+                () => GmailService.instance.debugAmazonSummary()),
+          ),
+          ListTile(
+            leading: const Icon(Icons.bug_report, color: Colors.indigo),
+            title: const Text('🔧 アプリ内のAmazon登録状況'),
+            subtitle: const Text('取り込み後にアプリへ残っているAmazon明細'),
+            onTap: () {
+              final amzn = appState.payments.where((p) => p.cardName == 'Amazonマスター').toList()
+                ..sort((a, b) => b.paymentDate.compareTo(a.paymentDate));
+              final sb = StringBuffer()
+                ..writeln('全支払い: ${appState.payments.length}件')
+                ..writeln('Amazonマスター: ${amzn.length}件')
+                ..writeln('────────────');
+              for (final p in amzn.take(60)) {
+                sb.writeln('${p.paymentDate.toString().substring(0, 10)}  ¥${p.amount}  ${p.note}');
+              }
+              _showDebug(context, 'アプリ内Amazon', () async => sb.toString());
+            },
+          ),
+          ListTile(
+            leading: const Icon(Icons.bug_report, color: Colors.indigo),
+            title: const Text('🔧 Amazon発送メールの中身を確認'),
+            subtitle: const Text('最新の発送メール本文を表示'),
+            onTap: () => _showDebug(context, 'Amazon発送 生テキスト',
+                () => GmailService.instance.debugRawBody('from:shipment-tracking@amazon.co.jp')),
+          ),
+        ],
+      ),
+    );
+  }
+}

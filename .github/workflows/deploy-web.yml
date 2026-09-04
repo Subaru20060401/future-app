@@ -1,0 +1,49 @@
+# 💡 main に push すると、Web版を自動でビルドして GitHub Pages に公開する。
+#   公開先: https://subaru20060401.github.io/future-app/
+name: Deploy Web
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: # 手動実行もできるように
+
+# GitHub Pages への公開に必要な権限
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# 同時に走らないようにする（後から来たものを優先）
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - run: flutter pub get
+
+      # プロジェクトページは /future-app/ 配下で配信されるので base-href を合わせる
+      - run: flutter build web --release --base-href /future-app/
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: build/web
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

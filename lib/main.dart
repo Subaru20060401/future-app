@@ -1,121 +1,214 @@
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
+import 'package:intl/date_symbol_data_local.dart';
+import 'package:provider/provider.dart'; // 💡 追加
+import 'app_state.dart'; // 💡 追加
+import 'background_themes.dart';
+import 'notification_service.dart';
+import 'calendar_sync.dart';
+import 'gmail_sync.dart';
+import 'screens/calendar_screen.dart';
+import 'screens/income_screen.dart';
+import 'screens/todo_screen.dart';
+import 'screens/payment_screen.dart';
+import 'screens/settings_screen.dart';
+import 'widgets/deposit_dialog.dart';
 
-void main() {
-  runApp(const MyApp());
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await initializeDateFormatting('ja_JP', null);
+  // 💡 通知とカレンダー連携は端末アプリ専用。Webでは使えないので繋がない。
+  if (!kIsWeb) {
+    await NotificationService.instance.init();
+  }
+
+  final appState = AppState();
+  if (!kIsWeb) {
+    // 💡 Appleカレンダー自動連携の実装を接続（OFFのときは何もしない）
+    appState.calendarSync = AppleCalendarSync(appState);
+    // 💡 データが変わるたびに通知を組み立て直す
+    appState.addListener(() {
+      NotificationService.instance.rescheduleAll(appState);
+    });
+  }
+
+  runApp(
+    // 💡 アプリ全体を「共有金庫（Provider）」で包み込む
+    ChangeNotifierProvider.value(
+      value: appState,
+      child: const MyApp(),
+    ),
+  );
 }
 
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
 
-  // This widget is the root of your application.
   @override
   Widget build(BuildContext context) {
+    final scheme = ColorScheme.fromSeed(seedColor: Colors.pink);
     return MaterialApp(
-      title: 'Flutter Demo',
+      title: 'ポケットメイド',
+      debugShowCheckedModeBanner: false,
+      // 💡 DatePicker/TimePicker などMaterialウィジェットを日本語表示にする
+      locale: const Locale('ja'),
+      localizationsDelegates: const [
+        GlobalMaterialLocalizations.delegate,
+        GlobalWidgetsLocalizations.delegate,
+        GlobalCupertinoLocalizations.delegate,
+      ],
+      supportedLocales: const [Locale('ja'), Locale('en')],
       theme: ThemeData(
-        // This is the theme of your application.
-        //
-        // TRY THIS: Try running your application with "flutter run". You'll see
-        // the application has a purple toolbar. Then, without quitting the app,
-        // try changing the seedColor in the colorScheme below to Colors.green
-        // and then invoke "hot reload" (save your changes or press the "hot
-        // reload" button in a Flutter-supported IDE, or press "r" if you used
-        // the command line to start the app).
-        //
-        // Notice that the counter didn't reset back to zero; the application
-        // state is not lost during the reload. To reset the state, use hot
-        // restart instead.
-        //
-        // This works for code too, not just values: Most code changes can be
-        // tested with just a hot reload.
-        colorScheme: .fromSeed(seedColor: Colors.deepPurple),
+        colorScheme: scheme,
+        useMaterial3: true,
+        // 💡 同梱の日本語フォント（Webでも確実に日本語が出るように）
+        fontFamily: 'NotoSansJP',
+        // 💡 背景は builder のグラデーションを見せるため透明に
+        scaffoldBackgroundColor: Colors.transparent,
+        appBarTheme: const AppBarTheme(
+          // グラデーション背景に馴染ませるため透明＋影なし
+          backgroundColor: Colors.transparent,
+          foregroundColor: Color(0xFFAD1457),
+          surfaceTintColor: Colors.transparent,
+          elevation: 0,
+          scrolledUnderElevation: 0,
+          centerTitle: true,
+        ),
+        cardTheme: CardThemeData(
+          elevation: 0,
+          color: Colors.white.withValues(alpha: 0.85),
+          surfaceTintColor: Colors.transparent,
+          shadowColor: Colors.pink.withValues(alpha: 0.15),
+          margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+        ),
+        listTileTheme: const ListTileThemeData(iconColor: Colors.pink),
+        floatingActionButtonTheme: const FloatingActionButtonThemeData(
+          backgroundColor: Colors.pink,
+          foregroundColor: Colors.white,
+        ),
+        chipTheme: ChipThemeData(
+          selectedColor: Colors.pink[100],
+          backgroundColor: Colors.pink[50],
+          labelStyle: const TextStyle(fontSize: 13),
+        ),
+        snackBarTheme: const SnackBarThemeData(behavior: SnackBarBehavior.floating),
       ),
-      home: const MyHomePage(title: '未来予定'),
+      // 💡 全ページ共通のグラデーション背景（設定で色を変更可能）
+      builder: (context, child) {
+        final themeKey = context.watch<AppState>().backgroundTheme;
+        final bg = backgroundThemeByKey(themeKey);
+        return DecoratedBox(
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topCenter,
+              end: Alignment.bottomCenter,
+              colors: bg.colors,
+              stops: const [0.0, 0.5, 1.0],
+            ),
+          ),
+          child: child!,
+        );
+      },
+      home: const MainNavigationScreen(),
     );
   }
 }
 
-class MyHomePage extends StatefulWidget {
-  const MyHomePage({super.key, required this.title});
-
-  // This widget is the home page of your application. It is stateful, meaning
-  // that it has a State object (defined below) that contains fields that affect
-  // how it looks.
-
-  // This class is the configuration for the state. It holds the values (in this
-  // case the title) provided by the parent (in this case the App widget) and
-  // used by the build method of the State. Fields in a Widget subclass are
-  // always marked "final".
-
-  final String title;
+class MainNavigationScreen extends StatefulWidget {
+  const MainNavigationScreen({super.key});
 
   @override
-  State<MyHomePage> createState() => _MyHomePageState();
+  State<MainNavigationScreen> createState() => _MainNavigationScreenState();
 }
 
-class _MyHomePageState extends State<MyHomePage> {
-  int _counter = 0;
+class _MainNavigationScreenState extends State<MainNavigationScreen> {
+  int _selectedIndex = 0;
 
-  void _incrementCounter() {
-    setState(() {
-      // This call to setState tells the Flutter framework that something has
-      // changed in this State, which causes it to rerun the build method below
-      // so that the display can reflect the updated values. If we changed
-      // _counter without calling setState(), then the build method would not be
-      // called again, and so nothing would appear to happen.
-      _counter++;
+  @override
+  void initState() {
+    super.initState();
+    // 💡 アプリ起動時に自動でメールから取得（連携済みのときだけ実行）
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      final appState = context.read<AppState>();
+      // 前回までに溜まっている入金通知・引き落としがあれば先に聞く
+      await _askPendingDeposits(appState);
+      await _askPendingDraws(appState);
+      final result = await syncGmail(appState);
+      if (!mounted || result.notSignedIn) return;
+      if (result.skipped) {
+        // 取りこぼしで反映を見送ったときは、気づけるように知らせる
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(result.message),
+            backgroundColor: Colors.orange[800],
+            duration: const Duration(seconds: 6),
+          ),
+        );
+      } else if (result.added > 0 || result.removed > 0) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('メール更新: ${result.message}')),
+        );
+      }
+      // 今回の取得で見つかった入金通知を聞く
+      await _askPendingDeposits(appState);
+      // 引き落とし済みで、まだ口座残高に反映していないものを聞く
+      await _askPendingDraws(appState);
     });
   }
 
+  // 💡 未処理の入金通知を1件ずつポップアップで聞く（古い順）
+  Future<void> _askPendingDeposits(AppState appState) async {
+    while (mounted && appState.pendingDeposits.isNotEmpty) {
+      final notice = appState.pendingDeposits.first;
+      await showDepositDialog(context, appState, notice);
+      if (!mounted) return;
+      // ダイアログで処理されなかった場合は無限ループを避けて抜ける
+      if (appState.pendingDeposits.isNotEmpty &&
+          appState.pendingDeposits.first.sourceId == notice.sourceId) {
+        return;
+      }
+    }
+  }
+
+  // 💡 まだ口座に反映していない引き落としを1件ずつ聞く（古い順）
+  Future<void> _askPendingDraws(AppState appState) async {
+    while (mounted && appState.pendingDraws.isNotEmpty) {
+      final draw = appState.pendingDraws.first;
+      await showDrawDialog(context, appState, draw);
+      if (!mounted) return;
+      // 処理されなかった場合は無限ループを避けて抜ける
+      final next = appState.pendingDraws;
+      if (next.isNotEmpty && next.first.id == draw.id) return;
+    }
+  }
+
+  final List<Widget> _screens = [
+    const CalendarScreen(),
+    const TodoScreen(),
+    const IncomeScreen(),
+    const PaymentScreen(),
+    const SettingsScreen(),
+  ];
+
   @override
   Widget build(BuildContext context) {
-    // This method is rerun every time setState is called, for instance as done
-    // by the _incrementCounter method above.
-    //
-    // The Flutter framework has been optimized to make rerunning build methods
-    // fast, so that you can just rebuild anything that needs updating rather
-    // than having to individually change instances of widgets.
     return Scaffold(
-      appBar: AppBar(
-        // TRY THIS: Try changing the color here to a specific color (to
-        // Colors.amber, perhaps?) and trigger a hot reload to see the AppBar
-        // change color while the other colors stay the same.
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-        // Here we take the value from the MyHomePage object that was created by
-        // the App.build method, and use it to set our appbar title.
-        title: Text(widget.title),
-      ),
-      body: Center(
-        // Center is a layout widget. It takes a single child and positions it
-        // in the middle of the parent.
-        child: Column(
-          // Column is also a layout widget. It takes a list of children and
-          // arranges them vertically. By default, it sizes itself to fit its
-          // children horizontally, and tries to be as tall as its parent.
-          //
-          // Column has various properties to control how it sizes itself and
-          // how it positions its children. Here we use mainAxisAlignment to
-          // center the children vertically; the main axis here is the vertical
-          // axis because Columns are vertical (the cross axis would be
-          // horizontal).
-          //
-          // TRY THIS: Invoke "debug painting" (choose the "Toggle Debug Paint"
-          // action in the IDE, or press "p" in the console), to see the
-          // wireframe for each widget.
-          mainAxisAlignment: .center,
-          children: [
-            const Text('You have pushed the button this many times:'),
-            Text(
-              '$_counter',
-              style: Theme.of(context).textTheme.headlineMedium,
-            ),
-          ],
-        ),
-      ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _incrementCounter,
-        tooltip: 'Increment',
-        child: const Icon(Icons.add),
+      // 💡 選択中の画面だけを表示（全画面同時保持をやめ、FAB/AppBarの混線を防止）
+      body: _screens[_selectedIndex],
+      bottomNavigationBar: BottomNavigationBar(
+        currentIndex: _selectedIndex,
+        onTap: (index) => setState(() => _selectedIndex = index),
+        type: BottomNavigationBarType.fixed,
+        selectedItemColor: Colors.pink,
+        items: const [
+          BottomNavigationBarItem(icon: Icon(Icons.calendar_month), label: 'カレンダー'),
+          BottomNavigationBarItem(icon: Icon(Icons.check_circle_outline), label: 'Todo'),
+          BottomNavigationBarItem(icon: Icon(Icons.account_balance_wallet), label: '残高'),
+          BottomNavigationBarItem(icon: Icon(Icons.payments), label: '支払い'),
+          BottomNavigationBarItem(icon: Icon(Icons.settings), label: '設定'),
+        ],
       ),
     );
   }
