@@ -154,33 +154,54 @@ class GmailService {
   //   API が 403 を返してしまうため、確認(hasGmailAccess)と要求(requestGmailAccess)を分ける。
   bool _scopeGranted = false;
 
+  // 💡 一度許可が取れたら、アクセストークンが生きている間は再確認しない。
+  //   確認・要求のたびにGoogleのウィンドウが一瞬開くので、更新のたびに光らせない。
+  //   （アクセストークンの寿命は1時間なので、少し手前で切らす）
+  DateTime? _scopeCheckedAt;
+  static const Duration _scopeTtl = Duration(minutes: 45);
+
   // Gmailを読める状態か（Webはスコープ許可まで確認する）
   Future<bool> hasGmailAccess() async {
     if (_googleSignIn.currentUser == null) return false;
     if (!kIsWeb) return true;
+    final at = _scopeCheckedAt;
+    if (_scopeGranted && at != null && DateTime.now().difference(at) < _scopeTtl) {
+      return true;
+    }
     try {
       _scopeGranted = await _googleSignIn.canAccessScopes(_scopes);
     } catch (_) {
       _scopeGranted = false;
     }
+    _scopeCheckedAt = _scopeGranted ? DateTime.now() : null;
     return _scopeGranted;
   }
 
   // 💡 スコープ許可を求める。必ずボタンなどユーザー操作から呼ぶこと。
   Future<bool> requestGmailAccess() async {
-    if (_googleSignIn.currentUser == null) {
-      if (await _googleSignIn.signIn() == null) return false;
+    if (!kIsWeb) {
+      return _googleSignIn.currentUser != null ||
+          await _googleSignIn.signIn() != null;
     }
-    if (!kIsWeb) return true;
+    // ⚠️ Webで signIn() を呼ぶと「Googleログイン」のポップアップが開く。
+    //   ログイン済みなら即閉じるので、更新のたびに画面が一瞬光る原因になる。
+    //   Webは silent サインイン → スコープ要求だけで足りるので signIn() は使わない。
+    if (_googleSignIn.currentUser == null) {
+      await _googleSignIn.signInSilently();
+      if (_googleSignIn.currentUser == null) return false;
+    }
     try {
       if (await _googleSignIn.canAccessScopes(_scopes)) {
         _scopeGranted = true;
+        _scopeCheckedAt = DateTime.now();
         return true;
       }
       _scopeGranted = await _googleSignIn.requestScopes(_scopes);
+      _scopeCheckedAt = _scopeGranted ? DateTime.now() : null;
       return _scopeGranted;
     } catch (_) {
       _scopeGranted = false;
+      _scopeCheckedAt = null;
       return false;
     }
   }
@@ -227,7 +248,11 @@ class GmailService {
     return account;
   }
 
-  Future<void> signOut() => _googleSignIn.signOut();
+  Future<void> signOut() {
+    _scopeGranted = false;
+    _scopeCheckedAt = null;
+    return _googleSignIn.signOut();
+  }
 
   // 🔧 デバッグ: 指定クエリの最新メールの「件名＋正規化本文」を返す（パーサーが見るテキスト）
   Future<String> debugRawBody(String query) async {
