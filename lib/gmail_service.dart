@@ -101,6 +101,10 @@ class GmailService {
         text.contains('403');
     if (!is403) return e;
     final lower = text.toLowerCase();
+    if (lower.contains('quota') || lower.contains('rate limit')) {
+      return Exception('Gmailの取得が混み合っています（403 クォータ超過）。'
+          '1〜2分ほど待ってから、もう一度更新してください。');
+    }
     if (lower.contains('scope') || lower.contains('insufficient')) {
       _scopeGranted = false;
       return Exception('Gmailの読み取りが許可されていません（403）。'
@@ -294,13 +298,60 @@ class GmailService {
     return results;
   }
 
+  // ───────── レート制限（403 Quota exceeded 対策） ─────────
+  // 💡 Gmail APIは「1分あたり15,000ユニット/ユーザー」。messages.list も get も
+  //   1回5ユニットなので 3,000リクエスト/分（=50/秒）が上限。
+  //   並列8本で投げると軽く超えて同期ごと403で落ちるため、半分程度に抑えて流す。
+  static const int _maxRequestsPerSecond = 25;
+  DateTime _nextSlot = DateTime.fromMillisecondsSinceEpoch(0);
+
+  // 呼び出し順に一定間隔のスロットを予約してから実行する
+  Future<T> _throttled<T>(Future<T> Function() op) async {
+    const gap = Duration(microseconds: 1000000 ~/ _maxRequestsPerSecond);
+    final now = DateTime.now();
+    final slot = _nextSlot.isAfter(now) ? _nextSlot : now;
+    _nextSlot = slot.add(gap);
+    final wait = slot.difference(now);
+    if (wait > Duration.zero) await Future<void>.delayed(wait);
+    return _withRetry(op);
+  }
+
+  // クォータ超過・一時エラーは待ってから再試行（待つ間は後続の発行も止める）
+  Future<T> _withRetry<T>(Future<T> Function() op, {int attempts = 5}) async {
+    var delay = const Duration(milliseconds: 800);
+    for (var i = 0;; i++) {
+      try {
+        return await op();
+      } catch (e) {
+        if (i >= attempts - 1 || !_isRateLimit(e)) rethrow;
+        // 混み合っているので、以降のリクエストのペースごと落とす
+        _nextSlot = DateTime.now().add(delay);
+        await Future<void>.delayed(delay);
+        delay *= 2;
+      }
+    }
+  }
+
+  bool _isRateLimit(Object e) {
+    if (e is gmail.DetailedApiRequestError) {
+      if (e.status == 429 || e.status == 500 || e.status == 503) return true;
+      if (e.status == 403) {
+        final m = (e.message ?? '').toLowerCase();
+        return m.contains('quota') || m.contains('rate limit');
+      }
+      return false;
+    }
+    final s = e.toString().toLowerCase();
+    return s.contains('quota exceeded') || s.contains('ratelimitexceeded');
+  }
+
   // 💡 期間内の全メッセージIDをページングで取得（漏れなく拾う）
   Future<List<String>> _listIds(gmail.GmailApi api, String query, {int cap = 3000}) async {
     final ids = <String>[];
     String? token;
     do {
-      final resp =
-          await api.users.messages.list('me', q: query, maxResults: 100, pageToken: token);
+      final resp = await _throttled(() =>
+          api.users.messages.list('me', q: query, maxResults: 500, pageToken: token));
       ids.addAll((resp.messages ?? []).where((m) => m.id != null).map((m) => m.id!));
       token = resp.nextPageToken;
     } while (token != null && ids.length < cap);
@@ -322,7 +373,7 @@ class GmailService {
 
     Future<gmail.Message?> fetch(String id) async {
       try {
-        return await api.users.messages.get('me', id, format: 'full');
+        return await _throttled(() => api.users.messages.get('me', id, format: 'full'));
       } catch (_) {
         return null;
       }
