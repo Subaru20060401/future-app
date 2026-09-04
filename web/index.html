@@ -46,5 +46,47 @@
     * https://docs.flutter.dev/platform-integration/web/initialization
   -->
   <script src="flutter_bootstrap.js" async></script>
+
+  <script>
+    // 💡 Service Worker が古いビルドを配り続けて「直したのに反映されない」が
+    //   起きるため、新しいビルドを見つけたら即座に切り替えて読み込み直す。
+    //   （ホーム画面に追加したPWAは特に強くキャッシュするので必須）
+    (function () {
+      if (!('serviceWorker' in navigator)) return;
+
+      var reloading = false;
+      navigator.serviceWorker.addEventListener('controllerchange', function () {
+        if (reloading) return; // reload のループを防ぐ
+        reloading = true;
+        window.location.reload();
+      });
+
+      function activateWhenReady(reg) {
+        // 待機中の新ビルドがあれば、すぐ有効化させる
+        // （Flutter生成の service worker は 'skipWaiting' メッセージを受け付ける）
+        if (reg.waiting) reg.waiting.postMessage('skipWaiting');
+        reg.addEventListener('updatefound', function () {
+          var sw = reg.installing;
+          if (!sw) return;
+          sw.addEventListener('statechange', function () {
+            if (sw.state === 'installed' && navigator.serviceWorker.controller) {
+              sw.postMessage('skipWaiting');
+            }
+          });
+        });
+      }
+
+      navigator.serviceWorker.ready.then(function (reg) {
+        activateWhenReady(reg);
+        reg.update(); // 起動のたびに新しいビルドが無いか確認する
+      });
+
+      // 画面に戻ってきたときも確認する（開きっぱなしのPWA対策）
+      document.addEventListener('visibilitychange', function () {
+        if (document.visibilityState !== 'visible') return;
+        navigator.serviceWorker.ready.then(function (reg) { reg.update(); });
+      });
+    })();
+  </script>
 </body>
 </html>

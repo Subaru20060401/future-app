@@ -9,6 +9,7 @@ import 'package:share_plus/share_plus.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:provider/provider.dart';
 import '../app_state.dart';
+import '../build_info.dart';
 import '../background_themes.dart';
 import '../notification_service.dart';
 import '../gmail_service.dart';
@@ -904,6 +905,16 @@ class SettingsScreen extends StatelessWidget {
             onTap: () => _showDebug(context, 'Amazon発送 生テキスト',
                 () => GmailService.instance.debugRawBody('from:shipment-tracking@amazon.co.jp')),
           ),
+          const Divider(),
+          // 💡 「直したのに反映されない」がキャッシュのせいか判断できるように、
+          //   今動いているビルドを表示する。
+          ListTile(
+            dense: true,
+            leading: const Icon(Icons.info_outline, color: Colors.grey),
+            title: const Text('バージョン', style: TextStyle(fontSize: 14)),
+            subtitle: Text(buildLabel, style: const TextStyle(fontSize: 12)),
+          ),
+          const SizedBox(height: 24),
         ],
       ),
     );
