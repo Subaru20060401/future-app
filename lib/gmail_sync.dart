@@ -54,7 +54,10 @@ PaymentSource _toSource(MailKind kind) {
 
 // 💡 どの画面からでも呼べる共通のGmail取得＆照合処理。
 //   未連携なら silent サインインを試み、それでもダメなら notSignedIn を返す。
-//   初回は過去2年分、2回目以降は「先月+今月」だけ取得（full:true で全期間に強制）。
+//   通常は「先月＋今月」だけ取得する（数秒で終わる）。
+//   過去分がほしいときだけ 設定→「過去2年分をすべて取り込み直す」= full:true。
+//   ⚠️ 初回だけ自動で2年分…にすると数千通ぶんのリクエストで
+//      クォータ超過(403)＆数分待ちになるため、自動フル取得はしない。
 Future<GmailSyncResult> syncGmail(AppState appState, {bool full = false}) async {
   final gmail = GmailService.instance;
   if (!gmail.isSignedIn) {
@@ -66,10 +69,9 @@ Future<GmailSyncResult> syncGmail(AppState appState, {bool full = false}) async 
   if (!await gmail.hasGmailAccess()) {
     return GmailSyncResult(needsPermission: true);
   }
-  final doFull = full || !appState.gmailFirstSyncDone;
   final now = DateTime.now();
-  // 差分更新は先月の1日から
-  final since = doFull ? null : DateTime(now.year, now.month - 1, 1);
+  // 通常更新は先月1日から（＝直近1〜2ヶ月）。full のときだけ全期間。
+  final since = full ? null : DateTime(now.year, now.month - 1, 1);
   try {
     final list = await gmail.fetchCardPayments(since: since);
     // 💡 取りこぼしがあるまま反映すると、その明細が消えて残高がブレる。

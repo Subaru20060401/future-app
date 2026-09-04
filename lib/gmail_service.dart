@@ -301,8 +301,9 @@ class GmailService {
   // ───────── レート制限（403 Quota exceeded 対策） ─────────
   // 💡 Gmail APIは「1分あたり15,000ユニット/ユーザー」。messages.list も get も
   //   1回5ユニットなので 3,000リクエスト/分（=50/秒）が上限。
-  //   並列8本で投げると軽く超えて同期ごと403で落ちるため、半分程度に抑えて流す。
-  static const int _maxRequestsPerSecond = 25;
+  //   並列で投げっぱなしにすると軽く超えて同期ごと403で落ちるため、
+  //   上限の6割ほど（30回/秒＝9,000ユニット/分）に抑えて流す。
+  static const int _maxRequestsPerSecond = 30;
   DateTime _nextSlot = DateTime.fromMillisecondsSinceEpoch(0);
 
   // 呼び出し順に一定間隔のスロットを予約してから実行する
@@ -366,8 +367,9 @@ class GmailService {
   int _fetchFailures = 0;
   int get lastFetchFailures => _fetchFailures;
 
+  //   同時実行数はスロットリング(_throttled)が実質の上限になるよう少し多めにとる。
   Future<List<gmail.Message>> _getByIds(gmail.GmailApi api, List<String> ids,
-      {int concurrency = 8}) async {
+      {int concurrency = 12}) async {
     final out = <gmail.Message>[];
     final failed = <String>[];
 
