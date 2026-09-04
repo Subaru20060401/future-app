@@ -327,6 +327,15 @@ class SettingsScreen extends StatelessWidget {
               _importFromFile(context, appState);
             },
           ),
+          ListTile(
+            leading: const Icon(Icons.upload_file, color: Colors.indigo),
+            title: const Text('シフトをCSVから読み込み'),
+            subtitle: const Text('別の端末で書き出したシフトCSVを取り込む'),
+            onTap: () {
+              Navigator.pop(context);
+              _importShiftsCsvFromFile(context, appState);
+            },
+          ),
           const Divider(),
           ListTile(
             dense: true,
@@ -417,6 +426,68 @@ class SettingsScreen extends StatelessWidget {
     } catch (e) {
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('読み込み失敗: $e')));
+      }
+    }
+  }
+
+  // シフトCSVを選んで読み込み（勤務先/給与の設定はCSVの給与列から逆算して復元）
+  Future<void> _importShiftsCsvFromFile(BuildContext context, AppState appState) async {
+    try {
+      final result = await FilePicker.platform.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: ['csv'],
+      );
+      if (result == null) return;
+      final picked = result.files.single;
+      // Webは path が取れないのでバイト列から読む
+      final String text;
+      if (picked.bytes != null) {
+        text = utf8.decode(picked.bytes!);
+      } else if (picked.path != null) {
+        text = await File(picked.path!).readAsString();
+      } else {
+        return;
+      }
+      if (!context.mounted) return;
+      final mode = await showDialog<String>(
+        context: context,
+        builder: (_) => AlertDialog(
+          title: const Text('シフトCSVの取り込み'),
+          content: const Text(
+            'CSVにはシフトだけが入っています（支払い・残高・設定は含まれません）。\n'
+            '取り込み方を選んでください。',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, null),
+              child: const Text('キャンセル'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(context, 'merge'),
+              child: const Text('追加（重複はスキップ）'),
+            ),
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.red, foregroundColor: Colors.white),
+              onPressed: () => Navigator.pop(context, 'replace'),
+              child: const Text('シフトを全置換'),
+            ),
+          ],
+        ),
+      );
+      if (mode == null) return;
+      final r = appState.importShiftsCsv(text, replace: mode == 'replace');
+      if (!context.mounted) return;
+      final parts = <String>['${r.imported}件を取り込みました'];
+      if (r.skipped > 0) parts.add('重複${r.skipped}件をスキップ');
+      if (r.failed > 0) parts.add('${r.failed}行は読めませんでした');
+      if (r.mismatched > 0) parts.add('${r.mismatched}件は給与を再現できず再計算');
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(parts.join(' / '))));
+    } catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('読み込み失敗: $e')));
       }
     }
   }

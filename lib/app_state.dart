@@ -143,6 +143,108 @@ int _nightOverlapMinutes(DateTime start, DateTime end) {
   return overlap;
 }
 
+// ───────────────────────── CSV取り込み用の補助 ─────────────────────────
+// シフトCSVの1行（給与列を「答え」として持ち、設定の逆算に使う）
+class _CsvShiftRow {
+  final String workplace;
+  final DateTime start;
+  final DateTime end;
+  final int breakMinutes;
+  final int hourlyWage;
+  final int earnings;
+
+  _CsvShiftRow({
+    required this.workplace,
+    required this.start,
+    required this.end,
+    required this.breakMinutes,
+    required this.hourlyWage,
+    required this.earnings,
+  });
+
+  double get hours {
+    final m = end.difference(start).inMinutes - breakMinutes;
+    return m <= 0 ? 0 : m / 60.0;
+  }
+
+  double get nightHours => _nightOverlapMinutes(start, end) / 60.0;
+
+  bool get isWeekend =>
+      start.weekday == DateTime.saturday || start.weekday == DateTime.sunday;
+
+  // ShiftData.wageEarnings と同じ計算（交通費は含めない）
+  int wageWith(double nm, double om, double hm) {
+    final h = hours;
+    if (h <= 0) return 0;
+    var total = hourlyWage * h;
+    if (nm > 1.0) total += nightHours * hourlyWage * (nm - 1.0);
+    if (om > 1.0 && h > 8) total += (h - 8) * hourlyWage * (om - 1.0);
+    if (hm > 1.0 && isWeekend) total += h * hourlyWage * (hm - 1.0);
+    return total.round();
+  }
+}
+
+// 逆算で求めた勤務先の給料設定
+class _WageFit {
+  final int transportPerDay;
+  final double nightMultiplier;
+  final double overtimeMultiplier;
+  final double holidayMultiplier;
+
+  const _WageFit({
+    this.transportPerDay = 0,
+    this.nightMultiplier = 1.0,
+    this.overtimeMultiplier = 1.0,
+    this.holidayMultiplier = 1.0,
+  });
+}
+
+// CSV取り込みの結果（画面に出す件数のまとめ）
+class CsvImportResult {
+  final int imported; // 取り込んだ件数
+  final int skipped; // 同じシフトが既にあってスキップした件数
+  final int failed; // 行として読めなかった件数
+  final int mismatched; // 給与を再現できなかった件数
+
+  const CsvImportResult({
+    this.imported = 0,
+    this.skipped = 0,
+    this.failed = 0,
+    this.mismatched = 0,
+  });
+}
+
+// カンマ区切りを1行ぶん分解する（"" のエスケープに対応）
+List<String> _splitCsvLine(String line) {
+  final out = <String>[];
+  final buf = StringBuffer();
+  var inQuotes = false;
+  for (var i = 0; i < line.length; i++) {
+    final c = line[i];
+    if (inQuotes) {
+      if (c == '"') {
+        if (i + 1 < line.length && line[i + 1] == '"') {
+          buf.write('"');
+          i++;
+        } else {
+          inQuotes = false;
+        }
+      } else {
+        buf.write(c);
+      }
+    } else if (c == '"') {
+      inQuotes = true;
+    } else if (c == ',') {
+      out.add(buf.toString());
+      buf.clear();
+    } else {
+      buf.write(c);
+    }
+  }
+  out.add(buf.toString());
+  return out;
+}
+
 // ───────────────────────── 勤務先マスタ ─────────────────────────
 // 💡 給料情報（時給の変更履歴の1区間）。各区間に交通費・各種手当の倍率を持つ。
 class WagePeriod {
@@ -2928,6 +3030,192 @@ class AppState extends ChangeNotifier {
       }
     }
     return rows.join('\n');
+  }
+
+  // ────── CSVインポート ──────
+  // exportShiftsCsv() が書き出した形式のシフトCSVを取り込む。
+  // 💡 CSVには交通費・深夜/残業/休日の割増が載らないので、「給与」列から逆算して
+  //    復元する（そうしないと取り込んだ月の収入がズレる）。
+  CsvImportResult importShiftsCsv(String text, {bool replace = false}) {
+    final lines = const LineSplitter()
+        .convert(text.replaceAll('﻿', ''))
+        .where((l) => l.trim().isNotEmpty)
+        .toList();
+    if (lines.isEmpty) return const CsvImportResult();
+
+    // ヘッダー列名 → 位置。未知のヘッダーなら書き出し順の固定位置にフォールバック。
+    const names = ['日付', '勤務先', '開始', '終了', '休憩(分)', '時給', '給与'];
+    final header = _splitCsvLine(lines.first).map((e) => e.trim()).toList();
+    final idx = <String, int>{};
+    for (var i = 0; i < header.length; i++) {
+      idx[header[i]] = i;
+    }
+    final hasHeader = idx.containsKey('日付') && idx.containsKey('開始');
+    for (var i = 0; i < names.length; i++) {
+      idx.putIfAbsent(names[i], () => i);
+    }
+
+    var failed = 0;
+    final parsed = <_CsvShiftRow>[];
+    for (final line in lines.skip(hasHeader ? 1 : 0)) {
+      final f = _splitCsvLine(line);
+      String cell(String name) {
+        final i = idx[name]!;
+        return i < f.length ? f[i].trim() : '';
+      }
+
+      final start = DateTime.tryParse(cell('開始'));
+      final end = DateTime.tryParse(cell('終了'));
+      final wp = cell('勤務先');
+      if (start == null || end == null || wp.isEmpty || !end.isAfter(start)) {
+        failed++;
+        continue;
+      }
+      parsed.add(_CsvShiftRow(
+        workplace: wp,
+        start: start,
+        end: end,
+        breakMinutes: int.tryParse(cell('休憩(分)')) ?? 0,
+        hourlyWage: int.tryParse(cell('時給')) ?? 0,
+        earnings: int.tryParse(cell('給与')) ?? 0,
+      ));
+    }
+    if (parsed.isEmpty) return CsvImportResult(failed: failed);
+
+    // 勤務先ごとに交通費・割増を推定
+    final byWorkplace = <String, List<_CsvShiftRow>>{};
+    for (final r in parsed) {
+      byWorkplace.putIfAbsent(r.workplace, () => []).add(r);
+    }
+    final fits = {
+      for (final e in byWorkplace.entries) e.key: _fitWageSettings(e.value)
+    };
+
+    if (replace) shifts.clear();
+
+    // 既存シフトの重複判定キー（日付+勤務先+開始+終了）
+    String keyOf(String dateKey, ShiftData s) =>
+        '$dateKey|${s.workplace}|${s.start.toIso8601String()}|${s.end.toIso8601String()}';
+    final existing = <String>{};
+    shifts.forEach((k, list) {
+      for (final s in list) {
+        existing.add(keyOf(k, s));
+      }
+    });
+
+    var imported = 0, skipped = 0, mismatched = 0;
+    for (final r in parsed) {
+      final fit = fits[r.workplace]!;
+      final s = ShiftData(
+        workplace: r.workplace,
+        hourlyWage: r.hourlyWage,
+        start: r.start,
+        end: r.end,
+        breakMinutes: r.breakMinutes,
+        transportPerDay: fit.transportPerDay,
+        nightMultiplier: fit.nightMultiplier,
+        overtimeMultiplier: fit.overtimeMultiplier,
+        holidayMultiplier: fit.holidayMultiplier,
+      );
+      final dateKey = DateFormat('yyyy-MM-dd').format(r.start);
+      final k = keyOf(dateKey, s);
+      if (existing.contains(k)) {
+        skipped++;
+        continue;
+      }
+      existing.add(k);
+      shifts.putIfAbsent(dateKey, () => []).add(s);
+      imported++;
+      if (r.earnings > 0 && s.earnings != r.earnings) mismatched++;
+    }
+
+    // 新しい勤務先は推定した給料情報つきで作る（以後の手入力にも効く）
+    for (final entry in byWorkplace.entries) {
+      if (workplaces.any((w) => w.name == entry.key)) continue;
+      final fit = fits[entry.key]!;
+      final latest = entry.value.reduce((a, b) => a.start.isAfter(b.start) ? a : b);
+      workplaces.add(Workplace(
+        id: newWorkplaceId(),
+        name: entry.key,
+        colorValue:
+            workplaceColorPalette[workplaces.length % workplaceColorPalette.length]
+                .toARGB32(),
+        wagePeriods: [
+          WagePeriod(
+            hourlyWage: latest.hourlyWage,
+            transportPerDay: fit.transportPerDay,
+            nightMultiplier: fit.nightMultiplier,
+            overtimeMultiplier: fit.overtimeMultiplier,
+            holidayMultiplier: fit.holidayMultiplier,
+          ),
+        ],
+      ));
+    }
+
+    _migrateWorkplaces(); // workplaceId の紐付け
+    saveData();
+    notifyListeners();
+    return CsvImportResult(
+      imported: imported,
+      skipped: skipped,
+      failed: failed,
+      mismatched: mismatched,
+    );
+  }
+
+  // 💡 給与列に一致するように交通費と各割増を総当たりで推定する。
+  //    倍率は 1.00〜2.00 の 0.05 刻み。該当行が無い項目はループごと省くので軽い。
+  _WageFit _fitWageSettings(List<_CsvShiftRow> rows) {
+    final hasNight = rows.any((r) => r.nightHours > 0);
+    final hasOvertime = rows.any((r) => r.hours > 8);
+    final hasHoliday = rows.any((r) => r.isWeekend);
+    const steps = 21; // 1.00, 1.05, ... 2.00
+
+    _WageFit? best;
+    var bestHits = -1, bestSimple = 99, bestTransport = 1 << 30;
+    for (var a = 0; a < (hasNight ? steps : 1); a++) {
+      final nm = 1.0 + a * 0.05;
+      for (var b = 0; b < (hasOvertime ? steps : 1); b++) {
+        final om = 1.0 + b * 0.05;
+        for (var c = 0; c < (hasHoliday ? steps : 1); c++) {
+          final hm = 1.0 + c * 0.05;
+          // 残差（= 交通費の候補）の最頻値をとる
+          final counts = <int, int>{};
+          for (final r in rows) {
+            final diff = r.earnings - r.wageWith(nm, om, hm);
+            if (diff < 0) continue;
+            counts[diff] = (counts[diff] ?? 0) + 1;
+          }
+          if (counts.isEmpty) continue;
+          var tp = 0, hits = 0;
+          counts.forEach((k, v) {
+            if (v > hits || (v == hits && k < tp)) {
+              tp = k;
+              hits = v;
+            }
+          });
+          final simple = (nm > 1.0001 ? 1 : 0) +
+              (om > 1.0001 ? 1 : 0) +
+              (hm > 1.0001 ? 1 : 0);
+          // 一致数が多い → 設定が単純 → 交通費が小さい、の順に良いとみなす
+          final better = hits > bestHits ||
+              (hits == bestHits &&
+                  (simple < bestSimple ||
+                      (simple == bestSimple && tp < bestTransport)));
+          if (!better) continue;
+          bestHits = hits;
+          bestSimple = simple;
+          bestTransport = tp;
+          best = _WageFit(
+            transportPerDay: tp,
+            nightMultiplier: nm,
+            overtimeMultiplier: om,
+            holidayMultiplier: hm,
+          );
+        }
+      }
+    }
+    return best ?? const _WageFit();
   }
 
   // ────── 自動バックアップ ──────
