@@ -2932,6 +2932,35 @@ class AppState extends ChangeNotifier {
     await prefs.setString('saved_card_closing_days', jsonEncode(cardClosingDays));
   }
 
+  // 💡 カード選択に出す一覧。設定で登録したカードに加え、
+  //   既存の明細・分割・定期に出てくるカード名も拾う。
+  //   （設定で追加したのに選べない／過去データのカードが選べない、を防ぐ）
+  static const String kOtherCard = 'その他';
+
+  List<String> get cardChoices {
+    final out = <String>[];
+    void add(String? name) {
+      final n = (name ?? '').trim();
+      if (n.isEmpty || n == kOtherCard) return;
+      if (!out.contains(n)) out.add(n);
+    }
+
+    for (final k in cardPaymentDays.keys) {
+      add(k);
+    }
+    for (final p in payments) {
+      add(p.cardName);
+    }
+    for (final i in installments) {
+      add(i.cardName);
+    }
+    for (final s in subscriptions) {
+      if (s.isCardPayment) add(s.method);
+    }
+    out.add(kOtherCard); // 「その他」は必ず最後
+    return out;
+  }
+
   // カードの締め日（未設定＝31＝月末締め）
   int closingDayOf(String cardName) => cardClosingDays[cardName] ?? 31;
 

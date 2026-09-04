@@ -7,8 +7,6 @@ import '../card_styles.dart';
 class CardSettingsScreen extends StatelessWidget {
   const CardSettingsScreen({super.key});
 
-  static const _cards = ['三井OLIVE', 'Amazonマスター', '楽天カード', 'PayPayカード', 'メルカード'];
-
   void _edit(BuildContext context, AppState appState, String card) {
     final ctrl = TextEditingController(text: appState.interestRateOf(card).toStringAsFixed(1));
     showDialog(
@@ -46,7 +44,10 @@ class CardSettingsScreen extends StatelessWidget {
             child: Text('分割払いに変換するときの手数料計算に使う年率です。',
                 style: TextStyle(color: Colors.grey)),
           ),
-          ..._cards.map((c) {
+          // 💡 設定で追加したカードも金利を設定できるように AppState から取る
+          ...appState.cardChoices
+              .where((c) => c != AppState.kOtherCard)
+              .map((c) {
             final style = cardStyleOf(c);
             return Card(
               child: ListTile(

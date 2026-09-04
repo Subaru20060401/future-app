@@ -7,15 +7,6 @@ import '../widgets/gmail_refresh_button.dart';
 import '../widgets/swipe_to_delete.dart';
 import 'trash_screen.dart';
 
-const List<String> kCardNames = [
-  '三井OLIVE',
-  'Amazonマスター',
-  '楽天カード',
-  'PayPayカード',
-  'メルカード',
-  'その他',
-];
-
 class PaymentScreen extends StatefulWidget {
   const PaymentScreen({super.key});
 
@@ -334,7 +325,9 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
   }
 
   void _addCard(AppState appState) {
-    String card = kCardNames.first;
+    // 💡 設定で追加したカードも選べるように、一覧は AppState から取る
+    final cards = appState.cardChoices;
+    String card = cards.first;
     final amountCtrl = TextEditingController();
     DateTime date = DateTime.now();
     showDialog(
@@ -348,7 +341,7 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
               DropdownButton<String>(
                 value: card,
                 isExpanded: true,
-                items: kCardNames.map((c) => DropdownMenuItem(value: c, child: Text(c))).toList(),
+                items: cards.map((c) => DropdownMenuItem(value: c, child: Text(c))).toList(),
                 onChanged: (v) => setLocal(() => card = v!),
               ),
               TextField(controller: amountCtrl, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: '請求額(円)')),
@@ -614,7 +607,7 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
                       selected: method == kManualPayMethod,
                       onSelected: (_) => setLocal(() => method = kManualPayMethod),
                     ),
-                    ...kCardNames.map((c) => ChoiceChip(
+                    ...appState.cardChoices.map((c) => ChoiceChip(
                           label: Text(c, style: const TextStyle(fontSize: 12)),
                           selected: method == c,
                           onSelected: (_) => setLocal(() => method = c),
@@ -684,7 +677,7 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
                     selected: method == kManualPayMethod,
                     onSelected: (_) => setLocal(() => method = kManualPayMethod),
                   ),
-                  ...kCardNames.map((c) => ChoiceChip(
+                  ...appState.cardChoices.map((c) => ChoiceChip(
                         label: Text(c, style: const TextStyle(fontSize: 12)),
                         selected: method == c,
                         onSelected: (_) => setLocal(() => method = c),
