@@ -917,6 +917,11 @@ class AppState extends ChangeNotifier {
     'メルカード': 26, // 三井と同じ
   };
 
+  // 💡 カード別の締め日（1〜28、31＝月末締め）。未設定＝31（従来どおり暦月で集計）。
+  //   締め日を月末以外にすると、その月の引き落としは
+  //   「前々月の締め日の翌日 〜 前月の締め日」の利用ぶんになる。
+  Map<String, int> cardClosingDays = {};
+
   final Map<String, List<TodoData>> todos = {};
   List<Payment> payments = [];
   List<Installment> installments = [];
@@ -2751,15 +2756,38 @@ class AppState extends ChangeNotifier {
   List<({String label, int amount, int colorValue})> drawBreakdownOf(DateTime payMonth) {
     final useMonth = DateTime(payMonth.year, payMonth.month - 1);
     final lastDay = DateTime(payMonth.year, payMonth.month + 1, 0).day;
-    return expenseBreakdownOf(useMonth)
-        .where((e) => !_excludedFromDraw(e.label))
-        .where((e) {
-          final day = _drawDayOf(e.label).clamp(1, lastDay);
-          // 土日祝なら翌営業日にずれる
-          final date = nextBusinessDay(DateTime(payMonth.year, payMonth.month, day));
-          return _forecastInclude(date);
-        })
-        .toList();
+
+    // 二重計上ゲート（引き落とし日が残高の編集日より後か）
+    bool afterEdit(String label) {
+      final day = _drawDayOf(label).clamp(1, lastDay);
+      // 土日祝なら翌営業日にずれる
+      return _forecastInclude(
+          nextBusinessDay(DateTime(payMonth.year, payMonth.month, day)));
+    }
+
+    final out = <({String label, int amount, int colorValue})>[];
+
+    // 💡 締め日を月末以外にしたカードは、暦月ではなく締め期間で集計する。
+    //   （月末締めのカードと定期/分割は従来どおり「前月の支出詳細」を使う）
+    final byPeriod = <String>{};
+    for (final card in cardPaymentDays.keys) {
+      if (isMonthEndClosing(card) || _excludedFromDraw(card)) continue;
+      byPeriod.add(card);
+      if (!afterEdit(card)) continue;
+      final amount = cardUsageInClosingPeriod(card, payMonth);
+      if (amount <= 0) continue;
+      out.add((label: card, amount: amount, colorValue: cardColorOf(card).toARGB32()));
+    }
+
+    for (final e in expenseBreakdownOf(useMonth)) {
+      if (byPeriod.contains(e.label)) continue; // 締め期間で集計済み
+      if (_excludedFromDraw(e.label)) continue;
+      if (!afterEdit(e.label)) continue;
+      out.add(e);
+    }
+
+    out.sort((a, b) => b.amount.compareTo(a.amount));
+    return out;
   }
 
   // n月に引き落とされる合計（＝ n-1月の支出詳細・除外分とゲート済みを除く）。
@@ -2901,6 +2929,72 @@ class AppState extends ChangeNotifier {
   Future<void> _saveCardPaymentDays() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('saved_card_payment_days', jsonEncode(cardPaymentDays));
+    await prefs.setString('saved_card_closing_days', jsonEncode(cardClosingDays));
+  }
+
+  // カードの締め日（未設定＝31＝月末締め）
+  int closingDayOf(String cardName) => cardClosingDays[cardName] ?? 31;
+
+  bool isMonthEndClosing(String cardName) => closingDayOf(cardName) >= 31;
+
+  void setCardClosingDay(String cardName, int day) {
+    cardClosingDays[cardName] = day.clamp(1, 31);
+    _saveCardPaymentDays();
+    notifyListeners();
+  }
+
+  // 締め日の表示用ラベル
+  String closingLabelOf(String cardName) =>
+      isMonthEndClosing(cardName) ? '月末締め' : '${closingDayOf(cardName)}日締め';
+
+  // 💡 内訳に出す表示名。締め日が月末以外のカードは対象期間も添える
+  //   （「なぜこの金額なのか」が分からなくなるため）。
+  String drawLabelOf(String label, DateTime payMonth) {
+    if (!cardPaymentDays.containsKey(label) || isMonthEndClosing(label)) return label;
+    final r = cardClosingPeriodOf(label, payMonth);
+    return '$label（${r.start.month}/${r.start.day}〜${r.end.month}/${r.end.day}利用）';
+  }
+
+  // 💡 payMonth に引き落とされる利用の対象期間。
+  //   締め日 C なら「前々月C日の翌日 〜 前月C日」。
+  //   月末締め(31)ならちょうど前月1日〜前月末日になり、従来の暦月集計と一致する。
+  ({DateTime start, DateTime end}) cardClosingPeriodOf(String cardName, DateTime payMonth) {
+    final c = closingDayOf(cardName);
+    DateTime closingIn(DateTime m) {
+      final last = DateTime(m.year, m.month + 1, 0).day;
+      return DateTime(m.year, m.month, c > last ? last : c);
+    }
+
+    final endMonth = DateTime(payMonth.year, payMonth.month - 1);
+    final end = closingIn(endMonth);
+    final start = closingIn(DateTime(endMonth.year, endMonth.month - 1))
+        .add(const Duration(days: 1));
+    return (start: start, end: end);
+  }
+
+  // 💡 締め期間で集計したカード利用額。
+  //   銀行の引落確定メールが来ている月は、その確定額を正本にする（従来と同じ扱い）。
+  int cardUsageInClosingPeriod(String cardName, DateTime payMonth) {
+    var bank = 0;
+    for (final p in payments) {
+      if (p.source != PaymentSource.bank) continue;
+      if (p.cardName != cardName) continue;
+      if (p.paymentDate.year == payMonth.year && p.paymentDate.month == payMonth.month) {
+        bank += p.amount;
+      }
+    }
+    if (bank > 0) return bank;
+
+    final r = cardClosingPeriodOf(cardName, payMonth);
+    var total = 0;
+    for (final p in payments) {
+      if (p.source == PaymentSource.bank) continue;
+      if (p.cardName != cardName) continue;
+      final d = DateTime(p.paymentDate.year, p.paymentDate.month, p.paymentDate.day);
+      if (d.isBefore(r.start) || d.isAfter(r.end)) continue;
+      total += p.amount;
+    }
+    return total;
   }
 
   // 指定月の引き落とし日セット（ドット表示用）
@@ -2939,7 +3033,7 @@ class AppState extends ChangeNotifier {
     final income = incomeForecastIn(now);
     if (income != 0) out['給料入金（編集後）'] = income;
     for (final e in drawBreakdownOf(now)) {
-      out[e.label] = -e.amount;
+      out[drawLabelOf(e.label, now)] = -e.amount;
     }
     return out;
   }
@@ -2951,7 +3045,7 @@ class AppState extends ChangeNotifier {
     final income = incomeForecastIn(next);
     if (income != 0) out['給料入金'] = income;
     for (final e in drawBreakdownOf(next)) {
-      out[e.label] = -e.amount;
+      out[drawLabelOf(e.label, next)] = -e.amount;
     }
     return out;
   }
@@ -2963,7 +3057,7 @@ class AppState extends ChangeNotifier {
     final income = incomeForecastIn(m2);
     if (income != 0) out['給料入金'] = income;
     for (final e in drawBreakdownOf(m2)) {
-      out[e.label] = -e.amount;
+      out[drawLabelOf(e.label, m2)] = -e.amount;
     }
     return out;
   }
@@ -2989,6 +3083,7 @@ class AppState extends ChangeNotifier {
       'actualSalariesByWp': actualSalariesByWp,
       'balanceUpdatedAt': balanceUpdatedAt?.toIso8601String(),
       'cardPaymentDays': cardPaymentDays,
+      'cardClosingDays': cardClosingDays,
       'events': events.map((k, v) => MapEntry(k, v.map((e) => e.toJson()).toList())),
       'todos': todos.map((k, v) => MapEntry(k, v.map((e) => e.toJson()).toList())),
       'payments': payments.map((e) => e.toJson()).toList(),
@@ -3302,6 +3397,10 @@ class AppState extends ChangeNotifier {
     (map['cardPaymentDays'] as Map?)?.forEach((k, v) {
       if (v is int) cardPaymentDays[k] = v;
     });
+    cardClosingDays.clear();
+    (map['cardClosingDays'] as Map?)?.forEach((k, v) {
+      if (v is int) cardClosingDays[k] = v;
+    });
 
     events.clear();
     (map['events'] as Map?)?.forEach((k, v) =>
@@ -3608,6 +3707,12 @@ class AppState extends ChangeNotifier {
     if (cpdStr != null) {
       (jsonDecode(cpdStr) as Map<String, dynamic>).forEach((k, v) {
         if (v is int) cardPaymentDays[k] = v;
+      });
+    }
+    final ccdStr = prefs.getString('saved_card_closing_days');
+    if (ccdStr != null) {
+      (jsonDecode(ccdStr) as Map<String, dynamic>).forEach((k, v) {
+        if (v is int) cardClosingDays[k] = v;
       });
     }
     final lbaStr = prefs.getString('saved_last_backup_at');

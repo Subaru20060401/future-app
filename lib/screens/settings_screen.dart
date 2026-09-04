@@ -131,11 +131,14 @@ class SettingsScreen extends StatelessWidget {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const Text('カード引き落とし日', style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold)),
+              const Text('カードの締め日・引き落とし日',
+                  style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold)),
               const SizedBox(height: 4),
               const Text(
-                  '毎月何日に引き落とされるか設定します。カレンダーに表示され、'
-                  'その日が過ぎると「口座から引く」お知らせが出ます'
+                  '締め日＝どこまでの利用が次の引き落としに入るか。'
+                  '引き落とし日＝毎月何日に口座から引かれるか。\n'
+                  '月末締めなら「前月1日〜前月末日」の利用が当月の引き落としになります。'
+                  '15日締めなら「前々月16日〜前月15日」ぶんです'
                   '（銀行の事前お知らせメールが届いている場合は、そちらの金額を優先）。',
                   style: TextStyle(fontSize: 12, color: Colors.black54)),
               const SizedBox(height: 12),
@@ -143,31 +146,15 @@ class SettingsScreen extends StatelessWidget {
                 contentPadding: EdgeInsets.zero,
                 leading: const Icon(Icons.credit_card, size: 20, color: Colors.red),
                 title: Text(e.key),
+                subtitle: Text(
+                  '${appState.closingLabelOf(e.key)} → 毎月${e.value}日 引き落とし',
+                  style: const TextStyle(fontSize: 12),
+                ),
                 trailing: TextButton(
-                  child: Text('毎月${e.value}日', style: const TextStyle(fontSize: 15)),
+                  child: const Text('変更', style: TextStyle(fontSize: 15)),
                   onPressed: () async {
-                    final ctrl = TextEditingController(text: e.value.toString());
-                    final ok = await showDialog<bool>(
-                      context: context,
-                      builder: (_) => AlertDialog(
-                        title: Text('${e.key} 引き落とし日'),
-                        content: TextField(
-                          controller: ctrl,
-                          keyboardType: TextInputType.number,
-                          decoration: const InputDecoration(labelText: '日（1〜31）', suffixText: '日'),
-                          autofocus: true,
-                        ),
-                        actions: [
-                          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('キャンセル')),
-                          ElevatedButton(onPressed: () => Navigator.pop(context, true), child: const Text('保存')),
-                        ],
-                      ),
-                    );
-                    if (ok == true) {
-                      final day = int.tryParse(ctrl.text) ?? e.value;
-                      appState.setCardPaymentDay(e.key, day.clamp(1, 31));
-                      setLocal(() {});
-                    }
+                    await _editCardDays(context, appState, e.key);
+                    setLocal(() {});
                   },
                 ),
               )),
@@ -177,6 +164,7 @@ class SettingsScreen extends StatelessWidget {
                 title: const Text('カードを追加'),
                 onTap: () async {
                   final nameCtrl = TextEditingController();
+                  final closeCtrl = TextEditingController(text: '31');
                   final dayCtrl = TextEditingController(text: '27');
                   final ok = await showDialog<bool>(
                     context: context,
@@ -186,6 +174,9 @@ class SettingsScreen extends StatelessWidget {
                         mainAxisSize: MainAxisSize.min,
                         children: [
                           TextField(controller: nameCtrl, decoration: const InputDecoration(labelText: 'カード名')),
+                          TextField(controller: closeCtrl, keyboardType: TextInputType.number,
+                              decoration: const InputDecoration(
+                                  labelText: '締め日（31＝月末締め）', suffixText: '日')),
                           TextField(controller: dayCtrl, keyboardType: TextInputType.number,
                               decoration: const InputDecoration(labelText: '引き落とし日', suffixText: '日')),
                         ],
@@ -199,6 +190,8 @@ class SettingsScreen extends StatelessWidget {
                   if (ok == true && nameCtrl.text.isNotEmpty) {
                     final day = int.tryParse(dayCtrl.text) ?? 27;
                     appState.setCardPaymentDay(nameCtrl.text, day.clamp(1, 31));
+                    appState.setCardClosingDay(
+                        nameCtrl.text, int.tryParse(closeCtrl.text) ?? 31);
                     setLocal(() {});
                   }
                 },
@@ -208,6 +201,61 @@ class SettingsScreen extends StatelessWidget {
         ),
       ),
     );
+  }
+
+  // 💡 カード1枚の「締め日」と「引き落とし日」をまとめて編集する。
+  //   締め日は 31＝月末締め。引き落とし日が土日祝なら翌営業日にずれる（表示側で調整）。
+  Future<void> _editCardDays(
+      BuildContext context, AppState appState, String card) async {
+    final closeCtrl =
+        TextEditingController(text: appState.closingDayOf(card).toString());
+    final dayCtrl =
+        TextEditingController(text: (appState.cardPaymentDays[card] ?? 27).toString());
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: Text(card),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: closeCtrl,
+              keyboardType: TextInputType.number,
+              autofocus: true,
+              decoration: const InputDecoration(
+                labelText: '締め日（1〜31、31＝月末締め）',
+                suffixText: '日',
+                helperText: 'ここまでの利用が次の引き落としに入ります',
+              ),
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: dayCtrl,
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(
+                labelText: '引き落とし日（1〜31）',
+                suffixText: '日',
+                helperText: '土日祝なら翌営業日にずれます',
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('キャンセル')),
+          ElevatedButton(
+              onPressed: () => Navigator.pop(context, true), child: const Text('保存')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    appState.setCardClosingDay(
+        card, int.tryParse(closeCtrl.text) ?? appState.closingDayOf(card));
+    appState.setCardPaymentDay(
+        card,
+        (int.tryParse(dayCtrl.text) ?? appState.cardPaymentDays[card] ?? 27)
+            .clamp(1, 31));
   }
 
   // バックアップから復元（自動保存ファイル一覧）
@@ -609,7 +657,7 @@ class SettingsScreen extends StatelessWidget {
           ),
           ListTile(
             leading: const Icon(Icons.credit_card, color: Colors.red),
-            title: const Text('カード引き落とし日の設定'),
+            title: const Text('カードの締め日・引き落とし日'),
             subtitle: const Text('カレンダー表示と、引き落としのお知らせに使います'),
             trailing: const Icon(Icons.chevron_right),
             onTap: () => _showCardPaymentDaySettings(context, appState),
