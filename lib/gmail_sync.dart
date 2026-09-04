@@ -58,7 +58,22 @@ PaymentSource _toSource(MailKind kind) {
 //   過去分がほしいときだけ 設定→「過去2年分をすべて取り込み直す」= full:true。
 //   ⚠️ 初回だけ自動で2年分…にすると数千通ぶんのリクエストで
 //      クォータ超過(403)＆数分待ちになるため、自動フル取得はしない。
-Future<GmailSyncResult> syncGmail(AppState appState, {bool full = false}) async {
+// 💡 起動時の自動同期とユーザーの更新ボタンが重なると、同じ取得を2回走らせて
+//   スロットリングの順番待ちが倍になる（＝くるくるが倍長くなる）。実行中は相乗りさせる。
+Future<GmailSyncResult>? _inFlight;
+
+Future<GmailSyncResult> syncGmail(AppState appState, {bool full = false}) {
+  final running = _inFlight;
+  if (running != null) return running;
+  final f = _syncGmail(appState, full: full);
+  _inFlight = f;
+  f.whenComplete(() {
+    if (identical(_inFlight, f)) _inFlight = null;
+  });
+  return f;
+}
+
+Future<GmailSyncResult> _syncGmail(AppState appState, {bool full = false}) async {
   final gmail = GmailService.instance;
   if (!gmail.isSignedIn) {
     final ok = await gmail.signInSilently();

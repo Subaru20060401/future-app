@@ -722,6 +722,20 @@ class SettingsScreen extends StatelessWidget {
             },
           ),
           ListTile(
+            dense: true,
+            leading: const Icon(Icons.cleaning_services, color: Colors.grey),
+            title: const Text('メールの解析キャッシュを消す'),
+            subtitle: const Text('取り込み内容がおかしいときに。次回の更新が遅くなります'),
+            onTap: () async {
+              await GmailService.instance.clearCache();
+              if (context.mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('キャッシュを消しました')),
+                );
+              }
+            },
+          ),
+          ListTile(
             leading: const Icon(Icons.history, color: Colors.indigo),
             title: const Text('過去2年分をすべて取り込み直す'),
             subtitle: const Text('時間がかかります（漏れた過去分もまとめて取得）'),

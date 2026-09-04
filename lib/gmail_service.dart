@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:extension_google_sign_in_as_googleapis_auth/extension_google_sign_in_as_googleapis_auth.dart';
 import 'package:googleapis/gmail/v1.dart' as gmail;
+import 'package:shared_preferences/shared_preferences.dart';
 
 // 💡 メールの種別: 利用通知 / カード請求予定 / 銀行引落確定
 enum MailKind { usage, billing, bank }
@@ -39,6 +40,97 @@ class ParsedPayment {
     required this.sourceId,
     this.note = '',
   });
+}
+
+// 💡 メール1通ぶんの解析結果キャッシュ。金額をそのまま持つので、
+//   往復（toJson/fromJson）が壊れると明細が化ける。test/gmail_cache_test.dart で担保する。
+//   payments が空でも「解析済み（何も出なかった）」という意味を持つので保存する。
+class GmailCacheEntry {
+  final int epochMs; // メールの受信日時（古いものを間引くときに使う）
+  final List<ParsedPayment> payments;
+  final AmazonFact? amazon; // Amazonの突合用の中間データ
+
+  const GmailCacheEntry({
+    required this.epochMs,
+    this.payments = const [],
+    this.amazon,
+  });
+
+  Map<String, dynamic> toJson() => {
+        't': epochMs,
+        if (payments.isNotEmpty)
+          'p': [
+            for (final p in payments)
+              {
+                'c': p.cardName,
+                'm': p.amount,
+                'd': p.date.millisecondsSinceEpoch,
+                's': p.snippet.length > 120 ? p.snippet.substring(0, 120) : p.snippet,
+                'k': p.kind.index,
+                'i': p.sourceId,
+                'n': p.note,
+              }
+          ],
+        if (amazon != null) 'a': amazon!.toJson(),
+      };
+
+  static GmailCacheEntry? fromJson(Map<String, dynamic> j) {
+    final t = j['t'];
+    if (t is! int) return null;
+    return GmailCacheEntry(
+      epochMs: t,
+      payments: [
+        for (final e in (j['p'] as List? ?? const []))
+          ParsedPayment(
+            cardName: e['c'] as String? ?? '',
+            amount: e['m'] as int? ?? 0,
+            date: DateTime.fromMillisecondsSinceEpoch(e['d'] as int? ?? t),
+            snippet: e['s'] as String? ?? '',
+            kind: MailKind.values[(e['k'] as int? ?? 0).clamp(0, MailKind.values.length - 1)],
+            sourceId: e['i'] as String? ?? '',
+            note: e['n'] as String? ?? '',
+          )
+      ],
+      amazon: j['a'] is Map<String, dynamic>
+          ? AmazonFact.fromJson(j['a'] as Map<String, dynamic>)
+          : null,
+    );
+  }
+}
+
+// 💡 Amazonは「注文メールの金額」と「発送メールの日付」を注文番号で突き合わせるため、
+//   支払いそのものではなく、メールから読んだ材料をキャッシュする。
+class AmazonFact {
+  final String orderNo; // 注文番号（空＝読めなかった）
+  final int amount; // 0＝このメールからは金額不明
+  final int epochMs; // 発送日/注文日
+  final String snippet;
+  final String note;
+
+  const AmazonFact({
+    required this.orderNo,
+    this.amount = 0,
+    required this.epochMs,
+    this.snippet = '',
+    this.note = '',
+  });
+
+  Map<String, dynamic> toJson() => {
+        'o': orderNo,
+        'm': amount,
+        't': epochMs,
+        if (snippet.isNotEmpty)
+          's': snippet.length > 120 ? snippet.substring(0, 120) : snippet,
+        if (note.isNotEmpty) 'n': note,
+      };
+
+  static AmazonFact fromJson(Map<String, dynamic> j) => AmazonFact(
+        orderNo: j['o'] as String? ?? '',
+        amount: j['m'] as int? ?? 0,
+        epochMs: j['t'] as int? ?? 0,
+        snippet: j['s'] as String? ?? '',
+        note: j['n'] as String? ?? '',
+      );
 }
 
 // 💡 カードごとの検索ルール（Gmailの検索クエリ + 表示名）
@@ -241,62 +333,155 @@ class GmailService {
     final api = gmail.GmailApi(client);
     final results = <ParsedPayment>[];
     _fetchFailures = 0; // 今回の取りこぼし件数を数え直す
+    await _loadCache();
 
-    // ① 各カード：期間内の全メールIDをページングで取得（並列）
-    final ruleIds =
-        await Future.wait(_rules.map((r) => _listIds(api, '(${r.query}) $_window')));
+    // ① 各カード・銀行：期間内の全メールIDをページングで取得（並列）
+    final listed = await Future.wait([
+      ..._rules.map((r) => _listIds(api, '(${r.query}) $_window')),
+      _listIds(api, '($_bankQuery) $_window'),
+    ]);
+    final ruleIds = listed.sublist(0, _rules.length);
+    final bankIds = listed.last;
+
+    // ② 未キャッシュのメールだけ本文を取って解析（ここが唯一の重い処理）
     for (var ri = 0; ri < _rules.length; ri++) {
       final rule = _rules[ri];
-      for (final full in await _getByIds(api, ruleIds[ri])) {
-        // 💡 件名が宣伝・キャンペーンなら無条件でスキップ
-        if (_isPromotional(_subject(full))) continue;
-
-        final id = full.id ?? '';
-        final subject = _subject(full);
-        final text = '${full.snippet ?? ''}\n${_extractBody(full)}';
-
-        // 💡 カードごとに専用パーサーへ分岐
-        switch (rule.name) {
-          case '楽天カード':
-            // 利用明細（■利用日/■利用金額ブロック）から複数件抽出。
-            // 請求予定（お支払金額のご案内）はブロックが無いので自然に0件になる。
-            results.addAll(extractRakutenTransactions(text, id));
-            break;
-          case 'メルカード':
-            final p = (subject.contains('ご購入') || text.contains('ご購入'))
-                ? extractMercariPurchase(text, id, _internalDate(full) ?? DateTime.now())
-                : extractMercardUsage(text, id);
-            if (p != null) results.add(p);
-            break;
-          default: // 三井住友 / PayPayカード
-            if (rule.name == '三井住友' && !_isTransaction(text)) continue;
-            final amount = _extractAmount(text, rule.name);
-            if (amount == null) continue;
-            results.add(ParsedPayment(
-              cardName: _resolveCardName(rule.name, text),
-              amount: amount,
-              date: _extractDate(text) ?? _internalDate(full) ?? DateTime.now(),
-              snippet: (full.snippet ?? '').trim(),
-              kind: _detectKind(text),
-              sourceId: id,
-              note: _extractMerchant(text),
-            ));
-        }
-      }
+      await _fillCache(api, ruleIds[ri], '', (full) => GmailCacheEntry(
+            epochMs: (_internalDate(full) ?? DateTime.now()).millisecondsSinceEpoch,
+            payments: _parseRuleMessage(rule, full),
+          ));
+      results.addAll(_cachedPayments(ruleIds[ri]));
     }
 
-    // ② 銀行の引落確定メール（複数カードの明細を含む。正本）
-    final bankIds = await _listIds(api, '($_bankQuery) $_window');
-    for (final full in await _getByIds(api, bankIds)) {
-      results.addAll(
-          _parseBankMail(_extractBody(full), (full.snippet ?? '').trim(), full.id ?? ''));
-    }
+    // ③ 銀行の引落確定メール（複数カードの明細を含む。正本）
+    await _fillCache(api, bankIds, 'b', (full) => GmailCacheEntry(
+          epochMs: (_internalDate(full) ?? DateTime.now()).millisecondsSinceEpoch,
+          payments: _parseBankMail(
+              _extractBody(full), (full.snippet ?? '').trim(), full.id ?? ''),
+        ));
+    results.addAll(_cachedPayments(bankIds, 'b'));
 
-    // ③ Amazon（注文メールの金額 ＋ 発送メールの日付 を注文番号で突合）
+    // ④ Amazon（注文メールの金額 ＋ 発送メールの日付 を注文番号で突合）
     results.addAll(await _fetchAmazon(api));
 
+    await _saveCache();
     return results;
   }
+
+
+  // 💡 カードごとの専用パーサー。キャッシュに入れるため1通→支払い候補のリストにする。
+  List<ParsedPayment> _parseRuleMessage(_CardRule rule, gmail.Message full) {
+    final subject = _subject(full);
+    // 件名が宣伝・キャンペーンなら無条件でスキップ
+    if (_isPromotional(subject)) return const [];
+    final id = full.id ?? '';
+    final text = '${full.snippet ?? ''}\n${_extractBody(full)}';
+
+    switch (rule.name) {
+      case '楽天カード':
+        // 利用明細（■利用日/■利用金額ブロック）から複数件抽出。
+        // 請求予定（お支払金額のご案内）はブロックが無いので自然に0件になる。
+        return extractRakutenTransactions(text, id);
+      case 'メルカード':
+        final p = (subject.contains('ご購入') || text.contains('ご購入'))
+            ? extractMercariPurchase(text, id, _internalDate(full) ?? DateTime.now())
+            : extractMercardUsage(text, id);
+        return p != null ? [p] : const [];
+      default: // 三井住友 / PayPayカード
+        if (rule.name == '三井住友' && !_isTransaction(text)) return const [];
+        final amount = _extractAmount(text, rule.name);
+        if (amount == null) return const [];
+        return [
+          ParsedPayment(
+            cardName: _resolveCardName(rule.name, text),
+            amount: amount,
+            date: _extractDate(text) ?? _internalDate(full) ?? DateTime.now(),
+            snippet: (full.snippet ?? '').trim(),
+            kind: _detectKind(text),
+            sourceId: id,
+            note: _extractMerchant(text),
+          )
+        ];
+    }
+  }
+
+  // ───────── 解析結果のキャッシュ（更新を速くする本体） ─────────
+  // 💡 更新のたびに同じ1〜2ヶ月分の本文を丸ごと再取得していたのが遅さの原因。
+  //   メールIDごとに「解析結果」を保存しておき、2回目以降はID一覧だけ取り直して
+  //   新着ぶんの本文だけ取得する。抽出できなかったメールも「空」で覚えて再取得を防ぐ。
+  static const String _cacheKey = 'saved_gmail_msg_cache_v1';
+  static const int _cacheMaxEntries = 4000;
+  final Map<String, GmailCacheEntry> _cache = {};
+  bool _cacheLoaded = false;
+  bool _cacheDirty = false;
+
+  Future<void> _loadCache() async {
+    if (_cacheLoaded) return;
+    _cacheLoaded = true;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_cacheKey);
+      if (raw == null) return;
+      final map = jsonDecode(raw) as Map<String, dynamic>;
+      map.forEach((k, v) {
+        final e = GmailCacheEntry.fromJson(v as Map<String, dynamic>);
+        if (e != null) _cache[k] = e;
+      });
+    } catch (_) {
+      _cache.clear(); // 壊れていたら捨てて取り直す
+    }
+  }
+
+  Future<void> _saveCache() async {
+    if (!_cacheDirty) return;
+    _cacheDirty = false;
+    try {
+      // 古いものから間引いて上限に収める
+      if (_cache.length > _cacheMaxEntries) {
+        final keys = _cache.keys.toList()
+          ..sort((a, b) => _cache[a]!.epochMs.compareTo(_cache[b]!.epochMs));
+        for (final k in keys.take(_cache.length - _cacheMaxEntries)) {
+          _cache.remove(k);
+        }
+      }
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_cacheKey,
+          jsonEncode({for (final e in _cache.entries) e.key: e.value.toJson()}));
+    } catch (_) {}
+  }
+
+  // キャッシュを捨てて次回に取り直す（設定の「取り込み直す」用）
+  Future<void> clearCache() async {
+    _cache.clear();
+    _cacheLoaded = true;
+    _cacheDirty = false;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove(_cacheKey);
+    } catch (_) {}
+  }
+
+  // 💡 未キャッシュのIDだけ本文を取得して解析し、結果をキャッシュに入れる。
+  //   cacheKey は「同じメールを別の役割でも解析する」Amazon用に接頭辞を付けられる。
+  Future<void> _fillCache(
+    gmail.GmailApi api,
+    List<String> ids,
+    String prefix,
+    GmailCacheEntry Function(gmail.Message full) parse,
+  ) async {
+    final missing = ids.where((id) => !_cache.containsKey('$prefix$id')).toList();
+    if (missing.isEmpty) return;
+    for (final full in await _getByIds(api, missing)) {
+      final id = full.id;
+      if (id == null) continue;
+      _cache['$prefix$id'] = parse(full);
+      _cacheDirty = true;
+    }
+  }
+
+  List<ParsedPayment> _cachedPayments(List<String> ids, [String prefix = '']) => [
+        for (final id in ids) ...(_cache['$prefix$id']?.payments ?? const [])
+      ];
 
   // ───────── レート制限（403 Quota exceeded 対策） ─────────
   // 💡 Gmail APIは「1分あたり15,000ユニット/ユーザー」。messages.list も get も
@@ -325,10 +510,12 @@ class GmailService {
         return await op();
       } catch (e) {
         if (i >= attempts - 1 || !_isRateLimit(e)) rethrow;
-        // 混み合っているので、以降のリクエストのペースごと落とす
-        _nextSlot = DateTime.now().add(delay);
+        // 混み合っているので、以降のリクエストのペースごと落とす。
+        // ただし並列ぶんだけ重ねて伸ばすと止まって見えるので、既に先の予約があれば触らない。
+        final until = DateTime.now().add(delay);
+        if (until.isAfter(_nextSlot)) _nextSlot = until;
         await Future<void>.delayed(delay);
-        delay *= 2;
+        if (delay < const Duration(seconds: 8)) delay *= 2;
       }
     }
   }
@@ -381,20 +568,26 @@ class GmailService {
       }
     }
 
-    // 1周目: 並列取得（同時接続を抑えてレート制限を避ける）
-    for (var i = 0; i < ids.length; i += concurrency) {
-      final end = (i + concurrency) > ids.length ? ids.length : i + concurrency;
-      final chunk = ids.sublist(i, end);
-      final res = await Future.wait(chunk.map(fetch));
-      for (var k = 0; k < chunk.length; k++) {
-        final m = res[k];
+    // 1周目: ワーカー方式で常に concurrency 本を走らせる。
+    // 💡 以前は chunk ごとに Future.wait していたため、1本の遅延で毎回全員が待たされ、
+    //   実効速度がスロットリングの上限まで届かなかった。
+    if (ids.isEmpty) return out;
+    var next = 0;
+    Future<void> worker() async {
+      while (true) {
+        final i = next++;
+        if (i >= ids.length) return;
+        final m = await fetch(ids[i]);
         if (m != null) {
           out.add(m);
         } else {
-          failed.add(chunk[k]);
+          failed.add(ids[i]);
         }
       }
     }
+
+    final workers = concurrency < ids.length ? concurrency : ids.length;
+    await Future.wait(List.generate(workers, (_) => worker()));
 
     // 2周目以降: 失敗分を間隔をあけて再試行（一時的なエラー・レート制限対策）
     for (var attempt = 1; attempt <= 3 && failed.isNotEmpty; attempt++) {
@@ -429,86 +622,119 @@ class GmailService {
       _listIds(api, 'from:shipment-tracking@amazon.co.jp $_window'),
       _listIds(api, 'from:digital-no-reply@amazon.co.jp $_window'), // 電子書籍・デジタル
     ]);
-    // 本文も並列取得
-    final fetched = await Future.wait([
-      _getByIds(api, idLists[0]),
-      _getByIds(api, idLists[1]),
-      _getByIds(api, idLists[2]),
-      _getByIds(api, idLists[3]),
-    ]);
 
-    // キャンセルされた注文番号
-    final cancelled = <String>{};
-    for (final full in fetched[0]) {
-      final text = '${full.snippet ?? ''}\n${_extractBody(full)}';
-      final no = _amazonOrderNo.firstMatch(text)?.group(1);
-      if (no != null) cancelled.add(no);
+    // 💡 同じメールが複数の分類に該当しうるので、キャッシュキーは分類ごとに分ける。
+    //   未キャッシュのぶんだけ本文を取って「突合の材料」に変換して覚える。
+    for (var c = 0; c < idLists.length; c++) {
+      await _fillCache(api, idLists[c], 'a$c',
+          (full) => GmailCacheEntry(
+                epochMs: (_internalDate(full) ?? DateTime.now()).millisecondsSinceEpoch,
+                amazon: _parseAmazonMessage(c, full),
+              ));
     }
 
+    List<AmazonFact> factsOf(int c) => [
+          for (final id in idLists[c])
+            if (_cache['a$c$id']?.amazon != null) _cache['a$c$id']!.amazon!
+        ];
+
+    // キャンセルされた注文番号
+    final cancelled = {
+      for (final f in factsOf(0))
+        if (f.orderNo.isNotEmpty) f.orderNo
+    };
+
     // 注文メール: 注文番号 → 金額・スニペット
-    final orders = <String, ({int amount, String snippet})>{};
-    for (final full in fetched[1]) {
-      final text = '${full.snippet ?? ''}\n${_extractBody(full)}';
-      final no = _amazonOrderNo.firstMatch(text)?.group(1);
-      // Amazon注文メールは「合計」行を金額とする（取引メールなので誤爆しない）
-      final amount = _extractAmount(text, 'Amazonマスター', extraKeywords: const ['合計']);
-      if (no != null && amount != null && !cancelled.contains(no)) {
-        orders[no] = (amount: amount, snippet: (full.snippet ?? '').trim());
-      }
+    final orders = <String, AmazonFact>{};
+    for (final f in factsOf(1)) {
+      if (f.orderNo.isEmpty || f.amount <= 0) continue;
+      if (cancelled.contains(f.orderNo)) continue;
+      orders[f.orderNo] = f;
     }
 
     // 発送メール: 注文番号 → 発送日（メール受信日時）。注文と一致したら確定
     // 💡 分割発送で同じ注文番号が複数届くため、注文番号で1件にまとめる
     final out = <ParsedPayment>[];
     final addedOrders = <String>{};
-    for (final full in fetched[2]) {
-      final text = '${full.snippet ?? ''}\n${_extractBody(full)}';
-      final no = _amazonOrderNo.firstMatch(text)?.group(1);
-      if (no == null || cancelled.contains(no)) continue; // キャンセル分は除外
-      if (!addedOrders.add(no)) continue; // 同じ注文は1回だけ
+    for (final f in factsOf(2)) {
+      if (f.orderNo.isEmpty || cancelled.contains(f.orderNo)) continue; // キャンセル分は除外
+      if (!addedOrders.add(f.orderNo)) continue; // 同じ注文は1回だけ
       // 金額は注文メール（ポイント適用後）優先。無ければ発送メールの「合計」で補完。
-      final amount = orders[no]?.amount ??
-          _extractAmount(text, 'Amazonマスター', extraKeywords: const ['合計']);
+      final amount = orders[f.orderNo]?.amount ?? (f.amount > 0 ? f.amount : null);
       if (amount == null) continue; // どちらからも金額が取れない場合のみスキップ
       out.add(ParsedPayment(
         cardName: 'Amazonマスター',
         amount: amount,
-        date: _internalDate(full) ?? DateTime.now(), // 発送日＝発送メール日時
-        snippet: 'Amazon 発送確定 (注文$no)',
+        date: DateTime.fromMillisecondsSinceEpoch(f.epochMs), // 発送日＝発送メール日時
+        snippet: 'Amazon 発送確定 (注文${f.orderNo})',
         // 💡 支払カードが不明なため「情報のみ」。残高は各カードの請求/引落で計上
         kind: MailKind.usage,
-        sourceId: 'amazon#$no', // 注文番号で一意（分割発送は1回に集約）
+        sourceId: 'amazon#${f.orderNo}', // 注文番号で一意（分割発送は1回に集約）
       ));
     }
 
     // 💡 電子書籍・デジタル注文（発送が無い＝注文時に課金）。金額は「総計」(ポイント適用後)。
-    for (final full in fetched[3]) {
-      final text = _normalizeText('${full.snippet ?? ''}\n${_extractBody(full)}');
-      final no = _amazonOrderNo.firstMatch(text)?.group(1);
-      if (no == null || cancelled.contains(no)) continue;
-      if (!addedOrders.add(no)) continue;
-      final am = RegExp(r'総計\s*[:：]?\s*[¥￥]?\s*([0-9,]+)').firstMatch(text);
-      final amount = am != null ? int.tryParse(am.group(1)!.replaceAll(',', '')) : null;
-      if (amount == null || amount < 1) continue;
-      // 注文日 → 日付（無ければ受信日時）
-      final dm = RegExp(r'注文日\s*[:：]?\s*(\d{4})年(\d{1,2})月(\d{1,2})日').firstMatch(text);
-      final date = dm != null
-          ? DateTime(int.parse(dm.group(1)!), int.parse(dm.group(2)!), int.parse(dm.group(3)!))
-          : (_internalDate(full) ?? DateTime.now());
-      // 商品名（件名「…でのご注文: タイトル」から）
-      final note =
-          RegExp(r'ご注文\s*[:：]\s*(.+)').firstMatch(_subject(full))?.group(1)?.trim() ?? '';
+    for (final f in factsOf(3)) {
+      if (f.orderNo.isEmpty || cancelled.contains(f.orderNo)) continue;
+      if (!addedOrders.add(f.orderNo)) continue;
+      if (f.amount < 1) continue;
       out.add(ParsedPayment(
         cardName: 'Amazonマスター',
-        amount: amount,
-        date: date,
-        snippet: 'Amazon(電子) $note',
+        amount: f.amount,
+        date: DateTime.fromMillisecondsSinceEpoch(f.epochMs),
+        snippet: 'Amazon(電子) ${f.note}',
         kind: MailKind.usage,
-        sourceId: 'amazon#$no',
-        note: note,
+        sourceId: 'amazon#${f.orderNo}',
+        note: f.note,
       ));
     }
     return out;
+  }
+
+  // 💡 Amazonのメール1通から「突合の材料」を読む。
+  //   c: 0=キャンセル / 1=注文確認 / 2=発送 / 3=デジタル
+  AmazonFact _parseAmazonMessage(int c, gmail.Message full) {
+    final received = (_internalDate(full) ?? DateTime.now()).millisecondsSinceEpoch;
+    final raw = '${full.snippet ?? ''}\n${_extractBody(full)}';
+    final text = c == 3 ? _normalizeText(raw) : raw;
+    final no = _amazonOrderNo.firstMatch(text)?.group(1) ?? '';
+
+    switch (c) {
+      case 0: // キャンセル: 注文番号だけ分かればよい
+        return AmazonFact(orderNo: no, epochMs: received);
+      case 1: // 注文確認: 「合計」を金額とする（取引メールなので誤爆しない）
+        return AmazonFact(
+          orderNo: no,
+          amount: _extractAmount(text, 'Amazonマスター', extraKeywords: const ['合計']) ?? 0,
+          epochMs: received,
+          snippet: (full.snippet ?? '').trim(),
+        );
+      case 2: // 発送: 日付が本命。金額は注文メールが無いときの補完用
+        return AmazonFact(
+          orderNo: no,
+          amount: _extractAmount(text, 'Amazonマスター', extraKeywords: const ['合計']) ?? 0,
+          epochMs: received,
+        );
+      default: // デジタル: 「総計」(ポイント適用後) と注文日
+        final am = RegExp(r'総計\s*[:：]?\s*[¥￥]?\s*([0-9,]+)').firstMatch(text);
+        final dm =
+            RegExp(r'注文日\s*[:：]?\s*(\d{4})年(\d{1,2})月(\d{1,2})日').firstMatch(text);
+        return AmazonFact(
+          orderNo: no,
+          amount: am != null ? (int.tryParse(am.group(1)!.replaceAll(',', '')) ?? 0) : 0,
+          epochMs: dm != null
+              ? DateTime(int.parse(dm.group(1)!), int.parse(dm.group(2)!),
+                      int.parse(dm.group(3)!))
+                  .millisecondsSinceEpoch
+              : received,
+          // 商品名（件名「…でのご注文: タイトル」から）
+          note: RegExp(r'ご注文\s*[:：]\s*(.+)')
+                  .firstMatch(_subject(full))
+                  ?.group(1)
+                  ?.trim() ??
+              '',
+        );
+    }
   }
 
   // ───── 銀行メールの明細を解析（複数カード分）─────
