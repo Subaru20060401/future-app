@@ -53,9 +53,20 @@ class GmailService {
   static final GmailService instance = GmailService._();
 
   // Gmail読み取り専用スコープ
-  final GoogleSignIn _googleSignIn = GoogleSignIn(
-    scopes: <String>[gmail.GmailApi.gmailReadonlyScope],
-  );
+  static const List<String> _scopes = <String>[gmail.GmailApi.gmailReadonlyScope];
+  final GoogleSignIn _googleSignIn = GoogleSignIn(scopes: _scopes);
+
+  // 💡 Webはサインインとスコープ許可が別扱いになることがあるので、
+  //   足りなければ明示的にスコープを要求する。
+  Future<void> _ensureScopes() async {
+    if (!kIsWeb) return;
+    try {
+      if (await _googleSignIn.canAccessScopes(_scopes)) return;
+      await _googleSignIn.requestScopes(_scopes);
+    } catch (_) {
+      // 取得できなければ後続のAPI呼び出しでエラーになるのでここでは握りつぶす
+    }
+  }
 
   GoogleSignInAccount? get account => _googleSignIn.currentUser;
   bool get isSignedIn => _googleSignIn.currentUser != null;
@@ -70,7 +81,9 @@ class GmailService {
   ];
 
   Future<GoogleSignInAccount?> signIn() async {
-    return _googleSignIn.signIn();
+    final account = await _googleSignIn.signIn();
+    if (account != null) await _ensureScopes();
+    return account;
   }
 
   Future<void> signOut() => _googleSignIn.signOut();
@@ -110,6 +123,7 @@ class GmailService {
 
   Future<bool> signInSilently() async {
     final acc = await _googleSignIn.signInSilently();
+    if (acc != null) await _ensureScopes();
     return acc != null;
   }
 
