@@ -856,6 +856,14 @@ class SettingsScreen extends StatelessWidget {
             ),
             ListTile(
               dense: true,
+              leading: const Icon(Icons.help_outline, color: Colors.lightBlue),
+              title: const Text('同期の状態を確認'),
+              subtitle: const Text('データが出てこないときはここを見てください'),
+              onTap: () => _showDebug(context, '同期の状態',
+                  () => DriveSync.instance.diagnose(appState)),
+            ),
+            ListTile(
+              dense: true,
               leading: const Icon(Icons.cloud_download, color: Colors.blueGrey),
               title: const Text('ドライブの内容で置き換える'),
               subtitle: const Text('この端末のデータは消えます'),

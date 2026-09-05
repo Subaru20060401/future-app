@@ -5,6 +5,7 @@ import 'package:provider/provider.dart';
 
 import '../app_state.dart';
 import '../gmail_service.dart';
+import 'drive_sync_dialog.dart';
 
 // 連携済みなら true。未連携ならその場で連携を求める（ボタン操作から呼ぶこと）。
 Future<bool> ensureGoogleConnected(BuildContext context) async {
@@ -52,9 +53,15 @@ class _GoogleAccountTileState extends State<GoogleAccountTile> {
 
   Future<void> _connect() async {
     setState(() => _busy = true);
-    await _gmail.requestGmailAccess();
+    final ok = await _gmail.requestGmailAccess();
     await _refresh();
     if (mounted) setState(() => _busy = false);
+    if (!ok || !mounted) return;
+    // 💡 連携できたら、ドライブに自分のデータが置いてないか見に行く。
+    //   （同期OFFのままだと勝手には上げない＝降ろす方向だけ聞く）
+    final appState = context.read<AppState>();
+    await runDriveSync(context, appState,
+        silent: true, pullOnly: !appState.driveSyncEnabled);
   }
 
   Future<void> _disconnect(AppState appState) async {

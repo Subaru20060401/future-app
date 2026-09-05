@@ -39,15 +39,13 @@ class _LoginScreenState extends State<LoginScreen> {
       });
       return;
     }
-    // 💡 ログインできたら、ドライブから自分のデータを降ろす。
-    //   同期がOFFのときは「降ろす方向だけ」。勝手にアップロードはしない。
-    //   （以前は競合状態を取りこぼして、ログインしても何も起きなかった）
-    await runDriveSync(
-      context,
-      widget.appState,
-      silent: true,
-      pullOnly: !widget.appState.driveSyncEnabled,
-    );
+    // 💡 「ログインしたらどの端末でも同じデータ」がこの画面の目的なので、
+    //   ログインできた時点で同期もONにする（スイッチを2つ探させない）。
+    if (!widget.appState.driveSyncEnabled) {
+      await widget.appState.setDriveSyncEnabled(true);
+    }
+    if (!mounted) return;
+    await runDriveSync(context, widget.appState, silent: true);
     if (mounted) widget.onDone();
   }
 

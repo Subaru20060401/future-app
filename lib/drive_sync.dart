@@ -58,7 +58,7 @@ class DriveSyncResult {
       case DriveSyncState.conflict:
         return 'この端末と別の端末の両方が変更されています';
       case DriveSyncState.error:
-        return '同期に失敗: $error';
+        return describeDriveError(error ?? '');
     }
   }
 }
@@ -86,6 +86,30 @@ DriveSyncState decideSyncState({
   if (remoteChanged) return DriveSyncState.remoteNewer;
   if (localChanged) return DriveSyncState.localNewer;
   return DriveSyncState.upToDate;
+}
+
+
+// 💡 同期の失敗は原因が分かれば自分で直せるものが多いので、
+//   生のAPIエラーではなく「次に何をすればいいか」を返す。
+String describeDriveError(String raw) {
+  final lower = raw.toLowerCase();
+  if (lower.contains('has not been used') || lower.contains('is disabled')) {
+    return 'ドライブの利用が有効になっていません。'
+        'Google Cloudのプロジェクトで「Google Drive API」を有効にしてください。';
+  }
+  if (lower.contains('insufficient') ||
+      lower.contains('scope') ||
+      lower.contains('403')) {
+    return 'ドライブへのアクセスが許可されていません。'
+        '設定→Google連携で一度「解除」してから連携し直してください。';
+  }
+  if (lower.contains('401') || lower.contains('unauthorized')) {
+    return 'ログインの有効期限が切れています。設定→Google連携で連携し直してください。';
+  }
+  if (lower.contains('network') || lower.contains('failed to fetch')) {
+    return '通信に失敗しました。電波の良い場所でもう一度お試しください。';
+  }
+  return '同期に失敗: $raw';
 }
 
 class DriveSync {
@@ -189,6 +213,46 @@ class DriveSync {
       return DriveSyncResult(DriveSyncState.error, error: e.toString());
     }
   }
+
+  // 💡 何が起きているのかを端末の画面で確認するための説明文。
+  //   「ログインしたのにデータが出ない」の原因（未連携／Drive未有効／
+  //   そもそもドライブに何も無い）を切り分けられるようにする。
+  Future<String> diagnose(AppState app) async {
+    final sb = StringBuffer();
+    final signedIn = await GmailService.instance.hasGmailAccess();
+    sb.writeln('Google連携: ${signedIn ? 'OK' : '未連携'}');
+    sb.writeln('この端末: ${app.deviceLabel}');
+    sb.writeln('同期の設定: ${app.driveSyncEnabled ? 'ON' : 'OFF'}');
+    sb.writeln('この端末の最終変更: ${_fmt(app.dataUpdatedAt)}');
+    sb.writeln('最後にそろえた時刻: ${_fmt(app.driveSyncedAt)}');
+    sb.writeln('────────────');
+
+    if (!signedIn) {
+      sb.writeln('→ まず「連携する」を押してください。');
+      return sb.toString();
+    }
+    try {
+      final remote = await fetch();
+      if (remote == null) {
+        sb.writeln('ドライブ: まだ何も置かれていません');
+        sb.writeln('→ データがある端末で同期をONにして、先にアップロードしてください。');
+      } else {
+        sb.writeln('ドライブ: あり');
+        sb.writeln('  書き込んだ端末: ${remote.device}');
+        sb.writeln('  更新時刻: ${_fmt(remote.updatedAt)}');
+        sb.writeln('  データ量: ${remote.json.length} 文字');
+        final r = await check(app);
+        sb.writeln('判定: ${r.message}');
+      }
+    } catch (e) {
+      sb.writeln('ドライブの確認に失敗しました');
+      sb.writeln(describeDriveError(e.toString()));
+    }
+    return sb.toString();
+  }
+
+  static String _fmt(DateTime? d) =>
+      d == null ? '—' : d.toLocal().toString().substring(0, 16);
 
   // こちらの内容でドライブを更新する
   Future<DriveSyncResult> pushNow(AppState app) async {

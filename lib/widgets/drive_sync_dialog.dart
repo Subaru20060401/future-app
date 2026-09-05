@@ -16,8 +16,10 @@ String _fmt(DateTime? d) =>
 //   勝手にアップロードはせず、ドライブに置いてあるものを降ろす方向だけ行う。
 Future<bool> runDriveSync(BuildContext context, AppState appState,
     {bool silent = false, bool pullOnly = false}) async {
-  void toast(String text, {Color? color}) {
-    if (!context.mounted || silent) return;
+  // 💡 silent は「順調なときに黙る」ためのもの。
+  //   失敗まで黙ると「ログインしても何も起きない」になるので、エラーは必ず出す。
+  void toast(String text, {Color? color, bool always = false}) {
+    if (!context.mounted || (silent && !always)) return;
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
       ..showSnackBar(SnackBar(content: Text(text), backgroundColor: color));
@@ -33,7 +35,7 @@ Future<bool> runDriveSync(BuildContext context, AppState appState,
 
     case DriveSyncState.notSignedIn:
     case DriveSyncState.error:
-      toast(r.message, color: Colors.orange[800]);
+      toast(r.message, color: Colors.orange[800], always: true);
       return false;
 
     case DriveSyncState.noRemote:
@@ -41,17 +43,20 @@ Future<bool> runDriveSync(BuildContext context, AppState appState,
       // 同期OFFのまま勝手に上げない（ユーザーが許可していない）
       if (pullOnly) return false;
       final up = await DriveSync.instance.pushNow(appState);
-      toast(up.state == DriveSyncState.error
-          ? up.message
-          : 'ドライブへ保存しました');
+      toast(up.state == DriveSyncState.error ? up.message : 'ドライブへ保存しました',
+          color: up.state == DriveSyncState.error ? Colors.orange[800] : null,
+          always: up.state == DriveSyncState.error);
       return up.state != DriveSyncState.error;
 
     case DriveSyncState.remoteNewer:
       // こちらに未同期の変更が無いので、そのまま取り込んで安全
       final down = await DriveSync.instance.pullNow(appState, snapshot: r.remote);
-      toast(down.state == DriveSyncState.error
-          ? down.message
-          : '別の端末の変更を取り込みました（${r.remote?.device ?? ''}）');
+      toast(
+          down.state == DriveSyncState.error
+              ? down.message
+              : '別の端末の変更を取り込みました（${r.remote?.device ?? ''}）',
+          color: down.state == DriveSyncState.error ? Colors.orange[800] : null,
+          always: down.state == DriveSyncState.error);
       return down.state != DriveSyncState.error;
 
     case DriveSyncState.conflict:
