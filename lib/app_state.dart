@@ -923,6 +923,10 @@ class AppState extends ChangeNotifier {
   //   driveSyncedAt（最後にドライブとそろえた時刻）を比べて
   //   「こちらだけ変わった／向こうだけ変わった／両方変わった」を判定する。
   bool driveSyncEnabled = false;
+  // 💡 起動時にGoogleログインを求めるか（ONだとログイン後にドライブから復元される）。
+  //   ⚠️ 他人からデータを守る仕組みではない（データはこの端末の中にある）。
+  //     端末を他人が触るのを防ぎたいときはパスコードロック（LockService）を使う。
+  bool requireGoogleLogin = false;
   DateTime? dataUpdatedAt; // この端末のデータが最後に変わった時刻
   DateTime? driveSyncedAt; // 最後にドライブとそろえた時刻
   DateTime? driveKnownRemoteAt; // そのときのドライブ側の更新時刻
@@ -940,6 +944,12 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<void> setRequireGoogleLogin(bool on) async {
+    requireGoogleLogin = on;
+    await _saveDriveSyncState();
+    notifyListeners();
+  }
+
   Future<void> setDriveSyncEnabled(bool on) async {
     driveSyncEnabled = on;
     await _saveDriveSyncState();
@@ -949,6 +959,7 @@ class AppState extends ChangeNotifier {
   Future<void> _saveDriveSyncState() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool('saved_drive_sync_enabled', driveSyncEnabled);
+    await prefs.setBool('saved_require_google_login', requireGoogleLogin);
     await prefs.setString('saved_data_updated_at', dataUpdatedAt?.toIso8601String() ?? '');
     await prefs.setString('saved_drive_synced_at', driveSyncedAt?.toIso8601String() ?? '');
     await prefs.setString(
@@ -3805,6 +3816,7 @@ class AppState extends ChangeNotifier {
     gmailFirstSyncDone = prefs.getBool('saved_first_sync') ?? false;
 
     driveSyncEnabled = prefs.getBool('saved_drive_sync_enabled') ?? false;
+    requireGoogleLogin = prefs.getBool('saved_require_google_login') ?? false;
     DateTime? readAt(String key) {
       final s = prefs.getString(key);
       return (s == null || s.isEmpty) ? null : DateTime.tryParse(s);

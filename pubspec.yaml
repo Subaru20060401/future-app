@@ -52,6 +52,8 @@ dependencies:
   share_plus: ^10.1.4
   file_picker: ^8.1.6
   web: ^1.1.0 # Web版のダウンロード保存に使用
+  crypto: ^3.0.6 # パスコードのハッシュ化
+  local_auth: ^2.3.0 # Face ID / Touch ID（端末アプリのみ）
 dev_dependencies:
   flutter_test:
     sdk: flutter

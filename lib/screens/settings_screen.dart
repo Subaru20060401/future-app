@@ -14,6 +14,7 @@ import '../download_file.dart';
 import '../drive_sync.dart';
 import '../widgets/drive_sync_dialog.dart';
 import '../widgets/google_account_tile.dart';
+import '../widgets/passcode_settings.dart';
 import '../background_themes.dart';
 import '../notification_service.dart';
 import '../gmail_service.dart';
@@ -795,6 +796,13 @@ class SettingsScreen extends StatelessWidget {
           const Divider(),
           const Padding(
             padding: EdgeInsets.fromLTRB(16, 12, 16, 4),
+            child: Text('セキュリティ',
+                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+          ),
+          const PasscodeSettings(),
+          const Divider(),
+          const Padding(
+            padding: EdgeInsets.fromLTRB(16, 12, 16, 4),
             child: Text('Google連携',
                 style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
           ),
@@ -807,6 +815,18 @@ class SettingsScreen extends StatelessWidget {
           ),
           // 連携はここ1か所（Gmail取込とドライブ同期で共用）
           const GoogleAccountTile(),
+          SwitchListTile(
+            secondary: const Icon(Icons.login, color: Colors.lightBlue),
+            title: const Text('起動時にログインを求める'),
+            subtitle: const Text(
+                'ログインするとドライブから自分のデータが出てきます',
+                style: TextStyle(fontSize: 12)),
+            value: appState.requireGoogleLogin,
+            onChanged: (v) async {
+              if (v && !await ensureGoogleConnected(context)) return;
+              await appState.setRequireGoogleLogin(v);
+            },
+          ),
           // 💡 端末をまたいでデータを持ち回るための同期。
           //   保存先はDriveのアプリ専用フォルダ（他のファイルには触れない）。
           SwitchListTile(

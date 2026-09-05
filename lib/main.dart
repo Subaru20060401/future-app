@@ -7,6 +7,7 @@ import 'package:intl/date_symbol_data_local.dart';
 import 'package:provider/provider.dart'; // 💡 追加
 import 'app_state.dart'; // 💡 追加
 import 'background_themes.dart';
+import 'lock_service.dart';
 import 'notification_service.dart';
 import 'calendar_sync.dart';
 import 'drive_sync.dart';
@@ -17,6 +18,7 @@ import 'screens/todo_screen.dart';
 import 'screens/payment_screen.dart';
 import 'screens/settings_screen.dart';
 import 'widgets/deposit_dialog.dart';
+import 'widgets/app_gate.dart';
 import 'widgets/drive_sync_dialog.dart';
 
 void main() async {
@@ -26,6 +28,9 @@ void main() async {
   if (!kIsWeb) {
     await NotificationService.instance.init();
   }
+
+  // 💡 パスコードの設定を先に読む（ロック中は中身を一切描画しないため）
+  await LockService.instance.load();
 
   final appState = AppState();
   if (!kIsWeb) {
@@ -115,7 +120,7 @@ class MyApp extends StatelessWidget {
           child: child!,
         );
       },
-      home: const MainNavigationScreen(),
+      home: const AppGate(child: MainNavigationScreen()),
     );
   }
 }
