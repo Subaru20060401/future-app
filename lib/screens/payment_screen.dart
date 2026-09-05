@@ -291,8 +291,9 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
                           ),
                           subtitle: Text(p.note.isNotEmpty
                               ? '${_dateLabel(p)}\n${p.note}'
-                              : _dateLabel(p)),
-                          isThreeLine: p.note.isNotEmpty,
+                              : '${_dateLabel(p)}\nタップして利用先を書く'),
+                          isThreeLine: true,
+                          onTap: () => _editNote(appState, p),
                           trailing: Row(
                             mainAxisSize: MainAxisSize.min,
                             children: [
@@ -324,11 +325,48 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
     );
   }
 
+  // 💡 「これ何の支払いだっけ」を後から書けるように。
+  //   メール由来の明細に書いたメモも、次の取り込みで消えないようにしてある。
+  void _editNote(AppState appState, Payment p) {
+    final ctrl = TextEditingController(text: p.note);
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('${p.cardName} ¥${p.amount}'),
+        content: TextField(
+          controller: ctrl,
+          autofocus: true,
+          textCapitalization: TextCapitalization.sentences,
+          decoration: const InputDecoration(
+            labelText: '利用先',
+            hintText: '例: Amazonで購入',
+          ),
+          onSubmitted: (_) {
+            appState.setPaymentNote(p.id, ctrl.text);
+            Navigator.pop(context);
+          },
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context), child: const Text('キャンセル')),
+          ElevatedButton(
+            onPressed: () {
+              appState.setPaymentNote(p.id, ctrl.text);
+              Navigator.pop(context);
+            },
+            child: const Text('保存'),
+          ),
+        ],
+      ),
+    );
+  }
+
   void _addCard(AppState appState) {
     // 💡 設定で追加したカードも選べるように、一覧は AppState から取る
     final cards = appState.cardChoices;
     String card = cards.first;
     final amountCtrl = TextEditingController();
+    final noteCtrl = TextEditingController(); // 何に使ったか（例: Amazonで購入）
     DateTime date = DateTime.now();
     showDialog(
       context: context,
@@ -345,6 +383,14 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
                 onChanged: (v) => setLocal(() => card = v!),
               ),
               TextField(controller: amountCtrl, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: '請求額(円)')),
+              TextField(
+                controller: noteCtrl,
+                textCapitalization: TextCapitalization.sentences,
+                decoration: const InputDecoration(
+                  labelText: '利用先（任意）',
+                  hintText: '例: Amazonで購入',
+                ),
+              ),
               ListTile(
                 contentPadding: EdgeInsets.zero,
                 title: const Text('支払日'),
@@ -360,7 +406,12 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
             TextButton(onPressed: () => Navigator.pop(context), child: const Text('キャンセル')),
             ElevatedButton(
               onPressed: () {
-                appState.addPayment(cardName: card, amount: int.tryParse(amountCtrl.text) ?? 0, date: date);
+                appState.addPayment(
+                  cardName: card,
+                  amount: int.tryParse(amountCtrl.text) ?? 0,
+                  date: date,
+                  note: noteCtrl.text,
+                );
                 Navigator.pop(context);
               },
               child: const Text('保存'),

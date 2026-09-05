@@ -1318,9 +1318,35 @@ class AppState extends ChangeNotifier {
     required int amount,
     required DateTime date,
     PaymentSource source = PaymentSource.manual,
+    String note = '', // 利用先（例: Amazonで購入）
   }) {
     payments.add(Payment(
-        id: _id(), cardName: cardName, amount: amount, paymentDate: date, source: source));
+        id: _id(),
+        cardName: cardName,
+        amount: amount,
+        paymentDate: date,
+        source: source,
+        note: note.trim()));
+    saveData();
+    notifyListeners();
+  }
+
+  // 💡 メール由来の明細に書いたメモは、次の取り込みで自動データが作り直されると
+  //   消えてしまう。sourceId をキーに別で覚えておき、reconcile 後に貼り直す。
+  final Map<String, String> paymentNotes = {};
+
+  void setPaymentNote(String paymentId, String note) {
+    final i = payments.indexWhere((p) => p.id == paymentId);
+    if (i < 0) return;
+    final p = payments[i];
+    p.note = note.trim();
+    if (p.sourceId.isNotEmpty) {
+      if (p.note.isEmpty) {
+        paymentNotes.remove(p.sourceId);
+      } else {
+        paymentNotes[p.sourceId] = p.note;
+      }
+    }
     saveData();
     notifyListeners();
   }
@@ -1440,7 +1466,8 @@ class AppState extends ChangeNotifier {
         source: it.source,
         paid: paidByKey[k] ?? false,
         sourceId: it.sourceId,
-        note: it.note,
+        // 手で書いたメモがあれば、メール由来の利用先より優先して残す
+        note: paymentNotes[it.sourceId] ?? it.note,
       ));
     }
 
@@ -3160,6 +3187,7 @@ class AppState extends ChangeNotifier {
       'actualSalaries': actualSalaries,
       'actualSalariesByWp': actualSalariesByWp,
       'balanceUpdatedAt': balanceUpdatedAt?.toIso8601String(),
+      'paymentNotes': paymentNotes,
       'cardPaymentDays': cardPaymentDays,
       'cardClosingDays': cardClosingDays,
       'events': events.map((k, v) => MapEntry(k, v.map((e) => e.toJson()).toList())),
@@ -3483,6 +3511,10 @@ class AppState extends ChangeNotifier {
     });
     final buaStr = map['balanceUpdatedAt'] as String?;
     balanceUpdatedAt = (buaStr != null && buaStr.isNotEmpty) ? DateTime.tryParse(buaStr) : null;
+    paymentNotes.clear();
+    (map['paymentNotes'] as Map?)?.forEach((k, v) {
+      if (v is String) paymentNotes['$k'] = v;
+    });
     (map['cardPaymentDays'] as Map?)?.forEach((k, v) {
       if (v is int) cardPaymentDays[k] = v;
     });
@@ -3579,6 +3611,7 @@ class AppState extends ChangeNotifier {
       await prefs.setString('saved_data_updated_at', dataUpdatedAt!.toIso8601String());
     }
     await prefs.setString('saved_shifts', jsonEncode(shifts));
+    await prefs.setString('saved_payment_notes', jsonEncode(paymentNotes));
     await prefs.setString('saved_actual_salaries', jsonEncode(actualSalaries));
     await prefs.setString('saved_actual_salaries_by_wp', jsonEncode(actualSalariesByWp));
     await prefs.setString('saved_balance_updated_at', balanceUpdatedAt?.toIso8601String() ?? '');
@@ -3802,6 +3835,12 @@ class AppState extends ChangeNotifier {
     if (cpdStr != null) {
       (jsonDecode(cpdStr) as Map<String, dynamic>).forEach((k, v) {
         if (v is int) cardPaymentDays[k] = v;
+      });
+    }
+    final pnStr = prefs.getString('saved_payment_notes');
+    if (pnStr != null) {
+      (jsonDecode(pnStr) as Map<String, dynamic>).forEach((k, v) {
+        if (v is String) paymentNotes[k] = v;
       });
     }
     final ccdStr = prefs.getString('saved_card_closing_days');
