@@ -4,7 +4,6 @@
 import 'package:flutter/material.dart';
 
 import '../app_state.dart';
-import '../drive_sync.dart';
 import '../gmail_service.dart';
 import '../widgets/drive_sync_dialog.dart';
 
@@ -40,16 +39,15 @@ class _LoginScreenState extends State<LoginScreen> {
       });
       return;
     }
-    // ログインできたら、ドライブから自分のデータを降ろす
-    if (widget.appState.driveSyncEnabled) {
-      await runDriveSync(context, widget.appState, silent: true);
-    } else {
-      // 同期が未設定でも、ドライブに置いてあれば拾えるようにする
-      final r = await DriveSync.instance.check(widget.appState);
-      if (r.state == DriveSyncState.remoteNewer && mounted) {
-        await DriveSync.instance.pullNow(widget.appState, snapshot: r.remote);
-      }
-    }
+    // 💡 ログインできたら、ドライブから自分のデータを降ろす。
+    //   同期がOFFのときは「降ろす方向だけ」。勝手にアップロードはしない。
+    //   （以前は競合状態を取りこぼして、ログインしても何も起きなかった）
+    await runDriveSync(
+      context,
+      widget.appState,
+      silent: true,
+      pullOnly: !widget.appState.driveSyncEnabled,
+    );
     if (mounted) widget.onDone();
   }
 

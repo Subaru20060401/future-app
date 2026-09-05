@@ -11,8 +11,11 @@ String _fmt(DateTime? d) =>
 
 // 同期を1回まわす。競合したらダイアログで選ばせる。
 // 戻り値: 実際に何かした（アップロード/取り込み）なら true。
+//
+// 💡 pullOnly: 同期をONにしていない状態（ログインしただけ）で使う。
+//   勝手にアップロードはせず、ドライブに置いてあるものを降ろす方向だけ行う。
 Future<bool> runDriveSync(BuildContext context, AppState appState,
-    {bool silent = false}) async {
+    {bool silent = false, bool pullOnly = false}) async {
   void toast(String text, {Color? color}) {
     if (!context.mounted || silent) return;
     ScaffoldMessenger.of(context)
@@ -35,6 +38,8 @@ Future<bool> runDriveSync(BuildContext context, AppState appState,
 
     case DriveSyncState.noRemote:
     case DriveSyncState.localNewer:
+      // 同期OFFのまま勝手に上げない（ユーザーが許可していない）
+      if (pullOnly) return false;
       final up = await DriveSync.instance.pushNow(appState);
       toast(up.state == DriveSyncState.error
           ? up.message
@@ -50,9 +55,12 @@ Future<bool> runDriveSync(BuildContext context, AppState appState,
       return down.state != DriveSyncState.error;
 
     case DriveSyncState.conflict:
-      final keep = await _askConflict(context, appState, r.remote!);
+      // 💡 ここを取りこぼすと「ログインしたのに何も起きない」になる。
+      //   両方にデータがあるのは普通の状況なので、必ず選ばせる。
+      final keep = await _askConflict(context, appState, r.remote!, pullOnly: pullOnly);
       if (keep == null || !context.mounted) return false;
       if (keep == _Keep.local) {
+        if (pullOnly) return false; // 同期OFFなら「この端末のまま」＝何もしない
         final up = await DriveSync.instance.pushNow(appState);
         toast(up.state == DriveSyncState.error ? up.message : 'この端末の内容で上書きしました');
         return up.state != DriveSyncState.error;
@@ -66,20 +74,24 @@ Future<bool> runDriveSync(BuildContext context, AppState appState,
 enum _Keep { local, remote }
 
 Future<_Keep?> _askConflict(
-    BuildContext context, AppState appState, DriveSnapshot remote) {
+    BuildContext context, AppState appState, DriveSnapshot remote,
+    {bool pullOnly = false}) {
   return showDialog<_Keep>(
     context: context,
     barrierDismissible: false,
     builder: (_) => AlertDialog(
-      title: const Text('どちらの内容を残しますか？'),
+      title: Text(pullOnly ? 'ドライブのデータを取り込みますか？' : 'どちらの内容を残しますか？'),
       content: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text(
-            'この端末と別の端末の両方でデータが変わっています。'
-            '選ばなかった方の変更は消えます。',
-            style: TextStyle(fontSize: 13),
+          Text(
+            pullOnly
+                ? 'ドライブに別の端末のデータがあります。'
+                  '取り込むと、この端末のデータは置き換わります。'
+                : 'この端末と別の端末の両方でデータが変わっています。'
+                  '選ばなかった方の変更は消えます。',
+            style: const TextStyle(fontSize: 13),
           ),
           const SizedBox(height: 12),
           Text('この端末（${appState.deviceLabel}）\n'
@@ -95,12 +107,12 @@ Future<_Keep?> _askConflict(
           child: const Text('あとで'),
         ),
         TextButton(
-          onPressed: () => Navigator.pop(context, _Keep.remote),
-          child: const Text('ドライブを残す'),
+          onPressed: () => Navigator.pop(context, _Keep.local),
+          child: Text(pullOnly ? 'このまま使う' : 'この端末を残す'),
         ),
         ElevatedButton(
-          onPressed: () => Navigator.pop(context, _Keep.local),
-          child: const Text('この端末を残す'),
+          onPressed: () => Navigator.pop(context, _Keep.remote),
+          child: Text(pullOnly ? '取り込む' : 'ドライブを残す'),
         ),
       ],
     ),
