@@ -289,9 +289,16 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
                               _sourceBadge(p.source),
                             ],
                           ),
-                          subtitle: Text(p.note.isNotEmpty
-                              ? '${_dateLabel(p)}\n${p.note}'
-                              : '${_dateLabel(p)}\nタップして利用先を書く'),
+                          subtitle: Text(
+                            p.infoOnly
+                                ? '${_dateLabel(p)}\n${p.note.isNotEmpty ? p.note : 'Amazonの購入記録'}・支払いカード未設定'
+                                : (p.note.isNotEmpty
+                                    ? '${_dateLabel(p)}\n${p.note}'
+                                    : '${_dateLabel(p)}\nタップして利用先を書く'),
+                            style: p.infoOnly
+                                ? const TextStyle(color: Colors.grey)
+                                : null,
+                          ),
                           isThreeLine: true,
                           onTap: () => _editNote(appState, p),
                           trailing: Row(
@@ -299,8 +306,26 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
                             children: [
                               Text('¥${p.amount}',
                                   style: TextStyle(
-                                      color: p.paid ? Colors.grey : Colors.red,
-                                      decoration: p.paid ? TextDecoration.lineThrough : null)),
+                                      color: p.infoOnly
+                                          ? Colors.grey
+                                          : (p.paid ? Colors.grey : Colors.red),
+                                      decoration: (p.paid || p.infoOnly)
+                                          ? TextDecoration.lineThrough
+                                          : null)),
+                              // 💡 Amazonのメールには支払いカードが載らないので、
+                              //   ここで実際に使ったカードへ付け替えられるようにする。
+                              if (appState.isAmazonPayment(p))
+                                IconButton(
+                                  tooltip: p.infoOnly ? '使ったカードに移す' : '情報のみに戻す',
+                                  icon: Icon(
+                                      p.infoOnly
+                                          ? Icons.drive_file_move_outline
+                                          : Icons.undo,
+                                      color: Colors.indigo),
+                                  onPressed: () => p.infoOnly
+                                      ? _moveAmazon(appState, p)
+                                      : appState.resetAmazonPayment(p.id),
+                                ),
                               // 最低分割金額を満たすカードのみ「分割に変換」を表示
                               if (canInstallment(p.cardName, p.amount))
                                 IconButton(
@@ -323,6 +348,63 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
         ),
       ],
     );
+  }
+
+  // 💡 Amazonの明細を、実際に使ったカードへ付け替える。
+  //   既にカード会社の通知で同じ日・同じ金額が入っていれば二重になるので付け替えない。
+  Future<void> _moveAmazon(AppState appState, Payment p) async {
+    final cards = appState.cardChoices
+        .where((c) => c != AppState.kOtherCard)
+        .toList();
+    final picked = await showModalBottomSheet<String>(
+      context: context,
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (_) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 18, 20, 4),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('どのカードで払いましたか？',
+                      style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                  const SizedBox(height: 4),
+                  Text('${DateFormat('M/d').format(p.paymentDate)}・¥${p.amount}',
+                      style: const TextStyle(fontSize: 12, color: Colors.grey)),
+                  const SizedBox(height: 4),
+                  const Text(
+                    'Amazonのメールには支払いカードが載らないため、既定では金額を合計に入れていません。'
+                    '実際に使ったカードを選ぶと、その分が支出に計上されます。',
+                    style: TextStyle(fontSize: 11, color: Colors.grey),
+                  ),
+                ],
+              ),
+            ),
+            const Divider(),
+            ...cards.map((c) {
+              final style = cardStyleOf(c);
+              return ListTile(
+                leading: Icon(style.icon, color: style.color),
+                title: Text(c),
+                onTap: () => Navigator.pop(context, c),
+              );
+            }),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+    if (picked == null || !mounted) return;
+    final ok = appState.moveAmazonPaymentTo(p.id, picked);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(ok
+          ? '$picked の支出に計上しました'
+          : '$picked に同じ日・同じ金額の明細があるため、記録のみに戻しました'),
+    ));
   }
 
   // 💡 「これ何の支払いだっけ」を後から書けるように。

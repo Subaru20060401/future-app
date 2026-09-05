@@ -574,6 +574,10 @@ class Payment {
   PaymentSource source;
   String sourceId; // メール由来の一意キー（自動取り込みの識別用）
   String note; // 利用先（店舗名）など
+  // 💡 「記録として残すが、金額は合計に足さない」明細。
+  //   Amazonの注文・発送メールには支払いカードが書かれていないため、
+  //   そのままだとカード会社の利用通知と二重計上になる。既定はこちら。
+  bool infoOnly;
 
   Payment({
     required this.id,
@@ -584,6 +588,7 @@ class Payment {
     this.source = PaymentSource.manual,
     this.sourceId = '',
     this.note = '',
+    this.infoOnly = false,
   });
 
   Map<String, dynamic> toJson() => {
@@ -595,6 +600,7 @@ class Payment {
         'source': source.index,
         'sourceId': sourceId,
         'note': note,
+        'infoOnly': infoOnly,
       };
 
   factory Payment.fromJson(Map<String, dynamic> json) => Payment(
@@ -606,6 +612,7 @@ class Payment {
         source: PaymentSource.values[json['source'] ?? 0],
         sourceId: json['sourceId'] ?? '',
         note: json['note'] ?? '',
+        infoOnly: json['infoOnly'] ?? false,
       );
 }
 
@@ -1341,6 +1348,71 @@ class AppState extends ChangeNotifier {
   //   消えてしまう。sourceId をキーに別で覚えておき、reconcile 後に貼り直す。
   final Map<String, String> paymentNotes = {};
 
+  // ───── Amazonの明細（支払いカードが分からない問題）─────
+  // 💡 Amazonの注文・発送メールには「どのカードで払ったか」が書いていない。
+  //   そのまま計上すると、カード会社の利用通知と同じ買い物を二重に数えてしまう。
+  //   なので既定は infoOnly（記録するが合計に足さない）。
+  //   実際に使ったカードが分かっているときだけ、手で付け替えて計上する。
+  static const String kAmazonSourcePrefix = 'amazon#';
+
+  bool isAmazonPayment(Payment p) => p.sourceId.startsWith(kAmazonSourcePrefix);
+
+  // sourceId → 付け替え先のカード名
+  final Map<String, String> amazonCardOverrides = {};
+
+  // 💡 同じカード・同じ日・同じ金額の「本物の明細」が既にあるか。
+  //   あるならカード会社の通知が来たということなので、手の付け替えは不要になる。
+  bool _hasRealChargeLike(String card, DateTime date, int amount,
+      {String? exceptId}) {
+    final day = _formatDate(date);
+    return payments.any((p) =>
+        p.id != exceptId &&
+        !isAmazonPayment(p) &&
+        p.cardName == card &&
+        p.amount == amount &&
+        _formatDate(p.paymentDate) == day);
+  }
+
+  // 💡 Amazonの明細を「実際に使ったカード」へ付け替える。
+  //   すでに同じ日・同じ金額の明細がそのカードにあるなら、二重になるので付け替えない。
+  //   戻り値: 付け替えたら true、重複していて見送ったら false。
+  bool moveAmazonPaymentTo(String paymentId, String cardName) {
+    final i = payments.indexWhere((e) => e.id == paymentId);
+    if (i < 0) return false;
+    final p = payments[i];
+    if (!isAmazonPayment(p)) return false;
+
+    if (_hasRealChargeLike(cardName, p.paymentDate, p.amount, exceptId: p.id)) {
+      // カード会社の通知で既に計上済み。付け替えを取り消して情報のみに戻す。
+      amazonCardOverrides.remove(p.sourceId);
+      p.cardName = 'Amazonマスター';
+      p.infoOnly = true;
+      saveData();
+      notifyListeners();
+      return false;
+    }
+
+    amazonCardOverrides[p.sourceId] = cardName;
+    p.cardName = cardName;
+    p.infoOnly = false;
+    saveData();
+    notifyListeners();
+    return true;
+  }
+
+  // 付け替えをやめて「情報のみ」に戻す
+  void resetAmazonPayment(String paymentId) {
+    final i = payments.indexWhere((e) => e.id == paymentId);
+    if (i < 0) return;
+    final p = payments[i];
+    if (!isAmazonPayment(p)) return;
+    amazonCardOverrides.remove(p.sourceId);
+    p.cardName = 'Amazonマスター';
+    p.infoOnly = true;
+    saveData();
+    notifyListeners();
+  }
+
   void setPaymentNote(String paymentId, String note) {
     final i = payments.indexWhere((p) => p.id == paymentId);
     if (i < 0) return;
@@ -1464,9 +1536,28 @@ class AppState extends ChangeNotifier {
     for (final it in desired) {
       final k = _dupKey(it.cardName, it.amount, it.date, it.source);
       desiredKeys.add(k);
+      // 💡 Amazonは支払いカードが分からないので既定は「情報のみ」。
+      //   手で付け替えてあり、かつ同日・同額の本物の明細が無いときだけ計上する。
+      var card = it.cardName;
+      var infoOnly = false;
+      if (it.sourceId.startsWith(kAmazonSourcePrefix)) {
+        final moved = amazonCardOverrides[it.sourceId];
+        final duplicated = moved != null &&
+            desired.any((o) =>
+                !o.sourceId.startsWith(kAmazonSourcePrefix) &&
+                o.cardName == moved &&
+                o.amount == it.amount &&
+                _formatDate(o.date) == _formatDate(it.date));
+        if (moved != null && !duplicated) {
+          card = moved;
+        } else {
+          infoOnly = true;
+          if (duplicated) amazonCardOverrides.remove(it.sourceId);
+        }
+      }
       payments.add(Payment(
         id: _id(),
-        cardName: it.cardName,
+        cardName: card,
         amount: it.amount,
         paymentDate: it.date,
         source: it.source,
@@ -1474,6 +1565,7 @@ class AppState extends ChangeNotifier {
         sourceId: it.sourceId,
         // 手で書いたメモがあれば、メール由来の利用先より優先して残す
         note: paymentNotes[it.sourceId] ?? it.note,
+        infoOnly: infoOnly,
       ));
     }
 
@@ -2391,6 +2483,7 @@ class AppState extends ChangeNotifier {
       //   （利用通知/請求予定/手動）で計上を続ける。確定したら上の確定額に置き換わる。
       for (final p in payments) {
         if (p.source == PaymentSource.bank) continue;
+        if (p.infoOnly) continue; // 記録だけの明細は合計に足さない
         if (!sameYm(p.paymentDate, month)) continue;
         if (bank.containsKey(p.cardName)) continue; // 確定済み＝確定額が正本
         if (_coveredByOliveBank(p.cardName, bank)) continue; // Amazonは三井OLIVEの確定に含まれる
@@ -2400,7 +2493,10 @@ class AppState extends ChangeNotifier {
     }
 
     // ② 銀行確定が無い月（先月・今月）：その月の支払い管理（銀行確定以外）で代替
+    // 💡 ここに infoOnly の除外が無かったため、確定メールが届くまでの期間だけ
+    //   Amazonの買い物が二重計上されていた。
     for (final p in payments) {
+      if (p.infoOnly) continue;
       if (p.source != PaymentSource.bank && sameYm(p.paymentDate, month)) {
         result[p.cardName] = (result[p.cardName] ?? 0) + p.amount;
       }
@@ -3109,6 +3205,7 @@ class AppState extends ChangeNotifier {
     var total = 0;
     for (final p in payments) {
       if (p.source == PaymentSource.bank) continue;
+      if (p.infoOnly) continue; // 記録だけの明細は合計に足さない
       if (p.cardName != cardName) continue;
       final d = DateTime(p.paymentDate.year, p.paymentDate.month, p.paymentDate.day);
       if (d.isBefore(r.start) || d.isAfter(r.end)) continue;
@@ -3203,6 +3300,7 @@ class AppState extends ChangeNotifier {
       'actualSalariesByWp': actualSalariesByWp,
       'balanceUpdatedAt': balanceUpdatedAt?.toIso8601String(),
       'paymentNotes': paymentNotes,
+      'amazonCardOverrides': amazonCardOverrides,
       'cardPaymentDays': cardPaymentDays,
       'cardClosingDays': cardClosingDays,
       'events': events.map((k, v) => MapEntry(k, v.map((e) => e.toJson()).toList())),
@@ -3530,6 +3628,10 @@ class AppState extends ChangeNotifier {
     (map['paymentNotes'] as Map?)?.forEach((k, v) {
       if (v is String) paymentNotes['$k'] = v;
     });
+    amazonCardOverrides.clear();
+    (map['amazonCardOverrides'] as Map?)?.forEach((k, v) {
+      if (v is String) amazonCardOverrides['$k'] = v;
+    });
     // 💡 マージだと、別端末で削除したカードが取り込みのたびに復活する。置き換える。
     final cpd = map['cardPaymentDays'] as Map?;
     if (cpd != null) {
@@ -3632,6 +3734,7 @@ class AppState extends ChangeNotifier {
     }
     await prefs.setString('saved_shifts', jsonEncode(shifts));
     await prefs.setString('saved_payment_notes', jsonEncode(paymentNotes));
+    await prefs.setString('saved_amazon_overrides', jsonEncode(amazonCardOverrides));
     await prefs.setString('saved_actual_salaries', jsonEncode(actualSalaries));
     await prefs.setString('saved_actual_salaries_by_wp', jsonEncode(actualSalariesByWp));
     await prefs.setString('saved_balance_updated_at', balanceUpdatedAt?.toIso8601String() ?? '');
@@ -3864,6 +3967,12 @@ class AppState extends ChangeNotifier {
           for (final e in (jsonDecode(cpdStr) as Map<String, dynamic>).entries)
             if (e.value is int) e.key: e.value as int
         });
+    }
+    final aoStr = prefs.getString('saved_amazon_overrides');
+    if (aoStr != null) {
+      (jsonDecode(aoStr) as Map<String, dynamic>).forEach((k, v) {
+        if (v is String) amazonCardOverrides[k] = v;
+      });
     }
     final pnStr = prefs.getString('saved_payment_notes');
     if (pnStr != null) {
