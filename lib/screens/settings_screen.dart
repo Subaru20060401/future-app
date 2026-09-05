@@ -13,6 +13,7 @@ import '../build_info.dart';
 import '../download_file.dart';
 import '../drive_sync.dart';
 import '../widgets/drive_sync_dialog.dart';
+import '../widgets/google_account_tile.dart';
 import '../background_themes.dart';
 import '../notification_service.dart';
 import '../gmail_service.dart';
@@ -721,65 +722,6 @@ class SettingsScreen extends StatelessWidget {
               MaterialPageRoute(builder: (_) => const BudgetScreen()),
             ),
           ),
-          // 💡 端末をまたいでデータを持ち回るための同期。
-          //   保存先はDriveのアプリ専用フォルダ（他のファイルには触れない）。
-          SwitchListTile(
-            secondary: const Icon(Icons.cloud_sync, color: Colors.lightBlue),
-            title: const Text('Googleドライブと同期'),
-            subtitle: Text(appState.driveSyncEnabled
-                ? '最終同期: ${appState.driveSyncedAt == null ? 'まだ' : DateFormat('M/d HH:mm').format(appState.driveSyncedAt!)}'
-                : 'iPhone・iPad・Macで同じデータを使う'),
-            value: appState.driveSyncEnabled,
-            onChanged: (v) async {
-              await appState.setDriveSyncEnabled(v);
-              if (v && context.mounted) await runDriveSync(context, appState);
-            },
-          ),
-          if (appState.driveSyncEnabled) ...[
-            ListTile(
-              dense: true,
-              leading: const Icon(Icons.sync, color: Colors.lightBlue),
-              title: const Text('今すぐ同期'),
-              subtitle: const Text('新しい方に合わせる（両方変わっていたら選べます）'),
-              onTap: () => runDriveSync(context, appState),
-            ),
-            ListTile(
-              dense: true,
-              leading: const Icon(Icons.cloud_download, color: Colors.blueGrey),
-              title: const Text('ドライブの内容で置き換える'),
-              subtitle: const Text('この端末のデータは消えます'),
-              onTap: () async {
-                final ok = await _confirm(context, 'ドライブの内容で置き換える',
-                    'この端末のデータはすべて消えて、ドライブの内容になります。');
-                if (ok != true) return;
-                final r = await DriveSync.instance.pullNow(appState);
-                if (context.mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                      content: Text(r.state == DriveSyncState.error
-                          ? r.message
-                          : 'ドライブの内容にしました')));
-                }
-              },
-            ),
-            ListTile(
-              dense: true,
-              leading: const Icon(Icons.cloud_upload, color: Colors.blueGrey),
-              title: const Text('この端末の内容で上書きする'),
-              subtitle: const Text('ドライブのデータは消えます'),
-              onTap: () async {
-                final ok = await _confirm(context, 'この端末の内容で上書きする',
-                    'ドライブにある内容はすべて消えて、この端末の内容になります。');
-                if (ok != true) return;
-                final r = await DriveSync.instance.pushNow(appState);
-                if (context.mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                      content: Text(r.state == DriveSyncState.error
-                          ? r.message
-                          : 'ドライブへ保存しました')));
-                }
-              },
-            ),
-          ],
           ListTile(
             leading: const Icon(Icons.backup, color: Colors.blueGrey),
             title: const Text('データのバックアップ'),
@@ -851,6 +793,89 @@ class SettingsScreen extends StatelessWidget {
             },
           ),
           const Divider(),
+          const Padding(
+            padding: EdgeInsets.fromLTRB(16, 12, 16, 4),
+            child: Text('Google連携',
+                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+          ),
+          const Padding(
+            padding: EdgeInsets.fromLTRB(16, 0, 16, 8),
+            child: Text(
+              'メールの取り込みとドライブ同期は、同じGoogleアカウントを使います。',
+              style: TextStyle(fontSize: 12, color: Colors.black54),
+            ),
+          ),
+          // 連携はここ1か所（Gmail取込とドライブ同期で共用）
+          const GoogleAccountTile(),
+          // 💡 端末をまたいでデータを持ち回るための同期。
+          //   保存先はDriveのアプリ専用フォルダ（他のファイルには触れない）。
+          SwitchListTile(
+            secondary: const Icon(Icons.cloud_sync, color: Colors.lightBlue),
+            title: const Text('Googleドライブと同期'),
+            subtitle: Text(appState.driveSyncEnabled
+                ? '最終同期: ${appState.driveSyncedAt == null ? 'まだ' : DateFormat('M/d HH:mm').format(appState.driveSyncedAt!)}'
+                : 'iPhone・iPad・Macで同じデータを使う'),
+            value: appState.driveSyncEnabled,
+            onChanged: (v) async {
+              // 💡 未連携のままONにしても同期できないので、ここで連携まで済ませる
+              if (v && !await ensureGoogleConnected(context)) return;
+              await appState.setDriveSyncEnabled(v);
+              if (v && context.mounted) await runDriveSync(context, appState);
+            },
+          ),
+          if (appState.driveSyncEnabled) ...[
+            ListTile(
+              dense: true,
+              leading: const Icon(Icons.sync, color: Colors.lightBlue),
+              title: const Text('今すぐ同期'),
+              subtitle: const Text('新しい方に合わせる（両方変わっていたら選べます）'),
+              onTap: () async {
+                if (!await ensureGoogleConnected(context)) return;
+                if (context.mounted) await runDriveSync(context, appState);
+              },
+            ),
+            ListTile(
+              dense: true,
+              leading: const Icon(Icons.cloud_download, color: Colors.blueGrey),
+              title: const Text('ドライブの内容で置き換える'),
+              subtitle: const Text('この端末のデータは消えます'),
+              onTap: () async {
+                if (!await ensureGoogleConnected(context)) return;
+                if (!context.mounted) return;
+                final ok = await _confirm(context, 'ドライブの内容で置き換える',
+                    'この端末のデータはすべて消えて、ドライブの内容になります。');
+                if (ok != true) return;
+                final r = await DriveSync.instance.pullNow(appState);
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                      content: Text(r.state == DriveSyncState.error
+                          ? r.message
+                          : 'ドライブの内容にしました')));
+                }
+              },
+            ),
+            ListTile(
+              dense: true,
+              leading: const Icon(Icons.cloud_upload, color: Colors.blueGrey),
+              title: const Text('この端末の内容で上書きする'),
+              subtitle: const Text('ドライブのデータは消えます'),
+              onTap: () async {
+                if (!await ensureGoogleConnected(context)) return;
+                if (!context.mounted) return;
+                final ok = await _confirm(context, 'この端末の内容で上書きする',
+                    'ドライブにある内容はすべて消えて、この端末の内容になります。');
+                if (ok != true) return;
+                final r = await DriveSync.instance.pushNow(appState);
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                      content: Text(r.state == DriveSyncState.error
+                          ? r.message
+                          : 'ドライブへ保存しました')));
+                }
+              },
+            ),
+          ],
+          const Divider(),
           const ListTile(
             leading: Icon(Icons.account_balance, color: Colors.green),
             title: Text('三井住友銀行 連携設定'),
@@ -914,8 +939,8 @@ class SettingsScreen extends StatelessWidget {
           ),
           ListTile(
             leading: const Icon(Icons.mail, color: Colors.red),
-            title: const Text('Gmail連携の設定 / 取得結果'),
-            subtitle: const Text('ログイン・連携状態の確認'),
+            title: const Text('メールの取得結果を見る'),
+            subtitle: const Text('取り込んだ明細の確認・手動取得'),
             trailing: const Icon(Icons.chevron_right),
             onTap: () => Navigator.push(
               context,
