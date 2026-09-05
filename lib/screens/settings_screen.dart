@@ -10,6 +10,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:provider/provider.dart';
 import '../app_state.dart';
 import '../build_info.dart';
+import '../download_file.dart';
 import '../background_themes.dart';
 import '../notification_service.dart';
 import '../gmail_service.dart';
@@ -350,6 +351,18 @@ class SettingsScreen extends StatelessWidget {
             padding: EdgeInsets.all(16),
             child: Text('データのバックアップ', style: TextStyle(fontWeight: FontWeight.bold)),
           ),
+          // 💡 Web版はブラウザの中にしか保存されない（端末をまたがない）ので、
+          //   「別の端末で開いたらデータが無い」を先に説明しておく。
+          if (kIsWeb)
+            const Padding(
+              padding: EdgeInsets.fromLTRB(16, 0, 16, 12),
+              child: Text(
+                'Web版のデータは、この端末のこのブラウザにだけ保存されます。'
+                '別の端末（iPhoneなど）で使うには、ここでJSONを書き出して、'
+                'その端末の「ファイルから読み込み」で取り込んでください。',
+                style: TextStyle(fontSize: 12, color: Colors.black54),
+              ),
+            ),
           ListTile(
             leading: const Icon(Icons.ios_share, color: Colors.green),
             title: const Text('ファイルに書き出し（JSON）'),
@@ -406,13 +419,24 @@ class SettingsScreen extends StatelessWidget {
   Future<void> _exportToFile(BuildContext context, AppState appState,
       String baseName, String ext, String content) async {
     try {
+      final ts = DateFormat('yyyyMMdd_HHmmss').format(DateTime.now());
       if (kIsWeb) {
-        // Webは端末にファイルを書けないので、コピーできるテキストで出す
-        if (context.mounted) _showText(context, 'エクスポート', content);
+        // 💡 Webは端末にファイルを書けないので、ブラウザのダウンロードで保存させる。
+        //   （別の端末へ持っていくのにコピペは現実的でない）
+        final name = '${baseName}_$ts.$ext';
+        final mime = ext == 'csv' ? 'text/csv' : 'application/json';
+        if (downloadTextFile(name, content, mime)) {
+          if (context.mounted) {
+            ScaffoldMessenger.of(context)
+                .showSnackBar(SnackBar(content: Text('$name を保存しました')));
+          }
+        } else if (context.mounted) {
+          // ダウンロードできない環境ではコピーできるテキストで出す
+          _showText(context, 'エクスポート', content);
+        }
         return;
       }
       final dir = await getTemporaryDirectory();
-      final ts = DateFormat('yyyyMMdd_HHmmss').format(DateTime.now());
       final file = File('${dir.path}/${baseName}_$ts.$ext');
       await file.writeAsString(content);
       // iOS/iPad の共有シートは元の位置(sharePositionOrigin)が必須。画面の矩形を渡す。
