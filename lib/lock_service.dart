@@ -20,6 +20,11 @@ class LockService {
   static const _kBio = 'saved_lock_biometric';
   static const _kGrace = Duration(seconds: 60); // 一瞬離れただけで聞かれないように
 
+  // 💡 Chromeのパスワード自動生成（英数記号まじりの長い文字列）をそのまま
+  //   使えるように、数字4桁固定ではなく 4〜20文字の任意の文字を受け付ける。
+  static const int minLength = 4;
+  static const int maxLength = 20;
+
   String? _hash;
   String? _salt;
   bool _biometric = false;

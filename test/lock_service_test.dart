@@ -58,6 +58,21 @@ void main() {
       expect(LockService.instance.isLocked, isFalse);
     });
 
+    test('Chromeが生成する長い英数記号のパスワードも扱える', () async {
+      const generated = 'Xq7#mZ2\$pR9!vLb4&TkW'; // 20文字
+      expect(generated.length, LockService.maxLength);
+      await LockService.instance.setPasscode(generated);
+      expect(LockService.instance.verify(generated), isTrue);
+      expect(LockService.instance.verify('Xq7#mZ2\$pR9!vLb4&TkX'), isFalse);
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getString('saved_lock_hash'), isNot(contains('Xq7')));
+    });
+
+    test('長さの上限・下限は 4〜20', () {
+      expect(LockService.minLength, 4);
+      expect(LockService.maxLength, 20);
+    });
+
     test('lockNow で即ロックできる', () async {
       await LockService.instance.setPasscode('1234');
       LockService.instance.lockNow();

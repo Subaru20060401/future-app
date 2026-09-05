@@ -1,4 +1,5 @@
-// 💡 パスコード入力画面。ロック中はこれだけを表示する（データは一切見せない）。
+// 💡 パスワード入力画面。ロック中はこれだけを表示する（データは一切見せない）。
+//   Chromeなどのパスワード管理から自動入力できるよう autofillHints を付けている。
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -17,6 +18,7 @@ class _LockScreenState extends State<LockScreen> {
   final _ctrl = TextEditingController();
   String? _error;
   int _failures = 0;
+  bool _show = false; // 自動入力された中身を確認できるように
 
   @override
   void initState() {
@@ -39,12 +41,15 @@ class _LockScreenState extends State<LockScreen> {
   void _submit() {
     if (LockService.instance.verify(_ctrl.text)) {
       LockService.instance.unlock();
+      // 💡 ブラウザのパスワード管理に「保存しますか？」を出させる合図。
+      //   これを呼ばないとChromeは記憶してくれない。
+      TextInput.finishAutofillContext();
       widget.onUnlocked();
       return;
     }
     setState(() {
       _failures++;
-      _error = 'パスコードが違います';
+      _error = 'パスワードが違います';
       _ctrl.clear();
     });
   }
@@ -65,24 +70,31 @@ class _LockScreenState extends State<LockScreen> {
                 const Text('ポケットメイド',
                     style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
                 const SizedBox(height: 4),
-                const Text('パスコードを入力してください',
+                const Text('パスワードを入力してください',
                     style: TextStyle(fontSize: 13, color: Colors.grey)),
                 const SizedBox(height: 20),
-                TextField(
-                  controller: _ctrl,
-                  autofocus: true,
-                  obscureText: true,
-                  keyboardType: TextInputType.number,
-                  textAlign: TextAlign.center,
-                  maxLength: 6,
-                  inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-                  style: const TextStyle(fontSize: 24, letterSpacing: 8),
-                  decoration: InputDecoration(
-                    counterText: '',
-                    errorText: _error,
-                    border: const OutlineInputBorder(),
+                // 💡 AutofillGroup + autofillHints で、Chromeなどの
+                //   パスワード管理から自動入力できるようにする。
+                AutofillGroup(
+                  child: TextField(
+                    controller: _ctrl,
+                    autofocus: true,
+                    obscureText: !_show,
+                    autofillHints: const [AutofillHints.password],
+                    keyboardType: TextInputType.visiblePassword,
+                    maxLength: LockService.maxLength,
+                    style: const TextStyle(fontSize: 18),
+                    decoration: InputDecoration(
+                      counterText: '',
+                      errorText: _error,
+                      border: const OutlineInputBorder(),
+                      suffixIcon: IconButton(
+                        icon: Icon(_show ? Icons.visibility_off : Icons.visibility),
+                        onPressed: () => setState(() => _show = !_show),
+                      ),
+                    ),
+                    onSubmitted: (_) => _submit(),
                   ),
-                  onSubmitted: (_) => _submit(),
                 ),
                 const SizedBox(height: 16),
                 SizedBox(
@@ -102,7 +114,7 @@ class _LockScreenState extends State<LockScreen> {
                   const Padding(
                     padding: EdgeInsets.only(top: 12),
                     child: Text(
-                      'パスコードを忘れた場合は、ブラウザのサイトデータを消すと'
+                      'パスワードを忘れた場合は、ブラウザのサイトデータを消すと'
                       'ロックは外れますが、この端末のデータも消えます。'
                       'ドライブ同期がONなら別の端末から復元できます。',
                       style: TextStyle(fontSize: 11, color: Colors.grey),
