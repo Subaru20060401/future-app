@@ -917,6 +917,44 @@ class AppState extends ChangeNotifier {
     'メルカード': 26, // 三井と同じ
   };
 
+  // ───── Googleドライブ同期 ─────
+  // 💡 家計データなので「新しい方で黙って上書き」はしない。
+  //   dataUpdatedAt（この端末で最後に変更した時刻）と
+  //   driveSyncedAt（最後にドライブとそろえた時刻）を比べて
+  //   「こちらだけ変わった／向こうだけ変わった／両方変わった」を判定する。
+  bool driveSyncEnabled = false;
+  DateTime? dataUpdatedAt; // この端末のデータが最後に変わった時刻
+  DateTime? driveSyncedAt; // 最後にドライブとそろえた時刻
+  DateTime? driveKnownRemoteAt; // そのときのドライブ側の更新時刻
+
+  // 同期の表示に使う端末名（どの端末が書いたか分かるように）
+  String get deviceLabel {
+    if (kIsWeb) return 'ブラウザ（Web版）';
+    return Platform.isIOS ? 'iPhone/iPad' : 'この端末';
+  }
+
+  void markDriveSynced({required DateTime localAt, required DateTime remoteAt}) {
+    driveSyncedAt = localAt;
+    driveKnownRemoteAt = remoteAt;
+    _saveDriveSyncState();
+    notifyListeners();
+  }
+
+  Future<void> setDriveSyncEnabled(bool on) async {
+    driveSyncEnabled = on;
+    await _saveDriveSyncState();
+    notifyListeners();
+  }
+
+  Future<void> _saveDriveSyncState() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('saved_drive_sync_enabled', driveSyncEnabled);
+    await prefs.setString('saved_data_updated_at', dataUpdatedAt?.toIso8601String() ?? '');
+    await prefs.setString('saved_drive_synced_at', driveSyncedAt?.toIso8601String() ?? '');
+    await prefs.setString(
+        'saved_drive_remote_at', driveKnownRemoteAt?.toIso8601String() ?? '');
+  }
+
   // 💡 カード別の締め日（1〜28、31＝月末締め）。未設定＝31（従来どおり暦月で集計）。
   //   締め日を月末以外にすると、その月の引き落としは
   //   「前々月の締め日の翌日 〜 前月の締め日」の利用ぶんになる。
@@ -3403,6 +3441,17 @@ class AppState extends ChangeNotifier {
 
   // エクスポートしたJSONを取り込んで全データを置き換える。
   void importJson(String text) {
+    // 取り込みは「この端末での変更」ではないので、更新時刻を刻まない。
+    // （刻むと、取り込んだ直後に「こちらの方が新しい」と誤判定して押し戻してしまう）
+    _importing = true;
+    try {
+      _importJson(text);
+    } finally {
+      _importing = false;
+    }
+  }
+
+  void _importJson(String text) {
     final map = jsonDecode(text) as Map<String, dynamic>;
 
     shifts.clear();
@@ -3510,8 +3559,14 @@ class AppState extends ChangeNotifier {
   }
 
   // ════════════════ 保存・読込 ════════════════
+  bool _importing = false; // インポート中は「この端末で変更した」と数えない
+
   Future<void> saveData() async {
     final prefs = await SharedPreferences.getInstance();
+    if (!_importing) {
+      dataUpdatedAt = DateTime.now();
+      await prefs.setString('saved_data_updated_at', dataUpdatedAt!.toIso8601String());
+    }
     await prefs.setString('saved_shifts', jsonEncode(shifts));
     await prefs.setString('saved_actual_salaries', jsonEncode(actualSalaries));
     await prefs.setString('saved_actual_salaries_by_wp', jsonEncode(actualSalariesByWp));
@@ -3748,6 +3803,16 @@ class AppState extends ChangeNotifier {
     if (lbaStr != null && lbaStr.isNotEmpty) lastAutoBackupAt = DateTime.tryParse(lbaStr);
 
     gmailFirstSyncDone = prefs.getBool('saved_first_sync') ?? false;
+
+    driveSyncEnabled = prefs.getBool('saved_drive_sync_enabled') ?? false;
+    DateTime? readAt(String key) {
+      final s = prefs.getString(key);
+      return (s == null || s.isEmpty) ? null : DateTime.tryParse(s);
+    }
+
+    dataUpdatedAt = readAt('saved_data_updated_at');
+    driveSyncedAt = readAt('saved_drive_synced_at');
+    driveKnownRemoteAt = readAt('saved_drive_remote_at');
 
     // 💡 「三井住友」は「三井OLIVE」に統合
     var migrated = false;

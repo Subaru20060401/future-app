@@ -11,6 +11,8 @@ import 'package:provider/provider.dart';
 import '../app_state.dart';
 import '../build_info.dart';
 import '../download_file.dart';
+import '../drive_sync.dart';
+import '../widgets/drive_sync_dialog.dart';
 import '../background_themes.dart';
 import '../notification_service.dart';
 import '../gmail_service.dart';
@@ -258,6 +260,28 @@ class SettingsScreen extends StatelessWidget {
         card,
         (int.tryParse(dayCtrl.text) ?? appState.cardPaymentDays[card] ?? 27)
             .clamp(1, 31));
+  }
+
+  // 取り返しがつかない操作の確認
+  Future<bool?> _confirm(BuildContext context, String title, String body) {
+    return showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: Text(title),
+        content: Text(body),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('キャンセル')),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.red, foregroundColor: Colors.white),
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('実行する'),
+          ),
+        ],
+      ),
+    );
   }
 
   // バックアップから復元（自動保存ファイル一覧）
@@ -697,6 +721,65 @@ class SettingsScreen extends StatelessWidget {
               MaterialPageRoute(builder: (_) => const BudgetScreen()),
             ),
           ),
+          // 💡 端末をまたいでデータを持ち回るための同期。
+          //   保存先はDriveのアプリ専用フォルダ（他のファイルには触れない）。
+          SwitchListTile(
+            secondary: const Icon(Icons.cloud_sync, color: Colors.lightBlue),
+            title: const Text('Googleドライブと同期'),
+            subtitle: Text(appState.driveSyncEnabled
+                ? '最終同期: ${appState.driveSyncedAt == null ? 'まだ' : DateFormat('M/d HH:mm').format(appState.driveSyncedAt!)}'
+                : 'iPhone・iPad・Macで同じデータを使う'),
+            value: appState.driveSyncEnabled,
+            onChanged: (v) async {
+              await appState.setDriveSyncEnabled(v);
+              if (v && context.mounted) await runDriveSync(context, appState);
+            },
+          ),
+          if (appState.driveSyncEnabled) ...[
+            ListTile(
+              dense: true,
+              leading: const Icon(Icons.sync, color: Colors.lightBlue),
+              title: const Text('今すぐ同期'),
+              subtitle: const Text('新しい方に合わせる（両方変わっていたら選べます）'),
+              onTap: () => runDriveSync(context, appState),
+            ),
+            ListTile(
+              dense: true,
+              leading: const Icon(Icons.cloud_download, color: Colors.blueGrey),
+              title: const Text('ドライブの内容で置き換える'),
+              subtitle: const Text('この端末のデータは消えます'),
+              onTap: () async {
+                final ok = await _confirm(context, 'ドライブの内容で置き換える',
+                    'この端末のデータはすべて消えて、ドライブの内容になります。');
+                if (ok != true) return;
+                final r = await DriveSync.instance.pullNow(appState);
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                      content: Text(r.state == DriveSyncState.error
+                          ? r.message
+                          : 'ドライブの内容にしました')));
+                }
+              },
+            ),
+            ListTile(
+              dense: true,
+              leading: const Icon(Icons.cloud_upload, color: Colors.blueGrey),
+              title: const Text('この端末の内容で上書きする'),
+              subtitle: const Text('ドライブのデータは消えます'),
+              onTap: () async {
+                final ok = await _confirm(context, 'この端末の内容で上書きする',
+                    'ドライブにある内容はすべて消えて、この端末の内容になります。');
+                if (ok != true) return;
+                final r = await DriveSync.instance.pushNow(appState);
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                      content: Text(r.state == DriveSyncState.error
+                          ? r.message
+                          : 'ドライブへ保存しました')));
+                }
+              },
+            ),
+          ],
           ListTile(
             leading: const Icon(Icons.backup, color: Colors.blueGrey),
             title: const Text('データのバックアップ'),

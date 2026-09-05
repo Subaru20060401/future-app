@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
@@ -7,6 +9,7 @@ import 'app_state.dart'; // 💡 追加
 import 'background_themes.dart';
 import 'notification_service.dart';
 import 'calendar_sync.dart';
+import 'drive_sync.dart';
 import 'gmail_sync.dart';
 import 'screens/calendar_screen.dart';
 import 'screens/income_screen.dart';
@@ -14,6 +17,7 @@ import 'screens/todo_screen.dart';
 import 'screens/payment_screen.dart';
 import 'screens/settings_screen.dart';
 import 'widgets/deposit_dialog.dart';
+import 'widgets/drive_sync_dialog.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -132,6 +136,13 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
     // 💡 アプリ起動時に自動でメールから取得（連携済みのときだけ実行）
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       final appState = context.read<AppState>();
+      // 💡 まずドライブと突き合わせる（他の端末の変更を先に取り込むため）。
+      //   両方変わっていたらダイアログで選ばせる＝勝手に消さない。
+      if (appState.driveSyncEnabled) {
+        await runDriveSync(context, appState, silent: true);
+        if (!mounted) return;
+      }
+      _startDriveAutoPush(appState);
       // 前回までに溜まっている入金通知・引き落としがあれば先に聞く
       await _askPendingDeposits(appState);
       await _askPendingDraws(appState);
@@ -156,6 +167,31 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
       // 引き落とし済みで、まだ口座残高に反映していないものを聞く
       await _askPendingDraws(appState);
     });
+  }
+
+  Timer? _drivePush;
+
+  // 💡 データが変わったら少し待ってからドライブへ保存する。
+  //   1操作ごとに上げるとAPIを叩きすぎるので、最後の変更から15秒まとめて待つ。
+  void _startDriveAutoPush(AppState appState) {
+    appState.addListener(() {
+      if (!appState.driveSyncEnabled) return;
+      _drivePush?.cancel();
+      _drivePush = Timer(const Duration(seconds: 15), () async {
+        final r = await DriveSync.instance.check(appState);
+        // 競合しているときは自動で上げない（起動時か「今すぐ同期」で選ばせる）
+        if (r.state == DriveSyncState.localNewer ||
+            r.state == DriveSyncState.noRemote) {
+          await DriveSync.instance.pushNow(appState);
+        }
+      });
+    });
+  }
+
+  @override
+  void dispose() {
+    _drivePush?.cancel();
+    super.dispose();
   }
 
   // 💡 未処理の入金通知を1件ずつポップアップで聞く（古い順）

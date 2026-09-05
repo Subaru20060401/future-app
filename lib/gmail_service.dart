@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:extension_google_sign_in_as_googleapis_auth/extension_google_sign_in_as_googleapis_auth.dart';
+import 'package:googleapis/drive/v3.dart' as drive;
 import 'package:googleapis/gmail/v1.dart' as gmail;
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -144,8 +145,13 @@ class GmailService {
   GmailService._();
   static final GmailService instance = GmailService._();
 
-  // Gmail読み取り専用スコープ
-  static const List<String> _scopes = <String>[gmail.GmailApi.gmailReadonlyScope];
+  // Gmail読み取り専用 ＋ Driveのアプリ専用フォルダ（端末間の同期用）。
+  // 💡 drive.appdata はユーザーのDriveの「見えない領域」で、このアプリが作った
+  //   ファイルしか読み書きできない。他のファイルには一切アクセスしない。
+  static const List<String> _scopes = <String>[
+    gmail.GmailApi.gmailReadonlyScope,
+    drive.DriveApi.driveAppdataScope,
+  ];
   final GoogleSignIn _googleSignIn = GoogleSignIn(scopes: _scopes);
 
   // 💡 Webは「サインイン（本人確認）」と「スコープ許可（Gmailの読み取り）」が別物。
@@ -246,6 +252,14 @@ class GmailService {
     final account = await _googleSignIn.signIn();
     if (account != null) await requestGmailAccess();
     return account;
+  }
+
+  // 💡 Drive（アプリ専用フォルダ）のAPI。端末間の同期で使う。
+  //   未連携・許可なしなら null。
+  Future<drive.DriveApi?> driveApi() async {
+    final client = await _googleSignIn.authenticatedClient();
+    if (client == null) return null;
+    return drive.DriveApi(client);
   }
 
   Future<void> signOut() {
