@@ -8,15 +8,18 @@ void main() {
   setUp(() => SharedPreferences.setMockInitialValues({}));
 
   group('cardChoices', () {
-    test('既定のカードが並び、「その他」が最後に来る', () {
-      final app = AppState();
+    test('初期カードを配ると並び、「その他」が最後に来る', () {
+      final app = AppState()
+        ..cardPaymentDays.addAll(AppState.kSeedCardPaymentDays);
       expect(app.cardChoices.first, '三井OLIVE');
       expect(app.cardChoices.last, AppState.kOtherCard);
       expect(app.cardChoices, contains('楽天カード'));
     });
 
     test('設定で追加したカードが選択肢に入る', () {
-      final app = AppState()..setCardPaymentDay('セゾンカード', 4);
+      final app = AppState()
+        ..cardPaymentDays.addAll(AppState.kSeedCardPaymentDays)
+        ..setCardPaymentDay('セゾンカード', 4);
       expect(app.cardChoices, contains('セゾンカード'));
       expect(app.cardChoices.last, AppState.kOtherCard); // 「その他」は末尾のまま
     });
@@ -46,6 +49,41 @@ void main() {
         interestRate: 15.0,
       ));
       expect(app.cardChoices, contains('オリコカード'));
+    });
+
+    test('カードを外せる（型に焼き付いていない）', () {
+      final app = AppState()
+        ..cardPaymentDays.addAll(AppState.kSeedCardPaymentDays);
+      expect(app.cardChoices, contains('楽天カード'));
+      app.removeCard('楽天カード');
+      expect(app.cardChoices, isNot(contains('楽天カード')));
+    });
+
+    test('外したカードは取り込みで復活しない', () {
+      final src = AppState()
+        ..cardPaymentDays.addAll(AppState.kSeedCardPaymentDays);
+      src.removeCard('メルカード');
+
+      // 既定入りの端末が、削除済みのデータを取り込む
+      final dst = AppState()
+        ..cardPaymentDays.addAll(AppState.kSeedCardPaymentDays);
+      dst.importJson(src.exportJson());
+      expect(dst.cardPaymentDays.containsKey('メルカード'), isFalse);
+      expect(dst.cardPaymentDays.containsKey('三井OLIVE'), isTrue);
+    });
+
+    test('明細が残っているカードは、外しても選択肢に残る', () {
+      final app = AppState()
+        ..cardPaymentDays.addAll(AppState.kSeedCardPaymentDays);
+      app.payments.add(Payment(
+        id: 'p1',
+        cardName: '楽天カード',
+        amount: 500,
+        paymentDate: DateTime(2026, 8, 1),
+        source: PaymentSource.usage,
+      ));
+      app.removeCard('楽天カード');
+      expect(app.cardChoices, contains('楽天カード')); // 過去データは選べる
     });
 
     test('重複せず、空文字も入らない', () {

@@ -156,12 +156,28 @@ class SettingsScreen extends StatelessWidget {
                   '${appState.closingLabelOf(e.key)} → 毎月${e.value}日 引き落とし',
                   style: const TextStyle(fontSize: 12),
                 ),
-                trailing: TextButton(
-                  child: const Text('変更', style: TextStyle(fontSize: 15)),
-                  onPressed: () async {
-                    await _editCardDays(context, appState, e.key);
-                    setLocal(() {});
-                  },
+                trailing: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    TextButton(
+                      child: const Text('変更', style: TextStyle(fontSize: 15)),
+                      onPressed: () async {
+                        await _editCardDays(context, appState, e.key);
+                        setLocal(() {});
+                      },
+                    ),
+                    IconButton(
+                      tooltip: '一覧から外す',
+                      icon: const Icon(Icons.close, size: 18, color: Colors.grey),
+                      onPressed: () async {
+                        final ok = await _confirm(context, '${e.key} を外す',
+                            'カードの一覧から外します。登録済みの明細は消えません。');
+                        if (ok != true) return;
+                        appState.removeCard(e.key);
+                        setLocal(() {});
+                      },
+                    ),
+                  ],
                 ),
               )),
               ListTile(

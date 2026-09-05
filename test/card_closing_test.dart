@@ -75,7 +75,9 @@ void main() {
     });
 
     test('内訳ラベルに対象期間が付く', () {
-      final app = AppState()..setCardClosingDay('楽天カード', 15);
+      final app = AppState()
+        ..cardPaymentDays.addAll(AppState.kSeedCardPaymentDays)
+        ..setCardClosingDay('楽天カード', 15);
       expect(app.drawLabelOf('楽天カード', DateTime(2026, 9)), '楽天カード（7/16〜8/15利用）');
       // 月末締めのカードは従来どおり素のラベル
       expect(app.drawLabelOf('三井OLIVE', DateTime(2026, 9)), '三井OLIVE');
@@ -84,7 +86,7 @@ void main() {
 
   group('引き落とし内訳への反映', () {
     test('締め日を変えると引き落とし額が変わる', () {
-      final app = AppState();
+      final app = AppState()..cardPaymentDays.addAll(AppState.kSeedCardPaymentDays);
       app.payments.addAll([
         usage('楽天カード', 1000, DateTime(2026, 7, 20)),
         usage('楽天カード', 5000, DateTime(2026, 8, 20)),

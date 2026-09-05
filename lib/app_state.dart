@@ -908,8 +908,14 @@ class AppState extends ChangeNotifier {
   // アプリの背景テーマ（グラデーションのキー）。既定はピンク。
   String backgroundTheme = 'pink';
 
-  // カード別引き落とし日（日付）。設定で変更可能。
-  Map<String, int> cardPaymentDays = {
+  // 💡 カード別引き落とし日。**初期値をここに埋め込まない**。
+  //   埋め込むと (1)既定のカードを二度と削除できない
+  //   (2)別端末で消したカードが同期のたびに復活する、という不具合になる。
+  //   代わりに、初回起動時だけ下の種をデータとして書き込む。
+  Map<String, int> cardPaymentDays = {};
+
+  // 初回起動時にだけ配る初期カード（以後はただのデータ。削除も同期もできる）
+  static const Map<String, int> kSeedCardPaymentDays = {
     '三井OLIVE': 26,
     '楽天カード': 29,
     'PayPayカード': 27,
@@ -3042,6 +3048,15 @@ class AppState extends ChangeNotifier {
 
   bool isMonthEndClosing(String cardName) => closingDayOf(cardName) >= 31;
 
+  // 💡 カードを設定から外す。明細は消さない（過去の記録は残す）。
+  //   cardChoices は明細に出てくるカード名も拾うので、過去データの表示は壊れない。
+  void removeCard(String cardName) {
+    cardPaymentDays.remove(cardName);
+    cardClosingDays.remove(cardName);
+    _saveCardPaymentDays();
+    notifyListeners();
+  }
+
   void setCardClosingDay(String cardName, int day) {
     cardClosingDays[cardName] = day.clamp(1, 31);
     _saveCardPaymentDays();
@@ -3515,9 +3530,14 @@ class AppState extends ChangeNotifier {
     (map['paymentNotes'] as Map?)?.forEach((k, v) {
       if (v is String) paymentNotes['$k'] = v;
     });
-    (map['cardPaymentDays'] as Map?)?.forEach((k, v) {
-      if (v is int) cardPaymentDays[k] = v;
-    });
+    // 💡 マージだと、別端末で削除したカードが取り込みのたびに復活する。置き換える。
+    final cpd = map['cardPaymentDays'] as Map?;
+    if (cpd != null) {
+      cardPaymentDays.clear();
+      cpd.forEach((k, v) {
+        if (v is int) cardPaymentDays['$k'] = v;
+      });
+    }
     cardClosingDays.clear();
     (map['cardClosingDays'] as Map?)?.forEach((k, v) {
       if (v is int) cardClosingDays[k] = v;
@@ -3832,10 +3852,18 @@ class AppState extends ChangeNotifier {
     showWalletCash = prefs.getBool('saved_show_wallet_cash') ?? true;
     backgroundTheme = prefs.getString('saved_background_theme') ?? 'pink';
     final cpdStr = prefs.getString('saved_card_payment_days');
-    if (cpdStr != null) {
-      (jsonDecode(cpdStr) as Map<String, dynamic>).forEach((k, v) {
-        if (v is int) cardPaymentDays[k] = v;
-      });
+    if (cpdStr == null) {
+      // 初回起動：種をデータとして書き込む（以後はここを通らない）
+      cardPaymentDays = Map<String, int>.from(kSeedCardPaymentDays);
+      await prefs.setString('saved_card_payment_days', jsonEncode(cardPaymentDays));
+    } else {
+      // 保存済みの内容で「置き換える」。消したカードが復活しないように。
+      cardPaymentDays
+        ..clear()
+        ..addAll({
+          for (final e in (jsonDecode(cpdStr) as Map<String, dynamic>).entries)
+            if (e.value is int) e.key: e.value as int
+        });
     }
     final pnStr = prefs.getString('saved_payment_notes');
     if (pnStr != null) {
