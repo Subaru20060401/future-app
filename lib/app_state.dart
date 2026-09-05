@@ -575,8 +575,7 @@ class Payment {
   String sourceId; // メール由来の一意キー（自動取り込みの識別用）
   String note; // 利用先（店舗名）など
   // 💡 「記録として残すが、金額は合計に足さない」明細。
-  //   Amazonの注文・発送メールには支払いカードが書かれていないため、
-  //   そのままだとカード会社の利用通知と二重計上になる。既定はこちら。
+  //   同じ買い物がカード会社の通知からも入ってきたときだけ立てる。
   bool infoOnly;
 
   Payment({
@@ -1350,9 +1349,10 @@ class AppState extends ChangeNotifier {
 
   // ───── Amazonの明細（支払いカードが分からない問題）─────
   // 💡 Amazonの注文・発送メールには「どのカードで払ったか」が書いていない。
-  //   そのまま計上すると、カード会社の利用通知と同じ買い物を二重に数えてしまう。
-  //   なので既定は infoOnly（記録するが合計に足さない）。
-  //   実際に使ったカードが分かっているときだけ、手で付け替えて計上する。
+  //   既定では Amazonマスター の支出として計上し、
+  //   別のカードで払ったと分かったときだけ手で付け替える。
+  //   同じカード・同じ日・同じ金額の本物の明細が来たときだけ、
+  //   同じ買い物の二重計上になるので infoOnly（記録するが足さない）に落とす。
   static const String kAmazonSourcePrefix = 'amazon#';
 
   bool isAmazonPayment(Payment p) => p.sourceId.startsWith(kAmazonSourcePrefix);
@@ -1400,18 +1400,6 @@ class AppState extends ChangeNotifier {
     return true;
   }
 
-  // 付け替えをやめて「情報のみ」に戻す
-  void resetAmazonPayment(String paymentId) {
-    final i = payments.indexWhere((e) => e.id == paymentId);
-    if (i < 0) return;
-    final p = payments[i];
-    if (!isAmazonPayment(p)) return;
-    amazonCardOverrides.remove(p.sourceId);
-    p.cardName = 'Amazonマスター';
-    p.infoOnly = true;
-    saveData();
-    notifyListeners();
-  }
 
   void setPaymentNote(String paymentId, String note) {
     final i = payments.indexWhere((p) => p.id == paymentId);
@@ -1536,23 +1524,23 @@ class AppState extends ChangeNotifier {
     for (final it in desired) {
       final k = _dupKey(it.cardName, it.amount, it.date, it.source);
       desiredKeys.add(k);
-      // 💡 Amazonは支払いカードが分からないので既定は「情報のみ」。
-      //   手で付け替えてあり、かつ同日・同額の本物の明細が無いときだけ計上する。
+      // 💡 Amazonは既定どおり Amazonマスター として計上する。
+      //   手で付け替えてあればそのカードへ。
+      //   ただし同じカード・同じ日・同じ金額の本物の明細が既にあるときだけは、
+      //   同じ買い物を二度数えることになるので「記録のみ」に落とす。
       var card = it.cardName;
       var infoOnly = false;
       if (it.sourceId.startsWith(kAmazonSourcePrefix)) {
-        final moved = amazonCardOverrides[it.sourceId];
-        final duplicated = moved != null &&
-            desired.any((o) =>
-                !o.sourceId.startsWith(kAmazonSourcePrefix) &&
-                o.cardName == moved &&
-                o.amount == it.amount &&
-                _formatDate(o.date) == _formatDate(it.date));
-        if (moved != null && !duplicated) {
-          card = moved;
-        } else {
+        card = amazonCardOverrides[it.sourceId] ?? it.cardName;
+        final duplicated = desired.any((o) =>
+            !o.sourceId.startsWith(kAmazonSourcePrefix) &&
+            o.cardName == card &&
+            o.amount == it.amount &&
+            _formatDate(o.date) == _formatDate(it.date));
+        if (duplicated) {
           infoOnly = true;
-          if (duplicated) amazonCardOverrides.remove(it.sourceId);
+          amazonCardOverrides.remove(it.sourceId);
+          card = it.cardName; // Amazonマスターの記録として残す
         }
       }
       payments.add(Payment(

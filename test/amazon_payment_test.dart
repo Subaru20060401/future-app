@@ -21,22 +21,39 @@ void main() {
   final d = DateTime(2026, 9, 3);
   final amazon = item('Amazonマスター', 3000, d, 'amazon#249-1');
 
-  group('既定は「記録のみ」', () {
-    test('Amazon明細は合計に入らない', () {
+  group('既定は Amazonマスター として計上', () {
+    test('Amazon明細はそのまま支出になる', () {
       final app = AppState()..reconcilePayments([amazon]);
       final p = app.payments.single;
-      expect(p.infoOnly, isTrue);
-      expect(app.paymentTotalsByCardOf(DateTime(2026, 9))['Amazonマスター'], isNull);
+      expect(p.cardName, 'Amazonマスター');
+      expect(p.infoOnly, isFalse);
+      expect(app.paymentTotalsByCardOf(DateTime(2026, 9))['Amazonマスター'], 3000);
     });
 
-    test('カード会社の通知と並んでも二重にならない', () {
-      // 楽天で払った → Amazonの発送メールと楽天の利用通知が両方来る
+    test('Amazonマスターで払った分は1件に統合される（二重にならない）', () {
+      // 発送メールとvpassの利用通知が同じ買い物を指す。
+      // カード・日付・金額が同じなので、取り込みの重複判定で1件にまとまる。
+      final app = AppState()
+        ..reconcilePayments([amazon, item('Amazonマスター', 3000, d, 'mail-v1')]);
+      expect(app.payments, hasLength(1));
+      expect(app.paymentTotalsByCardOf(DateTime(2026, 9))['Amazonマスター'], 3000);
+    });
+
+    test('別カードの通知は自動では重複と見なさない（移すまでは両方出る）', () {
+      // 楽天で払った場合、金額が同じでもカードが違うので機械的には判断できない。
+      // ユーザーが「使ったカードに移す」を押した時点で重複が解消される。
       final app = AppState()
         ..reconcilePayments([amazon, item('楽天カード', 3000, d, 'mail-r1')]);
       final totals = app.paymentTotalsByCardOf(DateTime(2026, 9));
+      expect(totals['Amazonマスター'], 3000);
       expect(totals['楽天カード'], 3000);
-      expect(totals['Amazonマスター'], isNull);
-      expect(totals.values.fold(0, (s, v) => s + v), 3000); // 合計は1件ぶん
+
+      // 移すと重複が検出され、Amazon側が記録のみになる
+      final az = app.payments.firstWhere((p) => app.isAmazonPayment(p));
+      expect(app.moveAmazonPaymentTo(az.id, '楽天カード'), isFalse);
+      final after = app.paymentTotalsByCardOf(DateTime(2026, 9));
+      expect(after['楽天カード'], 3000);
+      expect(after['Amazonマスター'], isNull);
     });
 
     test('カード会社の通知（vpass由来）は普通に計上される', () {
@@ -74,6 +91,7 @@ void main() {
       final app = AppState()..reconcilePayments([amazon]);
       app.moveAmazonPaymentTo(app.payments.single.id, '楽天カード');
       expect(app.payments.single.infoOnly, isFalse);
+      expect(app.payments.single.cardName, '楽天カード');
 
       // 後日、楽天の利用通知が届いて再取り込み
       app.reconcilePayments([amazon, item('楽天カード', 3000, d, 'mail-r1')]);
@@ -91,16 +109,17 @@ void main() {
       expect(app.payments.single.infoOnly, isFalse);
     });
 
-    test('手で情報のみに戻せる', () {
+    test('Amazonマスターへ選び直せば元に戻る', () {
       final app = AppState()..reconcilePayments([amazon]);
       final id = app.payments.single.id;
       app.moveAmazonPaymentTo(id, '楽天カード');
-      app.resetAmazonPayment(id);
+      expect(app.payments.single.cardName, '楽天カード');
 
+      app.moveAmazonPaymentTo(id, 'Amazonマスター');
       final p = app.payments.single;
       expect(p.cardName, 'Amazonマスター');
-      expect(p.infoOnly, isTrue);
-      expect(app.paymentTotalsByCardOf(DateTime(2026, 9))['楽天カード'], isNull);
+      expect(p.infoOnly, isFalse);
+      expect(app.paymentTotalsByCardOf(DateTime(2026, 9))['Amazonマスター'], 3000);
     });
 
     test('付け替えは書き出し・取り込みで保たれる', () {

@@ -291,7 +291,7 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
                           ),
                           subtitle: Text(
                             p.infoOnly
-                                ? '${_dateLabel(p)}\n${p.note.isNotEmpty ? p.note : 'Amazonの購入記録'}・支払いカード未設定'
+                                ? '${_dateLabel(p)}\n他のカードで計上済みのため、記録のみ'
                                 : (p.note.isNotEmpty
                                     ? '${_dateLabel(p)}\n${p.note}'
                                     : '${_dateLabel(p)}\nタップして利用先を書く'),
@@ -316,15 +316,12 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
                               //   ここで実際に使ったカードへ付け替えられるようにする。
                               if (appState.isAmazonPayment(p))
                                 IconButton(
-                                  tooltip: p.infoOnly ? '使ったカードに移す' : '情報のみに戻す',
-                                  icon: Icon(
-                                      p.infoOnly
-                                          ? Icons.drive_file_move_outline
-                                          : Icons.undo,
-                                      color: Colors.indigo),
-                                  onPressed: () => p.infoOnly
-                                      ? _moveAmazon(appState, p)
-                                      : appState.resetAmazonPayment(p.id),
+                                  tooltip: p.infoOnly ? '記録のみ（計上していません）' : '使ったカードに移す',
+                                  icon: Icon(Icons.drive_file_move_outline,
+                                      color: p.infoOnly
+                                          ? Colors.grey
+                                          : Colors.indigo),
+                                  onPressed: () => _moveAmazon(appState, p),
                                 ),
                               // 最低分割金額を満たすカードのみ「分割に変換」を表示
                               if (canInstallment(p.cardName, p.amount))
@@ -376,8 +373,8 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
                       style: const TextStyle(fontSize: 12, color: Colors.grey)),
                   const SizedBox(height: 4),
                   const Text(
-                    'Amazonのメールには支払いカードが載らないため、既定では金額を合計に入れていません。'
-                    '実際に使ったカードを選ぶと、その分が支出に計上されます。',
+                    'Amazonのメールには支払いカードが載らないため、既定は Amazonマスター として'
+                    '計上しています。別のカードで払ったなら選び直してください。',
                     style: TextStyle(fontSize: 11, color: Colors.grey),
                   ),
                 ],
