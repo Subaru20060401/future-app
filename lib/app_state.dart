@@ -1727,8 +1727,9 @@ class AppState extends ChangeNotifier {
   }
 
   // 回数を編集して月額を再計算（金利はカード規則で自動判定）
-  void editInstallment(String id, {required int count}) {
+  void editInstallment(String id, {required int count, String? cardName}) {
     final inst = installments.firstWhere((e) => e.id == id);
+    if (cardName != null) inst.cardName = cardName;
     inst.installmentCount = count;
     inst.remainingMonths = count;
     inst.interestRate = effectiveRateFor(inst.cardName, count);
@@ -2605,6 +2606,31 @@ class AppState extends ChangeNotifier {
     return installmentTotalByCardOf(month).values.fold(0, (s, v) => s + v);
   }
 
+  // 💡 カードが設定されていない分割払い（古いデータ）。
+  //   どのカードにも足せないため、そのままだと予想から消えてしまう。
+  //   別枠で残して、カードを設定するよう促す。
+  int unassignedInstallmentTotalOf(DateTime month) {
+    var total = 0;
+    final now = DateTime.now();
+    for (final i in installments) {
+      if (i.cardName.trim().isNotEmpty) continue;
+      final start = i.startDate;
+      if (start == null) {
+        if (i.remainingMonths > 0 && month.year == now.year && month.month == now.month) {
+          total += i.monthlyAmount;
+        }
+        continue;
+      }
+      final diff = (month.year - start.year) * 12 + (month.month - start.month);
+      if (diff >= 0 && diff < i.installmentCount) total += i.monthlyAmount;
+    }
+    return total;
+  }
+
+  // カード未設定のまま残っている分割払い（設定を促すために一覧で使う）
+  List<Installment> get installmentsWithoutCard =>
+      installments.where((i) => i.cardName.trim().isEmpty).toList();
+
   List<({String label, int amount, int colorValue})> expenseBreakdownOf(DateTime month) {
     final out = <({String label, int amount, int colorValue})>[];
     final totals = Map<String, int>.from(paymentTotalsByCardOf(month));
@@ -2622,6 +2648,17 @@ class AppState extends ChangeNotifier {
         out.add((label: card, amount: amount, colorValue: cardColorOf(card).toARGB32()));
       }
     });
+    // カードが決まっていない分割は足せないので、消さずに別枠で残す
+    if (!isExpenseConfirmedByBank(month)) {
+      final unassigned = unassignedInstallmentTotalOf(month);
+      if (unassigned > 0) {
+        out.add((
+          label: '分割払い（カード未設定）',
+          amount: unassigned,
+          colorValue: Colors.deepOrange.toARGB32(),
+        ));
+      }
+    }
     final subTotal = subscriptionTotalOf(month);
     if (subTotal > 0) {
       out.add((label: '定期支払い', amount: subTotal, colorValue: Colors.purple.toARGB32()));

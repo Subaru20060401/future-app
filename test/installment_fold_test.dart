@@ -98,6 +98,49 @@ void main() {
     });
   });
 
+  group('カード未設定の古いデータ', () {
+    test('消さずに別枠で残す（予想から抜け落ちない）', () {
+      final a = app();
+      a.installments.add(Installment(
+        id: 'old',
+        name: '昔の分割',
+        cardName: '', // 旧UIではカードを選べなかった
+        totalAmount: 30000,
+        installmentCount: 6,
+        remainingMonths: 6,
+        monthlyAmount: 5000,
+        interestRate: 0,
+        startDate: augDay,
+      ));
+
+      expect(a.unassignedInstallmentTotalOf(aug), 5000);
+      final labels = a.expenseBreakdownOf(aug).map((e) => e.label);
+      expect(labels, contains('分割払い（カード未設定）'));
+      expect(a.installmentsWithoutCard, hasLength(1));
+    });
+
+    test('カードを設定すればそのカードに合算される', () {
+      final a = app();
+      a.installments.add(Installment(
+        id: 'old',
+        name: '昔の分割',
+        cardName: '',
+        totalAmount: 30000,
+        installmentCount: 6,
+        remainingMonths: 6,
+        monthlyAmount: 5000,
+        interestRate: 0,
+        startDate: augDay,
+      ));
+
+      a.editInstallment('old', count: 6, cardName: '三井OLIVE');
+      expect(a.unassignedInstallmentTotalOf(aug), 0);
+      expect(a.installmentTotalByCardOf(aug)['三井OLIVE'], greaterThan(0));
+      final labels = a.expenseBreakdownOf(aug).map((e) => e.label);
+      expect(labels, isNot(contains('分割払い（カード未設定）')));
+    });
+  });
+
   group('銀行確定済みの月', () {
     test('確定額に含まれるので分割を足さない', () {
       final a = app()

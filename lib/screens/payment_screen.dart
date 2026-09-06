@@ -640,22 +640,43 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
   // 分割回数を編集（金利込みで月額再計算）
   void _editInstallment(AppState appState, Installment inst) {
     final countCtrl = TextEditingController(text: inst.installmentCount.toString());
+    final cards = appState.cardChoices
+        .where((c) => c != AppState.kOtherCard)
+        .toList();
+    String? card = inst.cardName.trim().isEmpty ? null : inst.cardName;
     showDialog(
       context: context,
       builder: (context) => StatefulBuilder(
         builder: (context, setLocal) {
           final count = int.tryParse(countCtrl.text) ?? 0;
-          final valid = count >= 2;
+          final valid = count >= 2 && card != null;
           final free = isInstallmentInterestFree(inst.cardName, count);
           final rate = appState.effectiveRateFor(inst.cardName, count);
           final monthly = valid ? computeInstallmentMonthly(inst.totalAmount, count, rate) : 0;
           return AlertDialog(
-            title: const Text('分割回数を編集'),
+            title: const Text('分割払いを編集'),
             content: Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text('${inst.name}  元金¥${inst.totalAmount}'),
+                const SizedBox(height: 8),
+                // 💡 分割はカードの請求に含めて落ちるので、カードが決まっていないと
+                //   引き落とし日も金額も割り当てられない。
+                const Text('どのカードで組んだか（必須）',
+                    style: TextStyle(fontSize: 12, color: Colors.grey)),
+                DropdownButton<String>(
+                  value: card,
+                  isExpanded: true,
+                  hint: const Text('カードを選ぶ'),
+                  items: cards
+                      .map((c) => DropdownMenuItem(value: c, child: Text(c)))
+                      .toList(),
+                  onChanged: (v) => setLocal(() => card = v),
+                ),
+                if (card == null)
+                  const Text('カードを選ぶまで保存できません',
+                      style: TextStyle(color: Colors.red, fontSize: 12)),
                 const SizedBox(height: 8),
                 TextField(
                   controller: countCtrl,
@@ -679,7 +700,8 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
               ElevatedButton(
                 onPressed: valid
                     ? () {
-                        appState.editInstallment(inst.id, count: count);
+                        appState.editInstallment(inst.id,
+                            count: count, cardName: card);
                         Navigator.pop(context);
                       }
                     : null,
