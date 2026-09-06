@@ -24,6 +24,7 @@ import 'card_settings_screen.dart';
 import 'workplace_list_screen.dart';
 import 'budget_screen.dart';
 import '../widgets/app_sheet.dart';
+import '../card_styles.dart';
 
 class SettingsScreen extends StatelessWidget {
   const SettingsScreen({super.key});
@@ -174,6 +175,37 @@ class SettingsScreen extends StatelessWidget {
                   ],
                 ),
               )),
+              // 💡 銀行の引落確定メールは請求元の表記でカード名をよこすため、
+              //   自分が付けた名前と食い違って同じカードが2つに割れる。
+              //   割れている候補をここに出して、1つにまとめられるようにする。
+              if (appState.unregisteredCardNames.isNotEmpty) ...[
+                const Divider(height: 24),
+                const Text('登録していないカード名',
+                    style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
+                const SizedBox(height: 2),
+                const Text(
+                    '銀行やカード会社のメールから、この名前で明細が入っています。'
+                    '上のカードと同じものなら、まとめると1枚として扱えます。',
+                    style: TextStyle(fontSize: 12, color: Colors.black54)),
+                const SizedBox(height: 6),
+                ...appState.unregisteredCardNames.map((u) => ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      leading: const Icon(Icons.help_outline,
+                          size: 20, color: Colors.orange),
+                      title: Text(u.name),
+                      subtitle: Text('明細 ${u.count}件',
+                          style: const TextStyle(fontSize: 12)),
+                      trailing: TextButton(
+                        child: const Text('まとめる'),
+                        onPressed: () async {
+                          final to = await _pickCardToMerge(context, appState, u.name);
+                          if (to == null) return;
+                          appState.mergeCardName(u.name, to);
+                          setLocal(() {});
+                        },
+                      ),
+                    )),
+              ],
               ListTile(
                 contentPadding: EdgeInsets.zero,
                 leading: const Icon(Icons.add, color: Colors.blue),
@@ -215,6 +247,39 @@ class SettingsScreen extends StatelessWidget {
             ],
           ),
         ),
+      ),
+    );
+  }
+
+  // どのカードにまとめるか選ぶ
+  Future<String?> _pickCardToMerge(
+      BuildContext context, AppState appState, String from) {
+    final cards = appState.cardPaymentDays.keys.toList();
+    return showDialog<String>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: Text('「$from」をまとめる'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text('同じカードを選んでください。既存の明細もまとめ先に付け替わり、'
+                '次回以降の取り込みでも同じ扱いになります。',
+                style: TextStyle(fontSize: 12, color: Colors.black54)),
+            const SizedBox(height: 8),
+            ...cards.map((c) => ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  dense: true,
+                  leading: Icon(cardStyleOf(c).icon, color: cardStyleOf(c).color),
+                  title: Text(c),
+                  onTap: () => Navigator.pop(context, c),
+                )),
+          ],
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context), child: const Text('キャンセル')),
+        ],
       ),
     );
   }

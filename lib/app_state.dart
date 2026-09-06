@@ -1353,6 +1353,56 @@ class AppState extends ChangeNotifier {
   //   別のカードで払ったと分かったときだけ手で付け替える。
   //   同じカード・同じ日・同じ金額の本物の明細が来たときだけ、
   //   同じ買い物の二重計上になるので infoOnly（記録するが足さない）に落とす。
+  // ───── カード名の別名 ─────
+  // 💡 銀行の引落確定メールは、カード名を銀行の請求元表記でよこす
+  //   （例: 「ミツビシUFJニコス」）。自分が設定で付けた名前（例: 「三菱UFJカード」）
+  //   とは一致しないため、同じカードが2つに割れてしまう。
+  //   取り込んだ名前 → まとめ先の名前 を覚えて突き合わせる。
+  final Map<String, String> cardAliases = {};
+
+  String resolveCardName(String name) => cardAliases[name] ?? name;
+
+  // 💡 設定に登録されていないカード名で入っている明細（＝割れている候補）。
+  List<({String name, int count})> get unregisteredCardNames {
+    final counts = <String, int>{};
+    for (final p in payments) {
+      final n = p.cardName.trim();
+      if (n.isEmpty || n == kOtherCard) continue;
+      if (cardPaymentDays.containsKey(n)) continue;
+      counts[n] = (counts[n] ?? 0) + 1;
+    }
+    final out = [for (final e in counts.entries) (name: e.key, count: e.value)];
+    out.sort((a, b) => b.count.compareTo(a.count));
+    return out;
+  }
+
+  // 💡 割れているカード名を1つにまとめる。既存の明細もその場で付け替える。
+  void mergeCardName(String from, String to) {
+    if (from == to || from.trim().isEmpty) return;
+    cardAliases[from] = to;
+    for (final p in payments) {
+      if (p.cardName == from) p.cardName = to;
+    }
+    for (final i in installments) {
+      if (i.cardName == from) i.cardName = to;
+    }
+    for (final s in subscriptions) {
+      if (s.method == from) s.method = to;
+    }
+    // 設定側にも残っていたら消す（まとめ先へ寄せる）
+    cardPaymentDays.remove(from);
+    cardClosingDays.remove(from);
+    saveData();
+    _saveCardPaymentDays();
+    notifyListeners();
+  }
+
+  void unmergeCardName(String from) {
+    cardAliases.remove(from);
+    saveData();
+    notifyListeners();
+  }
+
   static const String kAmazonSourcePrefix = 'amazon#';
 
   bool isAmazonPayment(Payment p) => p.sourceId.startsWith(kAmazonSourcePrefix);
@@ -1465,9 +1515,19 @@ class AppState extends ChangeNotifier {
   //   ・支払済み(paid)は引き継ぎ、手動追加(manual)・変換済みは保持
   //   戻り値は (追加, 削除)。
   ({int added, int removed}) reconcilePayments(
-      Iterable<({String cardName, int amount, DateTime date, PaymentSource source, String sourceId, String note})> items,
+      Iterable<({String cardName, int amount, DateTime date, PaymentSource source, String sourceId, String note})> rawItems,
       {DateTime? since}) {
     bool inWindow(DateTime d) => since == null || !d.isBefore(since);
+
+    // 💡 銀行表記などの別名を、自分が付けたカード名に寄せてから照合する
+    final items = rawItems.map((it) => (
+          cardName: resolveCardName(it.cardName),
+          amount: it.amount,
+          date: it.date,
+          source: it.source,
+          sourceId: it.sourceId,
+          note: it.note,
+        ));
 
     // 銀行確定があるカード月（請求予定を抑制）
     final bankKeys = <String>{};
@@ -3289,6 +3349,7 @@ class AppState extends ChangeNotifier {
       'balanceUpdatedAt': balanceUpdatedAt?.toIso8601String(),
       'paymentNotes': paymentNotes,
       'amazonCardOverrides': amazonCardOverrides,
+      'cardAliases': cardAliases,
       'cardPaymentDays': cardPaymentDays,
       'cardClosingDays': cardClosingDays,
       'events': events.map((k, v) => MapEntry(k, v.map((e) => e.toJson()).toList())),
@@ -3620,6 +3681,10 @@ class AppState extends ChangeNotifier {
     (map['amazonCardOverrides'] as Map?)?.forEach((k, v) {
       if (v is String) amazonCardOverrides['$k'] = v;
     });
+    cardAliases.clear();
+    (map['cardAliases'] as Map?)?.forEach((k, v) {
+      if (v is String) cardAliases['$k'] = v;
+    });
     // 💡 マージだと、別端末で削除したカードが取り込みのたびに復活する。置き換える。
     final cpd = map['cardPaymentDays'] as Map?;
     if (cpd != null) {
@@ -3723,6 +3788,7 @@ class AppState extends ChangeNotifier {
     await prefs.setString('saved_shifts', jsonEncode(shifts));
     await prefs.setString('saved_payment_notes', jsonEncode(paymentNotes));
     await prefs.setString('saved_amazon_overrides', jsonEncode(amazonCardOverrides));
+    await prefs.setString('saved_card_aliases', jsonEncode(cardAliases));
     await prefs.setString('saved_actual_salaries', jsonEncode(actualSalaries));
     await prefs.setString('saved_actual_salaries_by_wp', jsonEncode(actualSalariesByWp));
     await prefs.setString('saved_balance_updated_at', balanceUpdatedAt?.toIso8601String() ?? '');
@@ -3955,6 +4021,12 @@ class AppState extends ChangeNotifier {
           for (final e in (jsonDecode(cpdStr) as Map<String, dynamic>).entries)
             if (e.value is int) e.key: e.value as int
         });
+    }
+    final caStr = prefs.getString('saved_card_aliases');
+    if (caStr != null) {
+      (jsonDecode(caStr) as Map<String, dynamic>).forEach((k, v) {
+        if (v is String) cardAliases[k] = v;
+      });
     }
     final aoStr = prefs.getString('saved_amazon_overrides');
     if (aoStr != null) {
