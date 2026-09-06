@@ -690,7 +690,7 @@ void main() {
       expect(jun['三井OLIVE'], 2000); // paid含む
     });
 
-    test('分割払い: 銀行確定済みの月は別スライスにしない（二重計上回避）・未確定月は表示', () async {
+    test('分割払い: 銀行確定済みの月は足さない・未確定月はカードの請求に含める', () async {
       SharedPreferences.setMockInitialValues({});
       final app = AppState();
       await app.loadData();
@@ -708,17 +708,23 @@ void main() {
         Payment(id: 'b', cardName: '三井OLIVE', amount: 42446, paymentDate: DateTime(2026, 7, 27), source: PaymentSource.bank),
       ];
 
-      // 6月はアクティブ(installmentTotalOf>0)だが銀行確定済み → 分割スライスは出ない
+      // 6月は銀行確定済み → 確定額に分割が含まれるので、カードに足さない
       expect(app.installmentTotalOf(DateTime(2026, 6)), greaterThan(0));
       expect(app.isExpenseConfirmedByBank(DateTime(2026, 6)), isTrue);
-      final jun = app.expenseBreakdownOf(DateTime(2026, 6)).map((e) => e.label).toList();
-      expect(jun.contains('分割払い'), isFalse);
+      final jun = app.expenseBreakdownOf(DateTime(2026, 6));
+      expect(jun.map((e) => e.label).contains('分割払い'), isFalse);
+      expect(jun.firstWhere((e) => e.label == '三井OLIVE').amount, 42446);
+      expect(app.installmentFoldedInto(DateTime(2026, 6)), 0);
 
-      // 8月はアクティブで銀行確定が無い → 分割スライスを表示
+      // 8月は銀行確定が無い → 分割の月額を三井OLIVEの請求に足し込む
+      // （「分割払い」という独立した引き落としは存在しないため）
       expect(app.installmentTotalOf(DateTime(2026, 8)), greaterThan(0));
       expect(app.isExpenseConfirmedByBank(DateTime(2026, 8)), isFalse);
-      final aug = app.expenseBreakdownOf(DateTime(2026, 8)).map((e) => e.label).toList();
-      expect(aug.contains('分割払い'), isTrue);
+      final aug = app.expenseBreakdownOf(DateTime(2026, 8));
+      expect(aug.map((e) => e.label).contains('分割払い'), isFalse);
+      final monthly = app.installmentTotalOf(DateTime(2026, 8));
+      expect(aug.firstWhere((e) => e.label == '三井OLIVE').amount, monthly);
+      expect(app.installmentFoldedInto(DateTime(2026, 8)), monthly);
     });
   });
 

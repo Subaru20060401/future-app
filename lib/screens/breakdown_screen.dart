@@ -239,6 +239,32 @@ class _BreakdownScreenState extends State<BreakdownScreen> {
                 ],
               ),
             ),
+            // 💡 カードの中で分割払いがどれくらいを占めるか（1段下の内訳）。
+            //   分割は独立した引き落としではなくカードの請求に含まれるため、
+            //   カテゴリを分けずにここで割合を見せる。
+            if (appState.installmentTotalByCardOf(_month)[e.label] != null &&
+                e.amount > 0)
+              Builder(builder: (_) {
+                final part = appState.installmentTotalByCardOf(_month)[e.label]!;
+                final pct = (part * 100 / e.amount).round();
+                return Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Text('うち分割払い（$pct%）',
+                            style: TextStyle(
+                                fontSize: 12, color: Colors.deepOrange[700])),
+                      ),
+                      Text('¥$part',
+                          style: TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.deepOrange[700])),
+                    ],
+                  ),
+                );
+              }),
             const Divider(height: 1),
             Flexible(
               child: rows.isEmpty

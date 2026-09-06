@@ -158,6 +158,15 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
     // 記録のみの明細（他のカードで計上済み）は合計に足さない
     final searchTotal =
         list.where((p) => !p.infoOnly).fold<int>(0, (s, p) => s + p.amount);
+    // 💡 分割払いはカードの請求に含まれて落ちるので、カード別の合計にも足す。
+    //   検索で絞っているときは明細の合計だけを見たいので足さない。
+    final byCard = appState.installmentTotalByCardOf(_filterMonth);
+    final installmentPart = (_search.trim().isNotEmpty ||
+            appState.isExpenseConfirmedByBank(_filterMonth))
+        ? 0
+        : (_filterCard == null
+            ? byCard.values.fold(0, (s, v) => s + v)
+            : (byCard[_filterCard] ?? 0));
 
     return Column(
       children: [
@@ -279,7 +288,7 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
                   style: const TextStyle(fontSize: 12, color: Colors.black54)),
               const Spacer(),
               Text(
-                '合計 ¥$searchTotal',
+                '合計 ¥${searchTotal + installmentPart}',
                 style: TextStyle(
                     fontSize: 15,
                     fontWeight: FontWeight.bold,
@@ -288,6 +297,27 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
             ],
           ),
         ),
+        // 💡 分割払いは各カードの請求に含まれて落ちる。上の合計に足し込んであるので、
+        //   ここは内訳の参考表示（二重に足さないための注意書き）。
+        if (installmentPart > 0)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    '※ うち分割払い（各カードの請求に含む・重複して数えないでください）',
+                    style: TextStyle(fontSize: 11, color: Colors.deepOrange[700]),
+                  ),
+                ),
+                Text('¥$installmentPart',
+                    style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.deepOrange[700])),
+              ],
+            ),
+          ),
         Expanded(
           child: list.isEmpty
               ? _empty('この月の請求はありません')
@@ -666,32 +696,59 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
     final nameCtrl = TextEditingController();
     final totalCtrl = TextEditingController();
     final countCtrl = TextEditingController(text: '12');
+    // 💡 分割はカードの請求に含まれて落ちるので、どのカードかが分からないと
+    //   引き落とし日も金額も決まらない。カードは必須にする。
+    final cards = appState.cardChoices
+        .where((c) => c != AppState.kOtherCard)
+        .toList();
+    String? card = cards.isNotEmpty ? cards.first : null;
+
     showDialog(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('分割払いを追加'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            TextField(controller: nameCtrl, decoration: const InputDecoration(labelText: '品名')),
-            TextField(controller: totalCtrl, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: '総額(円)')),
-            TextField(controller: countCtrl, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: '回数')),
+      builder: (context) => StatefulBuilder(
+        builder: (context, setLocal) => AlertDialog(
+          title: const Text('分割払いを追加'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              TextField(controller: nameCtrl, decoration: const InputDecoration(labelText: '品名')),
+              TextField(controller: totalCtrl, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: '総額(円)')),
+              TextField(controller: countCtrl, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: '回数')),
+              const SizedBox(height: 12),
+              const Text('どのカードで組んだか（必須）',
+                  style: TextStyle(fontSize: 12, color: Colors.grey)),
+              DropdownButton<String>(
+                value: card,
+                isExpanded: true,
+                hint: const Text('カードを選ぶ'),
+                items: cards
+                    .map((c) => DropdownMenuItem(value: c, child: Text(c)))
+                    .toList(),
+                onChanged: (v) => setLocal(() => card = v),
+              ),
+              const Text('選んだカードの引き落とし日に、この月額が含まれて落ちます。',
+                  style: TextStyle(fontSize: 11, color: Colors.grey)),
+            ],
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(context), child: const Text('キャンセル')),
+            ElevatedButton(
+              onPressed: card == null
+                  ? null
+                  : () {
+                      appState.addInstallment(
+                        name: nameCtrl.text,
+                        totalAmount: int.tryParse(totalCtrl.text) ?? 0,
+                        count: int.tryParse(countCtrl.text) ?? 1,
+                        cardName: card!,
+                      );
+                      Navigator.pop(context);
+                    },
+              child: const Text('保存'),
+            ),
           ],
         ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context), child: const Text('キャンセル')),
-          ElevatedButton(
-            onPressed: () {
-              appState.addInstallment(
-                name: nameCtrl.text,
-                totalAmount: int.tryParse(totalCtrl.text) ?? 0,
-                count: int.tryParse(countCtrl.text) ?? 1,
-              );
-              Navigator.pop(context);
-            },
-            child: const Text('保存'),
-          ),
-        ],
       ),
     );
   }

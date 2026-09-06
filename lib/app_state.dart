@@ -2574,9 +2574,50 @@ class AppState extends ChangeNotifier {
     return total;
   }
 
+  // 💡 分割払いの月額を、組んだカードごとに分ける。
+  //   実際の引き落としは「分割払い」という独立した請求ではなく、
+  //   それぞれのカードの請求に含まれて、そのカードの引き落とし日に落ちるため。
+  Map<String, int> installmentTotalByCardOf(DateTime month) {
+    final out = <String, int>{};
+    final now = DateTime.now();
+    for (final i in installments) {
+      final card = i.cardName.trim();
+      if (card.isEmpty) continue; // カード未設定は割り当てられない
+      final start = i.startDate;
+      if (start == null) {
+        if (i.remainingMonths > 0 && month.year == now.year && month.month == now.month) {
+          out[card] = (out[card] ?? 0) + i.monthlyAmount;
+        }
+        continue;
+      }
+      final diff = (month.year - start.year) * 12 + (month.month - start.month);
+      if (diff >= 0 && diff < i.installmentCount) {
+        out[card] = (out[card] ?? 0) + i.monthlyAmount;
+      }
+    }
+    return out;
+  }
+
+  // 💡 その月にカードへ合算した分割払いの合計（「※うち分割払い」の参考表示用）。
+  //   銀行確定済みの月は確定額に既に含まれているので0。
+  int installmentFoldedInto(DateTime month) {
+    if (isExpenseConfirmedByBank(month)) return 0;
+    return installmentTotalByCardOf(month).values.fold(0, (s, v) => s + v);
+  }
+
   List<({String label, int amount, int colorValue})> expenseBreakdownOf(DateTime month) {
     final out = <({String label, int amount, int colorValue})>[];
-    paymentTotalsByCardOf(month).forEach((card, amount) {
+    final totals = Map<String, int>.from(paymentTotalsByCardOf(month));
+
+    // 💡 分割払いはカードの請求に含めて落ちるので、カードの金額に足し込む。
+    //   銀行確定済みの月は確定額に既に含まれているため足さない（二重計上になる）。
+    if (!isExpenseConfirmedByBank(month)) {
+      installmentTotalByCardOf(month).forEach((card, amount) {
+        totals[card] = (totals[card] ?? 0) + amount;
+      });
+    }
+
+    totals.forEach((card, amount) {
       if (amount > 0) {
         out.add((label: card, amount: amount, colorValue: cardColorOf(card).toARGB32()));
       }
@@ -2584,12 +2625,6 @@ class AppState extends ChangeNotifier {
     final subTotal = subscriptionTotalOf(month);
     if (subTotal > 0) {
       out.add((label: '定期支払い', amount: subTotal, colorValue: Colors.purple.toARGB32()));
-    }
-    // 💡 分割払いの月額は、銀行確定済みの月ではカードの引き落とし額に既に含まれる
-    //   （二重計上になる）ため別スライスにしない。未確定の先月・今月のみ別表示する。
-    final installmentMonthly = installmentTotalOf(month);
-    if (installmentMonthly > 0 && !isExpenseConfirmedByBank(month)) {
-      out.add((label: '分割払い', amount: installmentMonthly, colorValue: Colors.deepOrange.toARGB32()));
     }
     final atm = withdrawalsOf(month);
     if (atm > 0) {
@@ -2657,11 +2692,28 @@ class AppState extends ChangeNotifier {
             ? (p.source == PaymentSource.bank && sameYm(p.paymentDate, nextMonth))
             : (p.source != PaymentSource.bank && sameYm(p.paymentDate, month));
         if (!belongs) continue;
+        if (p.infoOnly) continue; // 記録のみ（他カードで計上済み）は合計に入っていない
         out.add((
           title: p.note.isNotEmpty ? p.note : sourceLabelOf(p.source),
           subtitle: '${sourceLabelOf(p.source)} ・ ${DateFormat('M/d').format(p.paymentDate)}',
           amount: p.amount,
         ));
+      }
+      // 💡 このカードで組んだ分割払いの当月ぶん。カードの請求に含めて落ちるので、
+      //   合計にも足してあり、明細にも出す（銀行確定済みなら確定額に含まれるので出さない）。
+      if (!cardHasBank) {
+        for (final inst in installments.where((e) => e.cardName == label)) {
+          final start = inst.startDate;
+          if (start == null) continue;
+          final diff = (month.year - start.year) * 12 + (month.month - start.month);
+          if (diff >= 0 && diff < inst.installmentCount) {
+            out.add((
+              title: '分割: ${inst.name}',
+              subtitle: '分割 ${diff + 1}/${inst.installmentCount}回目',
+              amount: inst.monthlyAmount,
+            ));
+          }
+        }
       }
     }
     out.sort((a, b) => b.amount.compareTo(a.amount));
@@ -3019,6 +3071,11 @@ class AppState extends ChangeNotifier {
   // n月に引き落とされる合計（＝ n-1月の支出詳細・除外分とゲート済みを除く）。
   int drawnInMonth(DateTime payMonth) =>
       drawBreakdownOf(payMonth).fold(0, (s, e) => s + e.amount);
+
+  // 💡 n月の引き落としのうち、分割払いぶんはいくらか（参考表示用）。
+  //   各カードの金額に既に含まれているので、合計には足さないこと。
+  int installmentPartOfDraw(DateTime payMonth) =>
+      installmentFoldedInto(DateTime(payMonth.year, payMonth.month - 1));
 
   // 予想用：n月に入金される給料のうち、給料日が編集日より後の勤務先分のみ。
   //   （既に受け取って残高に反映済みの給料を二重に足さない）

@@ -390,6 +390,28 @@ class IncomeScreen extends StatelessWidget {
             Text(title, style: const TextStyle(fontSize: 17, fontWeight: FontWeight.bold)),
             const SizedBox(height: 12),
             ...breakdown.entries.map((e) => row(e.key, e.value)),
+            // 💡 分割払いは各カードの請求に含まれて落ちるので、上のカードの金額に
+            //   足し込んである。ここは「そのうちいくらか」の参考表示で、合計には入れない。
+            if (appState.installmentPartOfDraw(month) > 0)
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Expanded(
+                      child: Text(
+                        '※ うち分割払い（各カードの請求に含む・合計には足しません）',
+                        style: TextStyle(fontSize: 11, color: Colors.deepOrange[700]),
+                      ),
+                    ),
+                    Text('¥${appState.installmentPartOfDraw(month)}',
+                        style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.deepOrange[700])),
+                  ],
+                ),
+              ),
             const Divider(height: 20),
             Row(
               children: [
