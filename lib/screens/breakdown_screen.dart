@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:provider/provider.dart';
 import '../app_state.dart';
+import '../widgets/app_sheet.dart';
 
 typedef BreakdownItem = ({String label, int amount, int colorValue});
 typedef DetailRow = ({String title, String subtitle, int amount});
@@ -215,10 +216,7 @@ class _BreakdownScreenState extends State<BreakdownScreen> {
   // カテゴリをタップ → 個々の明細をボトムシートで表示
   void _showDetail(AppState appState, BreakdownItem e) {
     final rows = widget.detailBuilder!(appState, _month, e.label);
-    showModalBottomSheet(
-      context: context,
-      showDragHandle: true,
-      builder: (context) => SafeArea(
+    showAppSheet(context, dragHandle: true, (context) => SafeArea(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import '../app_state.dart';
+import 'app_sheet.dart';
 
 // 💡 「振込入金のお知らせ」メールを受けて、金額を入力してもらうポップアップ。
 //   メールに金額が載らないため、ユーザーに入力してもらって口座残高へ加算する。
@@ -353,12 +354,7 @@ Future<void> showDrawDialog(
 
 // 💡 引き落としの一覧＋手入力。未反映の引き落としをまとめて処理できる。
 Future<void> showDrawSheet(BuildContext context, AppState appState) async {
-  await showModalBottomSheet<void>(
-    context: context,
-    isScrollControlled: true,
-    shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
-    builder: (ctx) => StatefulBuilder(
+  showAppSheet<void>(context, (ctx) => StatefulBuilder(
       builder: (ctx, setLocal) {
         final pending = appState.pendingDraws;
         return Padding(

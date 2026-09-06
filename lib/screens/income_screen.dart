@@ -10,6 +10,7 @@ import 'history_screen.dart';
 import 'balance_history_screen.dart';
 import 'breakdown_screen.dart';
 import 'trend_screen.dart';
+import '../widgets/app_sheet.dart';
 
 class IncomeScreen extends StatelessWidget {
   const IncomeScreen({super.key});
@@ -380,10 +381,7 @@ class IncomeScreen extends StatelessWidget {
       );
     }
 
-    showModalBottomSheet(
-      context: context,
-      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
-      builder: (_) => Padding(
+    showAppSheet(context, (_) => Padding(
         padding: const EdgeInsets.fromLTRB(20, 20, 20, 32),
         child: Column(
           mainAxisSize: MainAxisSize.min,

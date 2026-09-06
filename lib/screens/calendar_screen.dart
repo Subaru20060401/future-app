@@ -5,6 +5,7 @@ import 'package:intl/intl.dart'; // 💡 追加
 import '../app_state.dart';
 import '../widgets/swipe_to_delete.dart';
 import 'event_edit_screen.dart';
+import '../widgets/app_sheet.dart';
 
 class CalendarScreen extends StatefulWidget {
   const CalendarScreen({super.key});
@@ -19,10 +20,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
   DateTime? _selectedDay = DateTime.now();
 
   void _showPaydayDetail(BuildContext context, ({DateTime date, Workplace workplace, int amount}) e, AppState appState) {
-    showModalBottomSheet(
-      context: context,
-      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
-      builder: (_) => Padding(
+    showAppSheet(context, (_) => Padding(
         padding: const EdgeInsets.all(20),
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -135,10 +133,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
   }
 
   void _showAddDialog(DateTime selectedDay, AppState appState) {
-    showModalBottomSheet(
-      context: context,
-      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
-      builder: (context) {
+    showAppSheet(context, (context) {
         return Padding(
           padding: const EdgeInsets.all(20.0),
           child: Column(
@@ -182,11 +177,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
   void _addShiftWithHistory(DateTime selectedDay, AppState appState) {
     final templates = appState.recentShiftTemplates();
     String hm(int h, int m) => '${h.toString().padLeft(2, '0')}:${m.toString().padLeft(2, '0')}';
-    showModalBottomSheet(
-      context: context,
-      shape: const RoundedRectangleBorder(
-          borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
-      builder: (context) => SafeArea(
+    showAppSheet(context, (context) => SafeArea(
         child: Padding(
           padding: const EdgeInsets.all(16),
           child: Column(

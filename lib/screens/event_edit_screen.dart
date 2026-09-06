@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../app_state.dart';
 import '../workplace_styles.dart';
+import '../widgets/app_sheet.dart';
 
 // 予定の詳細編集（タイトル/色タグ/終日/開始終了/場所/URL/メモ/通知）。
 // iOS純正カレンダーの新規画面を参考にしたレイアウト。
@@ -114,9 +115,7 @@ class _EventEditScreenState extends State<EventEditScreen> {
   }
 
   Future<void> _pickNotify() async {
-    final v = await showModalBottomSheet<Object?>(
-      context: context,
-      builder: (context) => SafeArea(
+    final v = await showAppSheet<Object?>(context, (context) => SafeArea(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: _notifyOptions.entries

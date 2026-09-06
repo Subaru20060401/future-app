@@ -23,6 +23,7 @@ import 'gmail_screen.dart';
 import 'card_settings_screen.dart';
 import 'workplace_list_screen.dart';
 import 'budget_screen.dart';
+import '../widgets/app_sheet.dart';
 
 class SettingsScreen extends StatelessWidget {
   const SettingsScreen({super.key});
@@ -64,10 +65,7 @@ class SettingsScreen extends StatelessWidget {
 
   // 背景色（グラデーション）を選ぶ
   void _showBackgroundPicker(BuildContext context, AppState appState) {
-    showModalBottomSheet(
-      context: context,
-      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
-      builder: (_) => SafeArea(
+    showAppSheet(context, (_) => SafeArea(
         child: Padding(
           padding: const EdgeInsets.all(16),
           child: Column(
@@ -126,11 +124,7 @@ class SettingsScreen extends StatelessWidget {
   }
 
   void _showCardPaymentDaySettings(BuildContext context, AppState appState) {
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
-      builder: (ctx) => StatefulBuilder(
+    showAppSheet(context, (ctx) => StatefulBuilder(
         builder: (ctx, setLocal) => Padding(
           padding: const EdgeInsets.fromLTRB(20, 20, 20, 32),
           child: Column(
@@ -312,10 +306,7 @@ class SettingsScreen extends StatelessWidget {
       );
       return;
     }
-    showModalBottomSheet(
-      context: context,
-      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
-      builder: (_) => Column(
+    showAppSheet(context, (_) => Column(
         mainAxisSize: MainAxisSize.min,
         children: [
           const Padding(
@@ -384,9 +375,7 @@ class SettingsScreen extends StatelessWidget {
 
   // バックアップ（エクスポート/インポート）のメニュー
   void _showBackup(BuildContext context, AppState appState) {
-    showModalBottomSheet(
-      context: context,
-      builder: (_) => Column(
+    showAppSheet(context, (_) => Column(
         mainAxisSize: MainAxisSize.min,
         children: [
           const Padding(
@@ -609,9 +598,7 @@ class SettingsScreen extends StatelessWidget {
 
   // コピー/貼り付け方式（従来）のメニュー
   void _showTextBackup(BuildContext context, AppState appState) {
-    showModalBottomSheet(
-      context: context,
-      builder: (_) => Column(
+    showAppSheet(context, (_) => Column(
         mainAxisSize: MainAxisSize.min,
         children: [
           const Padding(

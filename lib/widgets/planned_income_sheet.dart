@@ -1,16 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import '../app_state.dart';
+import 'app_sheet.dart';
 
 // 💡 予定入金（仕送り・返金・臨時収入など）の管理シート。
 //   給料はシフトから自動計算するので、それ以外の入ってくるお金をここに登録する。
 Future<void> showPlannedIncomeSheet(BuildContext context, AppState appState) async {
-  await showModalBottomSheet<void>(
-    context: context,
-    isScrollControlled: true,
-    shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
-    builder: (ctx) => StatefulBuilder(
+  showAppSheet<void>(context, (ctx) => StatefulBuilder(
       builder: (ctx, setLocal) {
         final due = appState.duePlannedIncomes;
         final all = [...appState.plannedIncomes]

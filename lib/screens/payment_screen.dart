@@ -6,6 +6,7 @@ import '../card_styles.dart';
 import '../widgets/gmail_refresh_button.dart';
 import '../widgets/swipe_to_delete.dart';
 import 'trash_screen.dart';
+import '../widgets/app_sheet.dart';
 
 class PaymentScreen extends StatefulWidget {
   const PaymentScreen({super.key});
@@ -353,11 +354,7 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
     final cards = appState.cardChoices
         .where((c) => c != AppState.kOtherCard)
         .toList();
-    final picked = await showModalBottomSheet<String>(
-      context: context,
-      shape: const RoundedRectangleBorder(
-          borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
-      builder: (_) => SafeArea(
+    final picked = await showAppSheet<String>(context, (_) => SafeArea(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
