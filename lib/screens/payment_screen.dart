@@ -155,7 +155,9 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
         list.sort((a, b) => b.amount.compareTo(a.amount));
         break;
     }
-    final searchTotal = list.fold<int>(0, (s, p) => s + p.amount);
+    // 記録のみの明細（他のカードで計上済み）は合計に足さない
+    final searchTotal =
+        list.where((p) => !p.infoOnly).fold<int>(0, (s, p) => s + p.amount);
 
     return Column(
       children: [
@@ -231,13 +233,6 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
             onChanged: (v) => setState(() => _search = v),
           ),
         ),
-        // 検索中は件数と合計を表示
-        if (_search.trim().isNotEmpty)
-          Padding(
-            padding: const EdgeInsets.only(bottom: 4),
-            child: Text('${list.length}件 ・ 合計 ¥$searchTotal',
-                style: const TextStyle(fontSize: 12, color: Colors.black54)),
-          ),
         // カード別フィルタ
         if (cards.isNotEmpty)
           SizedBox(
@@ -269,6 +264,30 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
               ],
             ),
           ),
+        // 💡 いま絞り込んでいる範囲の合計。「すべて」なら全カード、
+        //   カードを選んでいればそのカードだけの合計になる。
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+          child: Row(
+            children: [
+              Text(
+                _filterCard ?? 'すべてのカード',
+                style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(width: 8),
+              Text('${list.length}件',
+                  style: const TextStyle(fontSize: 12, color: Colors.black54)),
+              const Spacer(),
+              Text(
+                '合計 ¥$searchTotal',
+                style: TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.red[700]),
+              ),
+            ],
+          ),
+        ),
         Expanded(
           child: list.isEmpty
               ? _empty('この月の請求はありません')
