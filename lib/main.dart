@@ -115,21 +115,31 @@ class MyApp extends StatelessWidget {
         snackBarTheme: const SnackBarThemeData(behavior: SnackBarBehavior.floating),
       ),
       // 💡 全ページ共通のグラデーション背景（設定で色を変更可能）
-      builder: (context, child) {
-        final themeKey = context.watch<AppState>().backgroundTheme;
-        final bg = backgroundThemeByKey(themeKey);
-        return DecoratedBox(
-          decoration: BoxDecoration(
-            gradient: LinearGradient(
-              begin: Alignment.topCenter,
-              end: Alignment.bottomCenter,
-              colors: bg.colors,
-              stops: const [0.0, 0.5, 1.0],
+      //
+      // ⚠️ ここで context.watch すると、データが変わるたびに
+      //   アプリ全体（Navigator配下）が作り直される。
+      //   同期は何度も notifyListeners を呼ぶので、表示中のSnackBarの
+      //   アニメーションが取り残され、下のタブバーが浮いて余白が出ていた。
+      //   背景色は backgroundTheme だけに依存するので、そこだけ監視し、
+      //   画面本体は child としてそのまま通す（作り直さない）。
+      builder: (context, child) => Selector<AppState, String>(
+        selector: (_, app) => app.backgroundTheme,
+        child: child,
+        builder: (context, themeKey, inner) {
+          final bg = backgroundThemeByKey(themeKey);
+          return DecoratedBox(
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+                colors: bg.colors,
+                stops: const [0.0, 0.5, 1.0],
+              ),
             ),
-          ),
-          child: child!,
-        );
-      },
+            child: inner!,
+          );
+        },
+      ),
       home: const AppGate(child: MainNavigationScreen()),
     );
   }
