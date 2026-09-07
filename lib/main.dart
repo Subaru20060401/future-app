@@ -7,6 +7,8 @@ import 'package:intl/date_symbol_data_local.dart';
 import 'package:provider/provider.dart'; // 💡 追加
 import 'app_state.dart'; // 💡 追加
 import 'background_themes.dart';
+import 'gmail_service.dart';
+import 'google_redirect_auth.dart';
 import 'lock_service.dart';
 import 'notification_service.dart';
 import 'calendar_sync.dart';
@@ -27,6 +29,14 @@ void main() async {
   // 💡 通知とカレンダー連携は端末アプリ専用。Webでは使えないので繋がない。
   if (!kIsWeb) {
     await NotificationService.instance.init();
+  }
+
+  // 💡 Googleの許可画面から戻ってきた直後なら、URLのトークンを受け取って保存する。
+  //   （iOSはポップアップが使えないため、ページ移動で許可をもらう経路がある）
+  final redirected = consumeRedirectResult();
+  if (redirected != null) {
+    await GmailService.instance
+        .saveRedirectToken(redirected.token, redirected.expiry);
   }
 
   // 💡 パスコードの設定を先に読む（ロック中は中身を一切描画しないため）

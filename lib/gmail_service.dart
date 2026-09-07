@@ -4,6 +4,7 @@ import 'package:google_sign_in/google_sign_in.dart';
 import 'package:extension_google_sign_in_as_googleapis_auth/extension_google_sign_in_as_googleapis_auth.dart';
 import 'package:googleapis_auth/googleapis_auth.dart' as gauth;
 import 'package:http/http.dart' as http;
+import 'google_redirect_auth.dart';
 import 'package:googleapis/drive/v3.dart' as drive;
 import 'package:googleapis/gmail/v1.dart' as gmail;
 import 'package:shared_preferences/shared_preferences.dart';
@@ -189,6 +190,30 @@ class GmailService {
       await prefs.setString(_kToken, token.data);
       await prefs.setString(_kTokenExpiry, token.expiry.toIso8601String());
     } catch (_) {}
+  }
+
+  // 💡 リダイレクト方式で受け取ったトークンを保存する（起動時に呼ぶ）。
+  Future<void> saveRedirectToken(String token, DateTime expiry) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_kToken, token);
+      await prefs.setString(_kTokenExpiry, expiry.toUtc().toIso8601String());
+      _scopeGranted = true;
+      _scopeCheckedAt = DateTime.now();
+      lastAuthError = null;
+      await _rememberSignedIn();
+    } catch (_) {}
+  }
+
+  // 💡 ページごと移動してGoogleの許可画面へ行く（ポップアップを使わない）。
+  //   iOSはポップアップとFedCMが塞がれることがあり、これが唯一通る経路になる。
+  bool startRedirectSignIn() {
+    if (!kIsWeb || !canUseRedirectAuth) return false;
+    final id = webClientId;
+    final uri = redirectUri;
+    if (id == null || uri == null) return false;
+    startGoogleRedirect(id, uri, _scopes);
+    return true;
   }
 
   Future<void> _clearToken() async {
@@ -384,8 +409,14 @@ class GmailService {
       _scopeGranted = false;
       _scopeCheckedAt = null;
       lastAuthError = e.toString();
+    }
+    // 💡 ここまでで取れなければ、ポップアップ方式が使えない環境（iOSなど）。
+    //   ページごと移動する方式に切り替える。成功すれば戻ってきた時点で連携済み。
+    if (startRedirectSignIn()) {
+      lastAuthError = 'Googleの画面へ移動しています…';
       return false;
     }
+    return false;
   }
 
   // 💡 APIのエラーを「次に何をすればいいか」が分かる文言に直す。
