@@ -35,6 +35,11 @@
 
   <title>ポケットメイド</title>
   <link rel="manifest" href="manifest.json">
+
+  <style>
+    /* 💡 iOSでURLバーの出入りに追従できるよう、高さを画面いっぱいに固定する */
+    html, body { height: 100%; margin: 0; padding: 0; }
+  </style>
 </head>
 <body>
   <!--
@@ -46,6 +51,32 @@
     * https://docs.flutter.dev/platform-integration/web/initialization
   -->
   <script src="flutter_bootstrap.js" async></script>
+
+  <script>
+    // 💡 iOSはURLバーの出し入れやキーボードで表示領域が変わるが、Flutterが
+    //   その変化を取りこぼし、下のタブバーが浮いて下に余白が出ることがある。
+    //   表示領域の変化を拾って、Flutterに測り直させる。
+    (function () {
+      var vv = window.visualViewport;
+      var timer;
+      function nudge() {
+        clearTimeout(timer);
+        timer = setTimeout(function () {
+          window.dispatchEvent(new Event('resize'));
+        }, 120);
+      }
+      if (vv) {
+        vv.addEventListener('resize', nudge);
+        vv.addEventListener('scroll', nudge);
+      }
+      window.addEventListener('orientationchange', nudge);
+      // 別ページ（Googleの許可画面など）から戻ってきたときにも測り直す
+      window.addEventListener('pageshow', nudge);
+      document.addEventListener('visibilitychange', function () {
+        if (document.visibilityState === 'visible') nudge();
+      });
+    })();
+  </script>
 
   <script>
     // 💡 Service Worker が古いビルドを配り続けて「直したのに反映されない」が
