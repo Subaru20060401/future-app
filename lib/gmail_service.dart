@@ -166,6 +166,9 @@ class GmailService {
   DateTime? _scopeCheckedAt;
   static const Duration _scopeTtl = Duration(minutes: 45);
 
+  // 💡 連携に失敗した理由。画面に出して原因を切り分けられるようにする。
+  String? lastAuthError;
+
   // Gmailを読める状態か（Webはスコープ許可まで確認する）
   Future<bool> hasGmailAccess() async {
     if (_googleSignIn.currentUser == null) return false;
@@ -189,25 +192,39 @@ class GmailService {
       return _googleSignIn.currentUser != null ||
           await _googleSignIn.signIn() != null;
     }
-    // ⚠️ Webで signIn() を呼ぶと「Googleログイン」のポップアップが開く。
-    //   ログイン済みなら即閉じるので、更新のたびに画面が一瞬光る原因になる。
-    //   Webは silent サインイン → スコープ要求だけで足りるので signIn() は使わない。
-    if (_googleSignIn.currentUser == null) {
-      await _googleSignIn.signInSilently();
-      if (_googleSignIn.currentUser == null) return false;
+    // ⚠️ iOS(WebKit)は「ユーザー操作の直後に開いたポップアップ」しか許可しない。
+    //   先に await を挟むと操作とみなされなくなり、ポップアップがブロックされる。
+    //   そのため、確認（signInSilently / canAccessScopes）より先に
+    //   スコープ要求を投げる。ここが一番ブロックされにくい。
+    lastAuthError = null;
+    try {
+      final granted = await _googleSignIn.requestScopes(_scopes);
+      _scopeGranted = granted;
+      _scopeCheckedAt = granted ? DateTime.now() : null;
+      if (!granted) lastAuthError = '許可されませんでした（ポップアップが閉じられた可能性）';
+      return granted;
+    } catch (e) {
+      // 未サインインなどで失敗したときだけ、サインインしてからもう一度試す
+      lastAuthError = e.toString();
     }
     try {
+      if (_googleSignIn.currentUser == null) {
+        await _googleSignIn.signInSilently();
+      }
       if (await _googleSignIn.canAccessScopes(_scopes)) {
         _scopeGranted = true;
         _scopeCheckedAt = DateTime.now();
+        lastAuthError = null;
         return true;
       }
       _scopeGranted = await _googleSignIn.requestScopes(_scopes);
       _scopeCheckedAt = _scopeGranted ? DateTime.now() : null;
+      if (_scopeGranted) lastAuthError = null;
       return _scopeGranted;
-    } catch (_) {
+    } catch (e) {
       _scopeGranted = false;
       _scopeCheckedAt = null;
+      lastAuthError = e.toString();
       return false;
     }
   }

@@ -24,18 +24,21 @@ class LoginScreen extends StatefulWidget {
 class _LoginScreenState extends State<LoginScreen> {
   bool _busy = false;
   String? _error;
+  String? _detail; // 失敗の詳細（原因の切り分け用）
 
   Future<void> _login() async {
     setState(() {
       _busy = true;
       _error = null;
+      _detail = null;
     });
     final ok = await GmailService.instance.requestGmailAccess();
     if (!mounted) return;
     if (!ok) {
       setState(() {
         _busy = false;
-        _error = 'ログインできませんでした。ポップアップがブロックされていないか確認してください。';
+        _error = 'ログインできませんでした。';
+        _detail = GmailService.instance.lastAuthError;
       });
       return;
     }
@@ -90,13 +93,36 @@ class _LoginScreenState extends State<LoginScreen> {
                       ),
                     ),
                   ),
-                if (_error != null)
+                if (_error != null) ...[
                   Padding(
                     padding: const EdgeInsets.only(top: 12),
                     child: Text(_error!,
-                        style: const TextStyle(color: Colors.red, fontSize: 12),
+                        style: const TextStyle(color: Colors.red, fontSize: 13),
                         textAlign: TextAlign.center),
                   ),
+                  // 💡 iPhoneはポップアップが既定でブロックされていることが多い。
+                  //   どこを触ればいいかまで書く。
+                  const Padding(
+                    padding: EdgeInsets.only(top: 8),
+                    child: Text(
+                      'iPhoneのChromeなら\n'
+                      '「…」→ 設定 → コンテンツの設定 → ポップアップをブロック\n'
+                      'をオフにしてから、もう一度お試しください。\n\n'
+                      'ログインせずに移したいときは、パソコン側で\n'
+                      '設定 → データのバックアップ → ファイルに書き出し（JSON）\n'
+                      'を保存して、この端末の「ファイルから読み込み」で取り込めます。',
+                      style: TextStyle(fontSize: 11, color: Colors.grey),
+                      textAlign: TextAlign.center,
+                    ),
+                  ),
+                  if (_detail != null)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 8),
+                      child: Text(_detail!,
+                          style: const TextStyle(fontSize: 10, color: Colors.grey),
+                          textAlign: TextAlign.center),
+                    ),
+                ],
                 if (hasLocalData && !_busy)
                   TextButton(
                     onPressed: widget.onDone,
