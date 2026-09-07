@@ -46,7 +46,7 @@ class DriveSyncResult {
   String get message {
     switch (state) {
       case DriveSyncState.notSignedIn:
-        return 'Googleに未連携です（設定から連携してください）';
+        return 'Googleの有効期限が切れています。設定→Google連携で「連携し直す」を押してください';
       case DriveSyncState.noRemote:
         return 'ドライブにまだバックアップがありません';
       case DriveSyncState.upToDate:
@@ -194,7 +194,8 @@ class DriveSync {
   //   「向こうが新しい」「両方変わっている」を区別して、勝手に上書きしないための入口。
   Future<DriveSyncResult> check(AppState app) async {
     try {
-      if (!await GmailService.instance.hasGmailAccess()) {
+      // 💡 「連携したことがある」ではなく「いま本当に叩けるか」で判定する。
+      if (!await GmailService.instance.isUsable) {
         return const DriveSyncResult(DriveSyncState.notSignedIn);
       }
       final remote = await fetch();
@@ -221,6 +222,9 @@ class DriveSync {
     final sb = StringBuffer();
     final signedIn = await GmailService.instance.hasGmailAccess();
     sb.writeln('Google連携: ${signedIn ? 'OK' : '未連携'}');
+    sb.writeln('────── 連携の内訳 ──────');
+    sb.write(await GmailService.instance.authDiagnostics());
+    sb.writeln('────────────');
     sb.writeln('この端末: ${app.deviceLabel}');
     sb.writeln('同期の設定: ${app.driveSyncEnabled ? 'ON' : 'OFF'}');
     sb.writeln('この端末の最終変更: ${_fmt(app.dataUpdatedAt)}');

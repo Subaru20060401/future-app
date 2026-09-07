@@ -81,7 +81,7 @@ Future<GmailSyncResult> _syncGmail(AppState appState, {bool full = false}) async
   }
   // 💡 許可が無いまま取得すると403になるので、先に確認して案内を返す。
   //   （許可要求はポップアップを開くのでボタン操作からしか呼べない）
-  if (!await gmail.hasGmailAccess()) {
+  if (!await gmail.isUsable) {
     return GmailSyncResult(needsPermission: true);
   }
   final now = DateTime.now();

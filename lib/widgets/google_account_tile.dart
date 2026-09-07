@@ -9,7 +9,8 @@ import 'drive_sync_dialog.dart';
 
 // 連携済みなら true。未連携ならその場で連携を求める（ボタン操作から呼ぶこと）。
 Future<bool> ensureGoogleConnected(BuildContext context) async {
-  if (await GmailService.instance.hasGmailAccess()) return true;
+  // 「連携したことがある」ではなく「いま叩けるか」で判定する
+  if (await GmailService.instance.isUsable) return true;
   final ok = await GmailService.instance.requestGmailAccess();
   if (!ok && context.mounted) {
     ScaffoldMessenger.of(context)
@@ -31,7 +32,8 @@ class GoogleAccountTile extends StatefulWidget {
 class _GoogleAccountTileState extends State<GoogleAccountTile> {
   final _gmail = GmailService.instance;
   bool _busy = false;
-  bool _connected = false;
+  bool _connected = false; // いま本当にAPIを叩けるか
+  bool _known = false; // 連携したことがある（トークンが切れているだけ）
   String? _email;
 
   @override
@@ -47,9 +49,10 @@ class _GoogleAccountTileState extends State<GoogleAccountTile> {
     final ok = await _gmail.hasGmailAccess();
     if (!mounted) return;
     setState(() {
-      // 💡 トークンが切れていても、一度連携していれば「連携中」と出す。
-      //   取得のたびに許可を求め直す作りなので、ここで未連携に見せると混乱する。
-      _connected = ok || _gmail.signedInOnce;
+      // 💡 「連携したことがある」と「いま使える」は別。
+      //   使えないのに連携中と出すと、同期で未連携と言われて混乱する。
+      _connected = ok;
+      _known = _gmail.signedInOnce;
       _email = _gmail.displayEmail;
     });
   }
@@ -99,23 +102,39 @@ class _GoogleAccountTileState extends State<GoogleAccountTile> {
     final appState = context.read<AppState>();
     return ListTile(
       leading: Icon(
-        _connected ? Icons.account_circle : Icons.account_circle_outlined,
-        color: _connected ? Colors.green : Colors.grey,
+        _connected
+            ? Icons.account_circle
+            : (_known ? Icons.error_outline : Icons.account_circle_outlined),
+        color: _connected
+            ? Colors.green
+            : (_known ? Colors.orange : Colors.grey),
       ),
       title: const Text('Googleアカウント'),
       subtitle: Text(
         _connected
             ? '連携中${_email == null ? '' : '：$_email'}\nメール取り込みとドライブ同期に使います'
-            : '未連携。メール取り込みとドライブ同期に必要です',
+            : (_known
+                ? '${_email ?? ''}\n有効期限が切れています。「連携し直す」を押してください'
+                : '未連携。メール取り込みとドライブ同期に必要です'),
         style: const TextStyle(fontSize: 12),
       ),
-      isThreeLine: _connected,
+      isThreeLine: _connected || _known,
       trailing: _busy
           ? const SizedBox(
               width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
-          : TextButton(
-              onPressed: _connected ? () => _disconnect(appState) : _connect,
-              child: Text(_connected ? '解除' : '連携する'),
+          : Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextButton(
+                  onPressed: _connect,
+                  child: Text(_connected ? '更新' : (_known ? '連携し直す' : '連携する')),
+                ),
+                if (_connected || _known)
+                  TextButton(
+                    onPressed: () => _disconnect(appState),
+                    child: const Text('解除', style: TextStyle(color: Colors.grey)),
+                  ),
+              ],
             ),
     );
   }

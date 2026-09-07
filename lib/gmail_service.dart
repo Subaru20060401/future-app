@@ -242,6 +242,43 @@ class GmailService {
   bool signedInOnce = false;
   String? savedEmail;
 
+  // 💡 いま本当にAPIを叩けるか。表示と実態を食い違わせないための判定。
+  //   「連携したことがある」だけでは叩けない（トークンが切れている）。
+  Future<bool> get isUsable async => (await _authClient()) != null;
+
+  // 💡 連携まわりで何が起きているかの内訳。原因を推測せずに切り分けるため。
+  Future<String> authDiagnostics() async {
+    final sb = StringBuffer();
+    sb.writeln('連携したことがある: ${signedInOnce ? 'はい' : 'いいえ'}');
+    sb.writeln('アカウント: ${displayEmail ?? '—'}');
+    sb.writeln('currentUser: ${_googleSignIn.currentUser == null ? 'なし' : 'あり'}');
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final exp = prefs.getString(_kTokenExpiry);
+      sb.writeln('保存トークン: ${prefs.getString(_kToken) == null ? 'なし' : 'あり'}');
+      sb.writeln('トークン期限: ${exp ?? '—'}');
+      sb.writeln('期限内か: ${await _cachedCredentials() != null ? 'はい' : 'いいえ'}');
+    } catch (e) {
+      sb.writeln('保存の読み取りに失敗: $e');
+    }
+    if (kIsWeb) {
+      try {
+        sb.writeln('スコープ許可: ${await _googleSignIn.canAccessScopes(_scopes) ? 'あり' : 'なし'}');
+      } catch (e) {
+        sb.writeln('スコープ確認に失敗: $e');
+      }
+    }
+    try {
+      final c = await _googleSignIn.authenticatedClient();
+      sb.writeln('プラグインのクライアント: ${c == null ? '作れない' : '作れる'}');
+    } catch (e) {
+      sb.writeln('クライアント作成でエラー: $e');
+    }
+    sb.writeln('実際に使えるか: ${await isUsable ? 'はい' : 'いいえ'}');
+    if (lastAuthError != null) sb.writeln('直近のエラー: $lastAuthError');
+    return sb.toString();
+  }
+
   Future<void> loadAuthState() async {
     try {
       final prefs = await SharedPreferences.getInstance();
@@ -331,6 +368,8 @@ class GmailService {
         _scopeGranted = true;
         _scopeCheckedAt = DateTime.now();
         lastAuthError = null;
+        await _cacheToken();
+        await _rememberSignedIn();
         return true;
       }
       _scopeGranted = await _googleSignIn.requestScopes(_scopes);
