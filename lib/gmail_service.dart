@@ -370,19 +370,27 @@ class GmailService {
     //   そのため、確認（signInSilently / canAccessScopes）より先に
     //   スコープ要求を投げる。ここが一番ブロックされにくい。
     lastAuthError = null;
+
+    // 💡 iOSはポップアップもFedCMも塞がれるので、試すだけ無駄。
+    //   最初からページ移動方式にする。
+    if (isPopupUnfriendly && startRedirectSignIn()) {
+      lastAuthError = 'Googleの画面へ移動しています…';
+      return false;
+    }
+
+    // ⚠️ requestScopes は失敗しても例外ではなく false を返すことがある。
+    //   ここで return してしまうと下のリダイレクト経路に落ちないので、
+    //   成功したときだけ return する。
     try {
-      final granted = await _googleSignIn.requestScopes(_scopes);
-      _scopeGranted = granted;
-      _scopeCheckedAt = granted ? DateTime.now() : null;
-      if (granted) {
+      if (await _googleSignIn.requestScopes(_scopes)) {
+        _scopeGranted = true;
+        _scopeCheckedAt = DateTime.now();
         await _cacheToken();
         await _rememberSignedIn();
-      } else {
-        lastAuthError = '許可されませんでした（ポップアップが閉じられた可能性）';
+        return true;
       }
-      return granted;
+      lastAuthError = 'ポップアップでの許可が取れませんでした';
     } catch (e) {
-      // 未サインインなどで失敗したときだけ、サインインしてからもう一度試す
       lastAuthError = e.toString();
     }
     try {
@@ -397,19 +405,11 @@ class GmailService {
         await _rememberSignedIn();
         return true;
       }
-      _scopeGranted = await _googleSignIn.requestScopes(_scopes);
-      _scopeCheckedAt = _scopeGranted ? DateTime.now() : null;
-      if (_scopeGranted) {
-        lastAuthError = null;
-        await _cacheToken();
-        await _rememberSignedIn();
-      }
-      return _scopeGranted;
     } catch (e) {
-      _scopeGranted = false;
-      _scopeCheckedAt = null;
       lastAuthError = e.toString();
     }
+    _scopeGranted = false;
+    _scopeCheckedAt = null;
     // 💡 ここまでで取れなければ、ポップアップ方式が使えない環境（iOSなど）。
     //   ページごと移動する方式に切り替える。成功すれば戻ってきた時点で連携済み。
     if (startRedirectSignIn()) {

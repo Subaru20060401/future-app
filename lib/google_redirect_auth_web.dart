@@ -7,6 +7,17 @@ import 'package:web/web.dart' as web;
 
 bool get canUseRedirectAuth => true;
 
+// 💡 iOSはポップアップとFedCMが塞がれるため、GoogleのJSライブラリでは連携できない。
+//   その場合は最初からページ移動方式にする（無駄なポップアップを出さない）。
+//   iPadOSはUAがMacintoshになるので、タッチ対応かどうかも見る。
+bool get isPopupUnfriendly {
+  final ua = web.window.navigator.userAgent;
+  if (ua.contains('iPhone') || ua.contains('iPad') || ua.contains('iPod')) {
+    return true;
+  }
+  return ua.contains('Macintosh') && web.window.navigator.maxTouchPoints > 1;
+}
+
 // index.html の meta タグに入れてあるクライアントIDを読む（二重管理しない）
 String? get webClientId {
   final meta = web.document.querySelector('meta[name="google-signin-client_id"]');

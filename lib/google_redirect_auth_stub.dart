@@ -1,5 +1,6 @@
 // 非Web（iOS/Androidアプリ）ではネイティブのログインを使うので何もしない。
 bool get canUseRedirectAuth => false;
+bool get isPopupUnfriendly => false;
 String? get redirectUri => null;
 String? get webClientId => null;
 void startGoogleRedirect(String clientId, String redirectUri, List<String> scopes) {}
