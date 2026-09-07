@@ -300,6 +300,12 @@ class GmailService {
       sb.writeln('クライアント作成でエラー: $e');
     }
     sb.writeln('実際に使えるか: ${await isUsable ? 'はい' : 'いいえ'}');
+    if (kIsWeb) {
+      // 💡 redirect_uri_mismatch はここの文字列とGoogleの登録値の食い違い。
+      sb.writeln('このアプリが送るリダイレクトURI:');
+      sb.writeln('  ${redirectUri ?? '取得できません'}');
+      sb.writeln('  ↑ これをGoogleの「承認済みのリダイレクトURI」に一字一句登録');
+    }
     if (lastAuthError != null) sb.writeln('直近のエラー: $lastAuthError');
     return sb.toString();
   }

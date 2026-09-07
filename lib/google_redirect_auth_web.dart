@@ -25,10 +25,20 @@ String? get webClientId {
   return (id == null || id.isEmpty) ? null : id;
 }
 
-// Googleに登録する「承認済みのリダイレクトURI」と完全に一致させる必要がある
+// 💡 Googleに登録した「承認済みのリダイレクトURI」と完全一致させる必要がある。
+//   location.pathname だと、末尾の / の有無や index.html の有無で食い違う。
+//   index.html の <base href="/future-app/"> から作られる baseURI は
+//   常に末尾 / 付きの正規形になるので、こちらを使う。
 String? get redirectUri {
-  final loc = web.window.location;
-  return '${loc.origin}${loc.pathname}';
+  final base = web.document.baseURI;
+  if (base.isEmpty) {
+    final loc = web.window.location;
+    return '${loc.origin}${loc.pathname}';
+  }
+  // 念のためクエリとフラグメントを落とす
+  final u = Uri.parse(base);
+  return Uri(scheme: u.scheme, host: u.host, port: u.hasPort ? u.port : null, path: u.path)
+      .toString();
 }
 
 void startGoogleRedirect(String clientId, String redirect, List<String> scopes) {
