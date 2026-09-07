@@ -52,7 +52,20 @@ class _AppGateState extends State<AppGate> with WidgetsBindingObserver {
       if (mounted) setState(() => _checkingLogin = false);
       return;
     }
-    // 前回のログインが残っていればそのまま通す
+    // 💡 一度でも連携できていればログイン画面は出さない。
+    //   ブラウザ版はアクセストークンが1時間で切れるため、毎回ここで止めると
+    //   開くたびにログインを求められてしまう。
+    //   実際の権限は同期やメール取得のときに、その場で求める。
+    await GmailService.instance.loadAuthState();
+    if (GmailService.instance.signedInOnce) {
+      GmailService.instance.signInSilently(); // 裏で復帰を試みる
+      if (!mounted) return;
+      setState(() {
+        _loginDone = true;
+        _checkingLogin = false;
+      });
+      return;
+    }
     await GmailService.instance.signInSilently();
     final ok = await GmailService.instance.hasGmailAccess();
     if (!mounted) return;

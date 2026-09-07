@@ -2,6 +2,8 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:extension_google_sign_in_as_googleapis_auth/extension_google_sign_in_as_googleapis_auth.dart';
+import 'package:googleapis_auth/googleapis_auth.dart' as gauth;
+import 'package:http/http.dart' as http;
 import 'package:googleapis/drive/v3.dart' as drive;
 import 'package:googleapis/gmail/v1.dart' as gmail;
 import 'package:shared_preferences/shared_preferences.dart';
@@ -169,10 +171,119 @@ class GmailService {
   // 💡 連携に失敗した理由。画面に出して原因を切り分けられるようにする。
   String? lastAuthError;
 
+  // ───── アクセストークンの持ち回し ─────
+  // 💡 ブラウザ版のGoogleログインは、アクセストークンをメモリにしか持たない。
+  //   そのため再読み込みのたびに「未連携」に戻ってしまう（毎回ポップアップが必要）。
+  //   トークンは1時間ほど有効なので、期限まで保存して使い回す。
+  //   ⚠️ リフレッシュトークンはブラウザだけでは発行できないため、
+  //     期限が切れたらもう一度「連携する」を押してもらう必要がある。
+  static const String _kToken = 'saved_google_access_token';
+  static const String _kTokenExpiry = 'saved_google_token_expiry';
+
+  Future<void> _cacheToken() async {
+    try {
+      final client = await _googleSignIn.authenticatedClient();
+      final token = client?.credentials.accessToken;
+      if (token == null) return;
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_kToken, token.data);
+      await prefs.setString(_kTokenExpiry, token.expiry.toIso8601String());
+    } catch (_) {}
+  }
+
+  Future<void> _clearToken() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove(_kToken);
+      await prefs.remove(_kTokenExpiry);
+    } catch (_) {}
+  }
+
+  // 保存したトークンがまだ使えるか（残り2分を切っていたら使わない）
+  Future<gauth.AccessCredentials?> _cachedCredentials() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final data = prefs.getString(_kToken);
+      final expiryStr = prefs.getString(_kTokenExpiry);
+      if (data == null || expiryStr == null) return null;
+      final expiry = DateTime.tryParse(expiryStr)?.toUtc();
+      if (expiry == null) return null;
+      if (expiry.isBefore(DateTime.now().toUtc().add(const Duration(minutes: 2)))) {
+        return null;
+      }
+      return gauth.AccessCredentials(
+        gauth.AccessToken('Bearer', data, expiry),
+        null, // ブラウザではリフレッシュトークンは発行されない
+        _scopes,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  // 💡 API呼び出しに使うクライアント。
+  //   プラグインが持っていればそれを、無ければ保存したトークンで組み立てる。
+  Future<http.Client?> _authClient() async {
+    try {
+      final client = await _googleSignIn.authenticatedClient();
+      if (client != null) {
+        await _cacheToken();
+        return client;
+      }
+    } catch (_) {}
+    final creds = await _cachedCredentials();
+    if (creds == null) return null;
+    return gauth.authenticatedClient(http.Client(), creds);
+  }
+
+  // 💡 一度でも連携できたか（再読み込み後もログイン画面を出さないための記憶）。
+  static const String _kSignedInOnce = 'saved_google_signed_in_once';
+  static const String _kEmail = 'saved_google_email';
+  bool signedInOnce = false;
+  String? savedEmail;
+
+  Future<void> loadAuthState() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      signedInOnce = prefs.getBool(_kSignedInOnce) ?? false;
+      savedEmail = prefs.getString(_kEmail);
+    } catch (_) {}
+  }
+
+  Future<void> _rememberSignedIn() async {
+    signedInOnce = true;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool(_kSignedInOnce, true);
+      final mail = _googleSignIn.currentUser?.email;
+      if (mail != null) {
+        savedEmail = mail;
+        await prefs.setString(_kEmail, mail);
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _forgetSignedIn() async {
+    signedInOnce = false;
+    savedEmail = null;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove(_kSignedInOnce);
+      await prefs.remove(_kEmail);
+    } catch (_) {}
+  }
+
   // Gmailを読める状態か（Webはスコープ許可まで確認する）
   Future<bool> hasGmailAccess() async {
+    if (!kIsWeb) return _googleSignIn.currentUser != null;
+    // 💡 保存したトークンが生きていれば、再読み込み直後でも連携中として扱う。
+    //   これが無いと、開くたびに「未連携」に戻ってしまう。
+    if (await _cachedCredentials() != null) {
+      _scopeGranted = true;
+      _scopeCheckedAt = DateTime.now();
+      return true;
+    }
     if (_googleSignIn.currentUser == null) return false;
-    if (!kIsWeb) return true;
     final at = _scopeCheckedAt;
     if (_scopeGranted && at != null && DateTime.now().difference(at) < _scopeTtl) {
       return true;
@@ -201,7 +312,12 @@ class GmailService {
       final granted = await _googleSignIn.requestScopes(_scopes);
       _scopeGranted = granted;
       _scopeCheckedAt = granted ? DateTime.now() : null;
-      if (!granted) lastAuthError = '許可されませんでした（ポップアップが閉じられた可能性）';
+      if (granted) {
+        await _cacheToken();
+        await _rememberSignedIn();
+      } else {
+        lastAuthError = '許可されませんでした（ポップアップが閉じられた可能性）';
+      }
       return granted;
     } catch (e) {
       // 未サインインなどで失敗したときだけ、サインインしてからもう一度試す
@@ -219,7 +335,11 @@ class GmailService {
       }
       _scopeGranted = await _googleSignIn.requestScopes(_scopes);
       _scopeCheckedAt = _scopeGranted ? DateTime.now() : null;
-      if (_scopeGranted) lastAuthError = null;
+      if (_scopeGranted) {
+        lastAuthError = null;
+        await _cacheToken();
+        await _rememberSignedIn();
+      }
       return _scopeGranted;
     } catch (e) {
       _scopeGranted = false;
@@ -254,6 +374,7 @@ class GmailService {
   }
 
   GoogleSignInAccount? get account => _googleSignIn.currentUser;
+  String? get displayEmail => _googleSignIn.currentUser?.email ?? savedEmail;
   bool get isSignedIn => _googleSignIn.currentUser != null;
 
   // 各カードの検索ルール。
@@ -274,20 +395,22 @@ class GmailService {
   // 💡 Drive（アプリ専用フォルダ）のAPI。端末間の同期で使う。
   //   未連携・許可なしなら null。
   Future<drive.DriveApi?> driveApi() async {
-    final client = await _googleSignIn.authenticatedClient();
+    final client = await _authClient();
     if (client == null) return null;
     return drive.DriveApi(client);
   }
 
-  Future<void> signOut() {
+  Future<void> signOut() async {
     _scopeGranted = false;
     _scopeCheckedAt = null;
-    return _googleSignIn.signOut();
+    await _clearToken();
+    await _forgetSignedIn();
+    await _googleSignIn.signOut();
   }
 
   // 🔧 デバッグ: 指定クエリの最新メールの「件名＋正規化本文」を返す（パーサーが見るテキスト）
   Future<String> debugRawBody(String query) async {
-    final client = await _googleSignIn.authenticatedClient();
+    final client = await _authClient();
     if (client == null) return '未連携です';
     final api = gmail.GmailApi(client);
     final ids = await _listIds(api, '$query newer_than:120d');
@@ -300,7 +423,7 @@ class GmailService {
 
   // 🔧 デバッグ: Amazonの取得・突合状況を要約して返す
   Future<String> debugAmazonSummary() async {
-    final client = await _googleSignIn.authenticatedClient();
+    final client = await _authClient();
     if (client == null) return '未連携です';
     final api = gmail.GmailApi(client);
     _window = 'newer_than:2y';
@@ -346,7 +469,7 @@ class GmailService {
     final from = since?.subtract(const Duration(days: 1));
     final window =
         from != null ? 'after:${from.year}/${from.month}/${from.day}' : 'newer_than:90d';
-    final client = await _googleSignIn.authenticatedClient();
+    final client = await _authClient();
     if (client == null) return const [];
     final api = gmail.GmailApi(client);
     final ids = await _listIds(api, '($_depositQuery) $window');
@@ -382,7 +505,7 @@ class GmailService {
     _window = from != null
         ? 'after:${from.year}/${from.month}/${from.day}'
         : 'newer_than:2y';
-    final client = await _googleSignIn.authenticatedClient();
+    final client = await _authClient();
     if (client == null) {
       throw Exception('Googleの認証に失敗しました。再ログインしてください。');
     }

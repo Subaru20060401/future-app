@@ -42,12 +42,15 @@ class _GoogleAccountTileState extends State<GoogleAccountTile> {
 
   Future<void> _refresh() async {
     // 起動直後は currentUser が空のことがあるので、静かにサインインを試す
+    await _gmail.loadAuthState();
     if (!_gmail.isSignedIn) await _gmail.signInSilently();
     final ok = await _gmail.hasGmailAccess();
     if (!mounted) return;
     setState(() {
-      _connected = ok;
-      _email = _gmail.account?.email;
+      // 💡 トークンが切れていても、一度連携していれば「連携中」と出す。
+      //   取得のたびに許可を求め直す作りなので、ここで未連携に見せると混乱する。
+      _connected = ok || _gmail.signedInOnce;
+      _email = _gmail.displayEmail;
     });
   }
 
