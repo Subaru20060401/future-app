@@ -26,10 +26,9 @@ class GmailSyncResult {
   bool get skipped => missed > 0;
 
   String get message {
-    if (notSignedIn) return 'Gmail未連携です（設定から連携してください）';
+    if (notSignedIn) return 'Googleに連携されていません（設定→Google連携）';
     if (needsPermission) {
-      return 'Gmailの読み取りが許可されていません。設定→Gmail連携で'
-          '「Gmailのアクセスを許可」を押してください';
+      return 'Googleの有効期限が切れています。設定→Google連携で「連携し直す」を押してください';
     }
     if (error != null) return '取得失敗: $error';
     if (skipped) {
@@ -75,14 +74,15 @@ Future<GmailSyncResult> syncGmail(AppState appState, {bool full = false}) {
 
 Future<GmailSyncResult> _syncGmail(AppState appState, {bool full = false}) async {
   final gmail = GmailService.instance;
-  if (!gmail.isSignedIn) {
-    final ok = await gmail.signInSilently();
-    if (!ok) return GmailSyncResult(notSignedIn: true);
-  }
-  // 💡 許可が無いまま取得すると403になるので、先に確認して案内を返す。
-  //   （許可要求はポップアップを開くのでボタン操作からしか呼べない）
+  // ⚠️ ここで isSignedIn（GoogleのJSライブラリのログイン状態）を見てはいけない。
+  //   iOSではそれが永久に成立しないため、保存したトークンがあっても
+  //   必ず「未連携」で止まってしまう。
+  //   実際にAPIを叩けるか（isUsable）で判定する。
   if (!await gmail.isUsable) {
-    return GmailSyncResult(needsPermission: true);
+    await gmail.signInSilently(); // 復帰できるなら復帰させる
+    if (!await gmail.isUsable) {
+      return GmailSyncResult(needsPermission: true);
+    }
   }
   final now = DateTime.now();
   // 通常更新は先月1日から（＝直近1〜2ヶ月）。full のときだけ全期間。

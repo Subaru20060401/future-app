@@ -45,7 +45,8 @@ class _GmailScreenState extends State<GmailScreen> {
   void initState() {
     super.initState();
     _gmail.signInSilently().then((_) async {
-      final ok = await _gmail.hasGmailAccess();
+      // 保存したトークンで叩けるなら連携中とみなす（iOSはcurrentUserが立たない）
+      final ok = await _gmail.isUsable;
       if (mounted) setState(() => _hasAccess = ok);
     });
   }
@@ -98,7 +99,7 @@ class _GmailScreenState extends State<GmailScreen> {
     final appState = context.read<AppState>();
     try {
       // 許可が無いとAPIが403を返すので、先にここで求める（ボタン操作の延長）
-      if (!await _gmail.hasGmailAccess()) {
+      if (!await _gmail.isUsable) {
         final ok = await _gmail.requestGmailAccess();
         if (!mounted) return;
         setState(() => _hasAccess = ok);
@@ -143,11 +144,11 @@ class _GmailScreenState extends State<GmailScreen> {
             // 接続状態
             Card(
               child: ListTile(
-                leading: Icon(_gmail.isSignedIn ? Icons.check_circle : Icons.mail_outline,
-                    color: _gmail.isSignedIn ? Colors.green : Colors.grey),
-                title: Text(_gmail.isSignedIn ? '連携中' : '未連携'),
-                subtitle: Text(_gmail.account?.email ?? 'Googleアカウントでログインしてください'),
-                trailing: _gmail.isSignedIn
+                leading: Icon(_hasAccess ? Icons.check_circle : Icons.mail_outline,
+                    color: _hasAccess ? Colors.green : Colors.grey),
+                title: Text(_hasAccess ? '連携中' : '未連携'),
+                subtitle: Text(_gmail.displayEmail ?? 'Googleアカウントでログインしてください'),
+                trailing: _hasAccess
                     ? TextButton(
                         onPressed: () async {
                           await _gmail.signOut();
@@ -160,19 +161,11 @@ class _GmailScreenState extends State<GmailScreen> {
             ),
             const SizedBox(height: 12),
 
-            if (!_gmail.isSignedIn)
+            if (!_hasAccess)
               ElevatedButton.icon(
                 onPressed: _loading ? null : _connect,
                 icon: const Icon(Icons.login),
                 label: const Text('Googleでログイン'),
-              )
-            else if (!_hasAccess)
-              ElevatedButton.icon(
-                style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.orange, foregroundColor: Colors.white),
-                onPressed: _loading ? null : _grant,
-                icon: const Icon(Icons.lock_open),
-                label: const Text('Gmailのアクセスを許可'),
               )
             else
               ElevatedButton.icon(
