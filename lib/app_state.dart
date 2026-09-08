@@ -690,6 +690,11 @@ class Loan {
   // 引き落とし方法。'' = 口座から直接、カード名 = そのカードの請求に含める
   String method;
   int monthlyOverride; // 0以外なら毎月の返済額をこの値で固定
+  // 💡 頭金。借入額(principal)には含まれない「最初にまとめて払うぶん」。
+  //   口座払いならその日に一度だけ出ていく。カード払いならそのカードの請求に入る。
+  int downPayment;
+  DateTime? downPaymentDate;
+  String downPaymentMethod; // '' = 口座から, カード名 = そのカード
 
   Loan({
     required this.id,
@@ -701,7 +706,20 @@ class Loan {
     this.payDay = 27,
     this.method = '',
     this.monthlyOverride = 0,
+    this.downPayment = 0,
+    this.downPaymentDate,
+    this.downPaymentMethod = '',
   });
+
+  // 頭金を含めた総額（車両価格など）
+  int get totalPrice => principal + downPayment;
+  // 返済の総額（利息込み）
+  int get totalRepayment => monthlyAmount * totalCount;
+  // 最終的に払う総額
+  int get totalCost => downPayment + totalRepayment;
+
+  bool get hasDownPayment => downPayment > 0 && downPaymentDate != null;
+  bool get isDownPaymentFromAccount => downPaymentMethod.isEmpty;
 
   bool get isFromAccount => method.isEmpty;
   bool get isCardPayment => method.isNotEmpty;
@@ -745,6 +763,9 @@ class Loan {
         'payDay': payDay,
         'method': method,
         'monthlyOverride': monthlyOverride,
+        'downPayment': downPayment,
+        'downPaymentDate': downPaymentDate?.toIso8601String(),
+        'downPaymentMethod': downPaymentMethod,
       };
 
   factory Loan.fromJson(Map<String, dynamic> json) => Loan(
@@ -757,6 +778,58 @@ class Loan {
         payDay: json['payDay'] ?? 27,
         method: json['method'] ?? '',
         monthlyOverride: json['monthlyOverride'] ?? 0,
+        downPayment: json['downPayment'] ?? 0,
+        downPaymentDate: (json['downPaymentDate'] as String?) == null
+            ? null
+            : DateTime.tryParse(json['downPaymentDate']),
+        downPaymentMethod: json['downPaymentMethod'] ?? '',
+      );
+}
+
+
+// ───────────────────────── 予定支出 ─────────────────────────
+// 💡 車検・旅行・家電の買い替えなど、決まった日に一度だけ出ていくお金。
+//   予定入金の裏返し。毎月の固定費（定期支払い）とは別物。
+class PlannedExpense {
+  final String id;
+  String title;
+  int amount;
+  DateTime date; // 支払予定日
+  bool monthly; // 毎月繰り返すか
+
+  PlannedExpense({
+    required this.id,
+    required this.title,
+    required this.amount,
+    required this.date,
+    this.monthly = false,
+  });
+
+  DateTime? dateIn(DateTime month) {
+    if (!monthly) {
+      return (date.year == month.year && date.month == month.month) ? date : null;
+    }
+    if (DateTime(month.year, month.month).isBefore(DateTime(date.year, date.month))) {
+      return null;
+    }
+    final lastDay = DateTime(month.year, month.month + 1, 0).day;
+    return DateTime(month.year, month.month, date.day > lastDay ? lastDay : date.day);
+  }
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'title': title,
+        'amount': amount,
+        'date': date.toIso8601String(),
+        'monthly': monthly,
+      };
+
+  factory PlannedExpense.fromJson(Map<String, dynamic> json) => PlannedExpense(
+        id: json['id'] ?? '',
+        title: json['title'] ?? '',
+        amount: json['amount'] ?? 0,
+        date: DateTime.parse(json['date']),
+        monthly: json['monthly'] ?? false,
       );
 }
 
@@ -1074,6 +1147,8 @@ class AppState extends ChangeNotifier {
   List<Installment> installments = [];
   List<Subscription> subscriptions = [];
   List<Loan> loans = [];
+  List<PlannedExpense> plannedExpenses = [];
+  final Set<String> paidPlannedExpenseKeys = {};
   List<Withdrawal> withdrawals = [];
 
   int currentBalance = 0;
@@ -2730,9 +2805,12 @@ class AppState extends ChangeNotifier {
       });
     }
 
-    // 💡 カード払いのローンも、分割払いと同じくカードの請求に含めて落ちる
+    // 💡 カード払いのローンと頭金も、分割払いと同じくカードの請求に含めて落ちる
     if (!isExpenseConfirmedByBank(month)) {
       loanTotalByCardOf(month).forEach((card, amount) {
+        totals[card] = (totals[card] ?? 0) + amount;
+      });
+      downPaymentByCardOf(month).forEach((card, amount) {
         totals[card] = (totals[card] ?? 0) + amount;
       });
     }
@@ -3144,6 +3222,85 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
+  // ───── 予定支出（一時的な出費）─────
+  // 💡 ローンの月々や定期支払いと違い、決まった日に一度だけ出ていく。
+  //   引き落としの「n月＝n-1月の利用ぶん」の月ズレは当てはまらないので、
+  //   その日付の月にそのまま引く。
+  String _plannedExpenseKey(String id, DateTime date) =>
+      '$id|${DateFormat('yyyy-MM').format(date)}';
+
+  void addPlannedExpense(
+      {required String title,
+      required int amount,
+      required DateTime date,
+      bool monthly = false}) {
+    plannedExpenses.add(PlannedExpense(
+        id: _id(), title: title.trim(), amount: amount, date: date, monthly: monthly));
+    saveData();
+    notifyListeners();
+  }
+
+  void removePlannedExpense(String id) {
+    plannedExpenses.removeWhere((e) => e.id == id);
+    paidPlannedExpenseKeys.removeWhere((k) => k.startsWith('$id|'));
+    saveData();
+    notifyListeners();
+  }
+
+  // 支払い済みにする（残高からは既に引かれているので、予想では二重に引かない）
+  void markPlannedExpensePaid(String id, DateTime date) {
+    paidPlannedExpenseKeys.add(_plannedExpenseKey(id, date));
+    saveData();
+    notifyListeners();
+  }
+
+  // その月に出ていく予定の出費（まだ払っていないもの）
+  List<({PlannedExpense expense, DateTime date})> plannedExpensesIn(DateTime month) {
+    final out = <({PlannedExpense expense, DateTime date})>[];
+    for (final e in plannedExpenses) {
+      final d = e.dateIn(month);
+      if (d == null) continue;
+      if (paidPlannedExpenseKeys.contains(_plannedExpenseKey(e.id, d))) continue;
+      out.add((expense: e, date: d));
+    }
+    out.sort((a, b) => a.date.compareTo(b.date));
+    return out;
+  }
+
+  // 💡 その月に一度だけ出ていくお金（ローンの頭金＋予定支出）。
+  //   月々の返済や定期費用と違って、実際の日付の月にそのまま引く。
+  List<({String label, int amount, DateTime date})> oneTimeExpensesIn(DateTime month) {
+    final out = <({String label, int amount, DateTime date})>[];
+    for (final l in loans) {
+      final d = l.downPaymentDate;
+      if (!l.hasDownPayment || !l.isDownPaymentFromAccount) continue;
+      if (d!.year != month.year || d.month != month.month) continue;
+      out.add((label: '${l.name} 頭金', amount: l.downPayment, date: d));
+    }
+    for (final e in plannedExpensesIn(month)) {
+      out.add((label: e.expense.title, amount: e.expense.amount, date: e.date));
+    }
+    out.sort((a, b) => a.date.compareTo(b.date));
+    return out;
+  }
+
+  // 予想に入れるぶん（残高を書いた日より後のものだけ＝二重に引かない）
+  int oneTimeExpenseForecastIn(DateTime month) => oneTimeExpensesIn(month)
+      .where((e) => _forecastInclude(e.date))
+      .fold(0, (s, e) => s + e.amount);
+
+  // カード払いの頭金は、そのカードの請求に含まれて落ちる
+  Map<String, int> downPaymentByCardOf(DateTime month) {
+    final out = <String, int>{};
+    for (final l in loans) {
+      final d = l.downPaymentDate;
+      if (!l.hasDownPayment || l.isDownPaymentFromAccount) continue;
+      if (d!.year != month.year || d.month != month.month) continue;
+      out[l.downPaymentMethod] = (out[l.downPaymentMethod] ?? 0) + l.downPayment;
+    }
+    return out;
+  }
+
   void removeLoan(String id) {
     loans.removeWhere((l) => l.id == id);
     saveData();
@@ -3312,19 +3469,29 @@ class AppState extends ChangeNotifier {
   // 今月末残高。起点＝デビット調整済み残高＋財布の現金、給料・引き落としは編集日より後の分のみ。
   int get thisMonthBalance {
     final now = DateTime.now();
-    return effectiveBalance + effectiveWalletCash + incomeForecastIn(now) - drawnInMonth(now);
+    return effectiveBalance +
+        effectiveWalletCash +
+        incomeForecastIn(now) -
+        drawnInMonth(now) -
+        oneTimeExpenseForecastIn(now);
   }
 
   // 来月末残高
   int get nextMonthBalance {
     final next = DateTime(DateTime.now().year, DateTime.now().month + 1, 1);
-    return thisMonthBalance + incomeForecastIn(next) - drawnInMonth(next);
+    return thisMonthBalance +
+        incomeForecastIn(next) -
+        drawnInMonth(next) -
+        oneTimeExpenseForecastIn(next);
   }
 
   // 翌々月末残高（#2）
   int get monthAfterNextBalance {
     final m2 = DateTime(DateTime.now().year, DateTime.now().month + 2, 1);
-    return nextMonthBalance + incomeForecastIn(m2) - drawnInMonth(m2);
+    return nextMonthBalance +
+        incomeForecastIn(m2) -
+        drawnInMonth(m2) -
+        oneTimeExpenseForecastIn(m2);
   }
 
   Future<void> setShowMonthAfterNext(bool on) async {
@@ -3569,6 +3736,11 @@ class AppState extends ChangeNotifier {
     for (final e in drawBreakdownOf(now)) {
       out[drawLabelOf(e.label, now)] = -e.amount;
     }
+    // 一度だけ出ていくお金（頭金・予定支出）は、その日付の月にそのまま引く
+    for (final e in oneTimeExpensesIn(now)) {
+      if (!_forecastInclude(e.date)) continue;
+      out['${e.label}（${e.date.month}/${e.date.day}）'] = -e.amount;
+    }
     return out;
   }
 
@@ -3581,6 +3753,11 @@ class AppState extends ChangeNotifier {
     for (final e in drawBreakdownOf(next)) {
       out[drawLabelOf(e.label, next)] = -e.amount;
     }
+    // 一度だけ出ていくお金（頭金・予定支出）は、その日付の月にそのまま引く
+    for (final e in oneTimeExpensesIn(next)) {
+      if (!_forecastInclude(e.date)) continue;
+      out['${e.label}（${e.date.month}/${e.date.day}）'] = -e.amount;
+    }
     return out;
   }
 
@@ -3592,6 +3769,11 @@ class AppState extends ChangeNotifier {
     if (income != 0) out['給料入金'] = income;
     for (final e in drawBreakdownOf(m2)) {
       out[drawLabelOf(e.label, m2)] = -e.amount;
+    }
+    // 一度だけ出ていくお金（頭金・予定支出）は、その日付の月にそのまま引く
+    for (final e in oneTimeExpensesIn(m2)) {
+      if (!_forecastInclude(e.date)) continue;
+      out['${e.label}（${e.date.month}/${e.date.day}）'] = -e.amount;
     }
     return out;
   }
@@ -3627,6 +3809,8 @@ class AppState extends ChangeNotifier {
       'installments': installments.map((e) => e.toJson()).toList(),
       'subscriptions': subscriptions.map((e) => e.toJson()).toList(),
       'loans': loans.map((e) => e.toJson()).toList(),
+      'plannedExpenses': plannedExpenses.map((e) => e.toJson()).toList(),
+      'paidPlannedExpenseKeys': paidPlannedExpenseKeys.toList(),
       'withdrawals': withdrawals.map((e) => e.toJson()).toList(),
       'currentBalance': currentBalance,
       'walletCash': walletCash,
@@ -3982,6 +4166,12 @@ class AppState extends ChangeNotifier {
     subscriptions =
         (map['subscriptions'] as List? ?? []).map((e) => Subscription.fromJson(e)).toList();
     loans = (map['loans'] as List? ?? []).map((e) => Loan.fromJson(e)).toList();
+    plannedExpenses = (map['plannedExpenses'] as List? ?? [])
+        .map((e) => PlannedExpense.fromJson(e))
+        .toList();
+    paidPlannedExpenseKeys
+      ..clear()
+      ..addAll((map['paidPlannedExpenseKeys'] as List? ?? []).map((e) => '$e'));
     withdrawals =
         (map['withdrawals'] as List? ?? []).map((e) => Withdrawal.fromJson(e)).toList();
 
@@ -4081,6 +4271,10 @@ class AppState extends ChangeNotifier {
         jsonEncode(subscriptions.map((e) => e.toJson()).toList()));
     await prefs.setString(
         'saved_loans', jsonEncode(loans.map((e) => e.toJson()).toList()));
+    await prefs.setString('saved_planned_expenses',
+        jsonEncode(plannedExpenses.map((e) => e.toJson()).toList()));
+    await prefs.setStringList(
+        'saved_paid_planned_expenses', paidPlannedExpenseKeys.toList());
     await prefs.setString('saved_withdrawals',
         jsonEncode(withdrawals.map((e) => e.toJson()).toList()));
     await prefs.setInt('saved_balance', currentBalance);
@@ -4208,6 +4402,16 @@ class AppState extends ChangeNotifier {
     if (loanStr != null) {
       loans = (jsonDecode(loanStr) as List).map((e) => Loan.fromJson(e)).toList();
     }
+
+    final peStr = prefs.getString('saved_planned_expenses');
+    if (peStr != null) {
+      plannedExpenses = (jsonDecode(peStr) as List)
+          .map((e) => PlannedExpense.fromJson(e))
+          .toList();
+    }
+    paidPlannedExpenseKeys
+      ..clear()
+      ..addAll(prefs.getStringList('saved_paid_planned_expenses') ?? []);
 
     final wdStr = prefs.getString('saved_withdrawals');
     if (wdStr != null) {

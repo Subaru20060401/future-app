@@ -155,6 +155,9 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
                           fontWeight: FontWeight.bold, color: Colors.indigo)),
                   Text('残債 ¥${l.remainingAmountAt(now)}',
                       style: const TextStyle(fontSize: 11, color: Colors.grey)),
+                  if (l.hasDownPayment)
+                    Text('頭金 ¥${l.downPayment}',
+                        style: const TextStyle(fontSize: 11, color: Colors.indigo)),
                 ],
               ),
               onTap: () => _editLoan(appState, l),
@@ -182,6 +185,10 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
         text: (edit?.monthlyOverride ?? 0) > 0 ? '${edit!.monthlyOverride}' : '');
     var start = edit?.startMonth ?? DateTime(DateTime.now().year, DateTime.now().month);
     var method = edit?.method ?? '';
+    final downCtrl = TextEditingController(
+        text: (edit?.downPayment ?? 0) > 0 ? '${edit!.downPayment}' : '');
+    DateTime? downDate = edit?.downPaymentDate;
+    var downMethod = edit?.downPaymentMethod ?? '';
 
     final cards = appState.cardChoices
         .where((c) => c != AppState.kOtherCard)
@@ -284,9 +291,58 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
                     ),
                     onChanged: (_) => setLocal(() {}),
                   ),
+                  const Divider(height: 24),
+                  const Text('頭金（任意）',
+                      style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold)),
+                  const Text('最初にまとめて払うぶん。借入額には含みません。',
+                      style: TextStyle(fontSize: 11, color: Colors.grey)),
+                  TextField(
+                    controller: downCtrl,
+                    keyboardType: TextInputType.number,
+                    decoration: const InputDecoration(labelText: '頭金(円)'),
+                    onChanged: (_) => setLocal(() {}),
+                  ),
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('支払日', style: TextStyle(fontSize: 14)),
+                    trailing: Text(downDate == null
+                        ? '未設定'
+                        : '${downDate!.year}/${downDate!.month}/${downDate!.day}'),
+                    onTap: () async {
+                      final picked = await showDatePicker(
+                        context: context,
+                        initialDate: downDate ?? DateTime.now(),
+                        firstDate: DateTime(2020),
+                        lastDate: DateTime(2060),
+                        helpText: '頭金を払う日',
+                      );
+                      if (picked != null) setLocal(() => downDate = picked);
+                    },
+                  ),
+                  Wrap(
+                    spacing: 6,
+                    children: [
+                      ChoiceChip(
+                        label: const Text('口座から', style: TextStyle(fontSize: 12)),
+                        selected: downMethod.isEmpty,
+                        onSelected: (_) => setLocal(() => downMethod = ''),
+                      ),
+                      ...cards.map((c) => ChoiceChip(
+                            label: Text(c, style: const TextStyle(fontSize: 12)),
+                            selected: downMethod == c,
+                            onSelected: (_) => setLocal(() => downMethod = c),
+                          )),
+                    ],
+                  ),
                   const SizedBox(height: 10),
                   Text('毎月 ¥$monthly × $count回',
                       style: const TextStyle(fontWeight: FontWeight.bold)),
+                  if ((int.tryParse(downCtrl.text) ?? 0) > 0)
+                    Text(
+                      '総額 ¥${principal + (int.tryParse(downCtrl.text) ?? 0)}'
+                      '（頭金 ¥${int.tryParse(downCtrl.text) ?? 0} ＋ 借入 ¥$principal）',
+                      style: const TextStyle(fontSize: 12, color: Colors.grey),
+                    ),
                   if (count > 0)
                     Text(
                       '完済予定 '
@@ -316,6 +372,14 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
                             method: method,
                             monthlyOverride: override,
                           );
+                          final down = int.tryParse(downCtrl.text) ?? 0;
+                          if (down > 0 && downDate != null) {
+                            appState.loans.last
+                              ..downPayment = down
+                              ..downPaymentDate = downDate
+                              ..downPaymentMethod = downMethod;
+                            appState.updateLoan(appState.loans.last);
+                          }
                         } else {
                           edit
                             ..name = nameCtrl.text.trim()
@@ -325,7 +389,10 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
                             ..interestRate = rate
                             ..payDay = (int.tryParse(dayCtrl.text) ?? 27).clamp(1, 31)
                             ..method = method
-                            ..monthlyOverride = override;
+                            ..monthlyOverride = override
+                            ..downPayment = int.tryParse(downCtrl.text) ?? 0
+                            ..downPaymentDate = downDate
+                            ..downPaymentMethod = downMethod;
                           appState.updateLoan(edit);
                         }
                         Navigator.pop(context);

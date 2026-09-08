@@ -5,6 +5,7 @@ import '../app_state.dart';
 import '../card_styles.dart';
 import '../widgets/gmail_refresh_button.dart';
 import '../widgets/deposit_dialog.dart';
+import '../widgets/planned_expense_sheet.dart';
 import '../widgets/planned_income_sheet.dart';
 import 'history_screen.dart';
 import 'balance_history_screen.dart';
@@ -841,6 +842,14 @@ class IncomeScreen extends StatelessWidget {
                   : '仕送り・返金など、これから入る予定のお金'),
               trailing: const Icon(Icons.chevron_right),
               onTap: () => showPlannedIncomeSheet(context, appState),
+            ),
+            // 💡 一度だけ出ていく予定のお金（車検・旅行・頭金など）
+            ListTile(
+              leading: const Icon(Icons.event_busy, color: Colors.deepOrange),
+              title: const Text('予定支出'),
+              subtitle: const Text('車検・旅行など、これから出ていく予定のお金'),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () => showPlannedExpenseSheet(context, appState),
             ),
             // 💡 入出金の履歴
             ListTile(

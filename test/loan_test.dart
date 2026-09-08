@@ -125,6 +125,97 @@ void main() {
     });
   });
 
+  group('頭金', () {
+    test('借入額には含めず、総額として表示できる', () {
+      final l = Loan(
+        id: 'l5',
+        name: '車のローン',
+        principal: 1000000,
+        totalCount: 60,
+        startMonth: DateTime(2026, 10),
+        downPayment: 300000,
+        downPaymentDate: DateTime(2026, 9, 20),
+      );
+      expect(l.totalPrice, 1300000); // 頭金 30万 ＋ 借入 100万
+      expect(l.monthlyAmount, 16667); // 無利息なら 100万 ÷ 60回
+      expect(l.totalCost, 300000 + 16667 * 60);
+      expect(l.hasDownPayment, isTrue);
+    });
+
+    test('口座払いの頭金は、その日付の月にそのまま引かれる', () {
+      final a = app()
+        ..addLoan(
+          name: '車のローン',
+          principal: 600000,
+          totalCount: 60,
+          startMonth: DateTime(2026, 10),
+        );
+      a.loans.single
+        ..downPayment = 300000
+        ..downPaymentDate = DateTime(2026, 9, 20);
+
+      // 月ズレしない（9月の出費として9月に引く）
+      final sep = a.oneTimeExpensesIn(DateTime(2026, 9));
+      expect(sep, hasLength(1));
+      expect(sep.single.label, '車のローン 頭金');
+      expect(sep.single.amount, 300000);
+      expect(a.oneTimeExpensesIn(DateTime(2026, 10)), isEmpty);
+    });
+
+    test('カード払いの頭金はそのカードの請求に入る', () {
+      final a = app()
+        ..addLoan(
+          name: '車のローン',
+          principal: 600000,
+          totalCount: 60,
+          startMonth: DateTime(2026, 10),
+        );
+      a.loans.single
+        ..downPayment = 300000
+        ..downPaymentDate = DateTime(2026, 9, 20)
+        ..downPaymentMethod = '三井OLIVE';
+
+      expect(a.oneTimeExpensesIn(DateTime(2026, 9)), isEmpty); // 口座からは出ない
+      final sep = a.expenseBreakdownOf(DateTime(2026, 9));
+      expect(sep.firstWhere((e) => e.label == '三井OLIVE').amount, 300000);
+    });
+  });
+
+  group('予定支出', () {
+    test('予定日の月に引かれ、払ったら消える', () {
+      final a = app()
+        ..addPlannedExpense(
+            title: '車検', amount: 80000, date: DateTime(2026, 11, 5));
+
+      expect(a.oneTimeExpensesIn(DateTime(2026, 11)).single.amount, 80000);
+      expect(a.oneTimeExpensesIn(DateTime(2026, 10)), isEmpty);
+
+      a.markPlannedExpensePaid(a.plannedExpenses.single.id, DateTime(2026, 11, 5));
+      expect(a.oneTimeExpensesIn(DateTime(2026, 11)), isEmpty);
+    });
+
+    test('毎月くり返しにできる', () {
+      final a = app()
+        ..addPlannedExpense(
+            title: '仕送り',
+            amount: 30000,
+            date: DateTime(2026, 9, 10),
+            monthly: true);
+      expect(a.oneTimeExpensesIn(DateTime(2026, 9)).single.amount, 30000);
+      expect(a.oneTimeExpensesIn(DateTime(2026, 12)).single.amount, 30000);
+      expect(a.oneTimeExpensesIn(DateTime(2026, 8)), isEmpty); // 登録前
+    });
+
+    test('書き出し・取り込みで保たれる', () {
+      final a = app()
+        ..addPlannedExpense(
+            title: '旅行', amount: 50000, date: DateTime(2026, 12, 20));
+      final restored = AppState()..importJson(a.exportJson());
+      expect(restored.plannedExpenses.single.title, '旅行');
+      expect(restored.plannedExpenses.single.amount, 50000);
+    });
+  });
+
   group('保存', () {
     test('書き出し・取り込みで保たれる', () {
       final a = app()
