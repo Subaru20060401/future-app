@@ -690,6 +690,9 @@ class Loan {
   // 引き落とし方法。'' = 口座から直接、カード名 = そのカードの請求に含める
   String method;
   int monthlyOverride; // 0以外なら毎月の返済額をこの値で固定
+  // 💡 ショッピングクレジットは「初回だけ金額が違う」ことが多い
+  //   （例: 第1回 9,800円／第2回目以降 8,000円×23回）。0なら毎月と同じ。
+  int firstPaymentAmount;
   // 💡 頭金。借入額(principal)には含まれない「最初にまとめて払うぶん」。
   //   口座払いならその日に一度だけ出ていく。カード払いならそのカードの請求に入る。
   int downPayment;
@@ -706,6 +709,7 @@ class Loan {
     this.payDay = 27,
     this.method = '',
     this.monthlyOverride = 0,
+    this.firstPaymentAmount = 0,
     this.downPayment = 0,
     this.downPaymentDate,
     this.downPaymentMethod = '',
@@ -713,8 +717,9 @@ class Loan {
 
   // 頭金を含めた総額（車両価格など）
   int get totalPrice => principal + downPayment;
-  // 返済の総額（利息込み）
-  int get totalRepayment => monthlyAmount * totalCount;
+  // 返済の総額（手数料込み。初回だけ違う場合も正しく足す）
+  int get totalRepayment =>
+      firstAmount + monthlyAmount * (totalCount > 0 ? totalCount - 1 : 0);
   // 最終的に払う総額
   int get totalCost => downPayment + totalRepayment;
 
@@ -724,10 +729,34 @@ class Loan {
   bool get isFromAccount => method.isEmpty;
   bool get isCardPayment => method.isNotEmpty;
 
-  // 毎月の返済額。指定があればそれを使う（金利の計算方法が違う場合に備える）
-  int get monthlyAmount => monthlyOverride > 0
-      ? monthlyOverride
-      : computeInstallmentMonthly(principal, totalCount, interestRate);
+  // 手数料（分割払手数料）を含めた支払総額
+  int get _totalWithFee {
+    final fee = principal * (interestRate / 100) * (totalCount / 12);
+    return (principal + fee).round();
+  }
+
+  // 2回目以降の返済額。指定があればそれを使う。
+  // 初回だけ違う契約なら、残りを回数-1で割る（総額が合うように）。
+  int get monthlyAmount {
+    if (monthlyOverride > 0) return monthlyOverride;
+    if (firstPaymentAmount > 0 && totalCount > 1) {
+      return ((_totalWithFee - firstPaymentAmount) / (totalCount - 1)).round();
+    }
+    return computeInstallmentMonthly(principal, totalCount, interestRate);
+  }
+
+  // 初回の返済額（指定が無ければ毎月と同じ）
+  int get firstAmount =>
+      firstPaymentAmount > 0 ? firstPaymentAmount : monthlyAmount;
+
+  // n回目の返済額
+  int amountForCount(int n) => n == 1 ? firstAmount : monthlyAmount;
+
+  // その月に払う額（返済期間外は0）
+  int amountIn(DateTime month) {
+    final n = countIn(month);
+    return n == 0 ? 0 : amountForCount(n);
+  }
 
   // その月が何回目の返済か（1始まり）。返済期間外なら0。
   int countIn(DateTime month) {
@@ -750,8 +779,16 @@ class Loan {
     return left < 0 ? 0 : left;
   }
 
-  // 残債（毎月の返済額 × 残り回数の目安）
-  int remainingAmountAt(DateTime now) => monthlyAmount * remainingCountAt(now);
+  // 残債（これから払う回のぶんを足し上げる）
+  int remainingAmountAt(DateTime now) {
+    final done = (now.year - startMonth.year) * 12 + (now.month - startMonth.month);
+    if (done <= 0) return totalRepayment; // まだ1回も払っていない
+    var total = 0;
+    for (var n = done + 1; n <= totalCount; n++) {
+      total += amountForCount(n);
+    }
+    return total;
+  }
 
   Map<String, dynamic> toJson() => {
         'id': id,
@@ -763,6 +800,7 @@ class Loan {
         'payDay': payDay,
         'method': method,
         'monthlyOverride': monthlyOverride,
+        'firstPaymentAmount': firstPaymentAmount,
         'downPayment': downPayment,
         'downPaymentDate': downPaymentDate?.toIso8601String(),
         'downPaymentMethod': downPaymentMethod,
@@ -778,6 +816,7 @@ class Loan {
         payDay: json['payDay'] ?? 27,
         method: json['method'] ?? '',
         monthlyOverride: json['monthlyOverride'] ?? 0,
+        firstPaymentAmount: json['firstPaymentAmount'] ?? 0,
         downPayment: json['downPayment'] ?? 0,
         downPaymentDate: (json['downPaymentDate'] as String?) == null
             ? null
@@ -2837,7 +2876,7 @@ class AppState extends ChangeNotifier {
       if (!l.isFromAccount) continue;
       out.add((
         label: l.name,
-        amount: l.monthlyAmount,
+        amount: l.amountIn(month),
         colorValue: Colors.indigo.toARGB32(),
       ));
     }
@@ -2892,7 +2931,7 @@ class AppState extends ChangeNotifier {
         out.add((
           title: l.name,
           subtitle: '$n/${l.totalCount}回目 ・ 毎月${l.payDay}日',
-          amount: l.monthlyAmount,
+          amount: l.amountForCount(n),
         ));
       }
     } else if (label == 'ATM') {
@@ -3182,7 +3221,7 @@ class AppState extends ChangeNotifier {
     final out = <String, int>{};
     for (final l in loans) {
       if (!l.isCardPayment || !l.isActiveIn(month)) continue;
-      out[l.method] = (out[l.method] ?? 0) + l.monthlyAmount;
+      out[l.method] = (out[l.method] ?? 0) + l.amountIn(month);
     }
     return out;
   }
@@ -3190,7 +3229,7 @@ class AppState extends ChangeNotifier {
   // 口座から直接引かれるローンの合計（参考表示用）
   int loanTotalFromAccountOf(DateTime month) => loans
       .where((l) => l.isFromAccount && l.isActiveIn(month))
-      .fold(0, (s, l) => s + l.monthlyAmount);
+      .fold(0, (s, l) => s + l.amountIn(month));
 
   void addLoan({
     required String name,
@@ -3201,6 +3240,7 @@ class AppState extends ChangeNotifier {
     int payDay = 27,
     String method = '',
     int monthlyOverride = 0,
+    int firstPaymentAmount = 0,
   }) {
     loans.add(Loan(
       id: _id(),
@@ -3212,6 +3252,7 @@ class AppState extends ChangeNotifier {
       payDay: payDay.clamp(1, 31),
       method: method,
       monthlyOverride: monthlyOverride,
+      firstPaymentAmount: firstPaymentAmount,
     ));
     saveData();
     notifyListeners();

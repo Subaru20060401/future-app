@@ -216,6 +216,67 @@ void main() {
     });
   });
 
+  group('初回だけ金額が違う契約（ショッピングクレジット）', () {
+    // ジャックスのショッピングクレジットの実例:
+    // 現金価格 193,800 / 手数料 0 / 24回 / 2026年10月〜2028年9月 / 毎月27日
+    // 第1回 9,800円、第2回目以降 8,000円 × 23回
+    Loan jaccs() => Loan(
+          id: 'jaccs',
+          name: 'BTOパソコン（ジャックス）',
+          principal: 193800,
+          totalCount: 24,
+          startMonth: DateTime(2026, 10),
+          payDay: 27,
+          firstPaymentAmount: 9800,
+        );
+
+    test('2回目以降の額が残りから逆算される', () {
+      final l = jaccs();
+      expect(l.firstAmount, 9800);
+      expect(l.monthlyAmount, 8000); // (193800 - 9800) / 23
+    });
+
+    test('支払総額が契約書と一致する', () {
+      expect(jaccs().totalRepayment, 193800);
+    });
+
+    test('初回の月だけ金額が違う', () {
+      final l = jaccs();
+      expect(l.amountIn(DateTime(2026, 10)), 9800);
+      expect(l.amountIn(DateTime(2026, 11)), 8000);
+      expect(l.amountIn(DateTime(2028, 9)), 8000); // 最終回
+      expect(l.amountIn(DateTime(2028, 10)), 0); // 完済後
+      expect(l.finishMonth, DateTime(2028, 9));
+    });
+
+    test('残債が正しく減る', () {
+      // remainingAmountAt は「その月の時点でこれから払う額」。
+      // 10月の返済(27日)はまだなので、10月時点では全額残っている。
+      final l = jaccs();
+      expect(l.remainingAmountAt(DateTime(2026, 9)), 193800); // 開始前
+      expect(l.remainingAmountAt(DateTime(2026, 10)), 193800); // 初回はこれから
+      expect(l.remainingAmountAt(DateTime(2026, 11)), 184000); // 初回を払い終えた
+      expect(l.remainingAmountAt(DateTime(2026, 12)), 176000);
+      expect(l.remainingAmountAt(DateTime(2029, 1)), 0); // 完済後
+    });
+
+    test('予想残高にも初回の額で反映される', () {
+      final a = app()
+        ..addLoan(
+          name: 'BTOパソコン（ジャックス）',
+          principal: 193800,
+          totalCount: 24,
+          startMonth: DateTime(2026, 10),
+          payDay: 27,
+          firstPaymentAmount: 9800,
+        );
+      final oct = a.expenseBreakdownOf(DateTime(2026, 10));
+      expect(oct.firstWhere((e) => e.label.contains('BTO')).amount, 9800);
+      final nov = a.expenseBreakdownOf(DateTime(2026, 11));
+      expect(nov.firstWhere((e) => e.label.contains('BTO')).amount, 8000);
+    });
+  });
+
   group('保存', () {
     test('書き出し・取り込みで保たれる', () {
       final a = app()

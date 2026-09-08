@@ -150,7 +150,7 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
                 mainAxisAlignment: MainAxisAlignment.center,
                 crossAxisAlignment: CrossAxisAlignment.end,
                 children: [
-                  Text('¥${l.monthlyAmount}',
+                  Text('¥${l.amountIn(DateTime(now.year, now.month))}',
                       style: const TextStyle(
                           fontWeight: FontWeight.bold, color: Colors.indigo)),
                   Text('残債 ¥${l.remainingAmountAt(now)}',
@@ -183,6 +183,9 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
     final dayCtrl = TextEditingController(text: (edit?.payDay ?? 27).toString());
     final monthlyCtrl = TextEditingController(
         text: (edit?.monthlyOverride ?? 0) > 0 ? '${edit!.monthlyOverride}' : '');
+    // 💡 ショッピングクレジットは初回だけ金額が違うことが多い
+    final firstCtrl = TextEditingController(
+        text: (edit?.firstPaymentAmount ?? 0) > 0 ? '${edit!.firstPaymentAmount}' : '');
     var start = edit?.startMonth ?? DateTime(DateTime.now().year, DateTime.now().month);
     var method = edit?.method ?? '';
     final downCtrl = TextEditingController(
@@ -202,9 +205,15 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
           final count = int.tryParse(countCtrl.text) ?? 0;
           final rate = double.tryParse(rateCtrl.text) ?? 0;
           final override = int.tryParse(monthlyCtrl.text) ?? 0;
+          final first = int.tryParse(firstCtrl.text) ?? 0;
+          // 初回だけ違う契約は、残りを回数-1で割る（総額が合うように）
           final monthly = override > 0
               ? override
-              : (count > 0 ? computeInstallmentMonthly(principal, count, rate) : 0);
+              : (count > 1 && first > 0
+                  ? (((principal + principal * (rate / 100) * (count / 12)) - first) /
+                          (count - 1))
+                      .round()
+                  : (count > 0 ? computeInstallmentMonthly(principal, count, rate) : 0));
           final valid = nameCtrl.text.trim().isNotEmpty && count > 0;
 
           return AlertDialog(
@@ -283,11 +292,20 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
                   ),
                   const SizedBox(height: 8),
                   TextField(
+                    controller: firstCtrl,
+                    keyboardType: TextInputType.number,
+                    decoration: const InputDecoration(
+                      labelText: '初回だけ違う金額（任意）',
+                      hintText: '例: 第1回 9800円',
+                    ),
+                    onChanged: (_) => setLocal(() {}),
+                  ),
+                  TextField(
                     controller: monthlyCtrl,
                     keyboardType: TextInputType.number,
                     decoration: const InputDecoration(
-                      labelText: '毎月の返済額を指定（任意）',
-                      hintText: '空欄なら借入額と金利から計算',
+                      labelText: '2回目以降の返済額を指定（任意）',
+                      hintText: '空欄なら残りを回数で割って計算',
                     ),
                     onChanged: (_) => setLocal(() {}),
                   ),
@@ -335,8 +353,17 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
                     ],
                   ),
                   const SizedBox(height: 10),
-                  Text('毎月 ¥$monthly × $count回',
-                      style: const TextStyle(fontWeight: FontWeight.bold)),
+                  if (first > 0)
+                    Text('初回 ¥$first ＋ 2回目以降 ¥$monthly × ${count - 1}回',
+                        style: const TextStyle(fontWeight: FontWeight.bold))
+                  else
+                    Text('毎月 ¥$monthly × $count回',
+                        style: const TextStyle(fontWeight: FontWeight.bold)),
+                  if (count > 0)
+                    Text(
+                      '支払総額 ¥${first > 0 ? first + monthly * (count - 1) : monthly * count}',
+                      style: const TextStyle(fontSize: 12, color: Colors.grey),
+                    ),
                   if ((int.tryParse(downCtrl.text) ?? 0) > 0)
                     Text(
                       '総額 ¥${principal + (int.tryParse(downCtrl.text) ?? 0)}'
@@ -371,6 +398,7 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
                             payDay: int.tryParse(dayCtrl.text) ?? 27,
                             method: method,
                             monthlyOverride: override,
+                            firstPaymentAmount: first,
                           );
                           final down = int.tryParse(downCtrl.text) ?? 0;
                           if (down > 0 && downDate != null) {
@@ -390,6 +418,7 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
                             ..payDay = (int.tryParse(dayCtrl.text) ?? 27).clamp(1, 31)
                             ..method = method
                             ..monthlyOverride = override
+                            ..firstPaymentAmount = first
                             ..downPayment = int.tryParse(downCtrl.text) ?? 0
                             ..downPaymentDate = downDate
                             ..downPaymentMethod = downMethod;
