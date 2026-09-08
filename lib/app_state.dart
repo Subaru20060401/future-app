@@ -674,6 +674,92 @@ int computeInstallmentMonthly(int principal, int count, double annualRatePercent
   return ((principal + fee) / count).round();
 }
 
+// ───────────────────────── ローン ─────────────────────────
+// 💡 分割払いとの違い: 分割はカードの請求に含まれて落ちるが、
+//   ローンは口座から直接引き落とされることが多く、返済日も独立している。
+//   奨学金のように「卒業してから返済開始」というものもあるので、
+//   返済開始の年月を持たせて、それより前の月は何も引かない。
+class Loan {
+  final String id;
+  String name; // 奨学金、車のローン など
+  int principal; // 借入総額（元金）
+  double interestRate; // 年利(%)。0＝無利息（奨学金の第一種など）
+  int totalCount; // 返済回数（月）
+  DateTime startMonth; // 初回返済の年月
+  int payDay; // 毎月の返済日
+  // 引き落とし方法。'' = 口座から直接、カード名 = そのカードの請求に含める
+  String method;
+  int monthlyOverride; // 0以外なら毎月の返済額をこの値で固定
+
+  Loan({
+    required this.id,
+    required this.name,
+    required this.principal,
+    required this.totalCount,
+    required this.startMonth,
+    this.interestRate = 0,
+    this.payDay = 27,
+    this.method = '',
+    this.monthlyOverride = 0,
+  });
+
+  bool get isFromAccount => method.isEmpty;
+  bool get isCardPayment => method.isNotEmpty;
+
+  // 毎月の返済額。指定があればそれを使う（金利の計算方法が違う場合に備える）
+  int get monthlyAmount => monthlyOverride > 0
+      ? monthlyOverride
+      : computeInstallmentMonthly(principal, totalCount, interestRate);
+
+  // その月が何回目の返済か（1始まり）。返済期間外なら0。
+  int countIn(DateTime month) {
+    final diff = (month.year - startMonth.year) * 12 + (month.month - startMonth.month);
+    if (diff < 0 || diff >= totalCount) return 0;
+    return diff + 1;
+  }
+
+  bool isActiveIn(DateTime month) => countIn(month) > 0;
+
+  // 完済する月（最後の返済月）
+  DateTime get finishMonth =>
+      DateTime(startMonth.year, startMonth.month + totalCount - 1);
+
+  // 基準日の時点で残っている回数
+  int remainingCountAt(DateTime now) {
+    final done = (now.year - startMonth.year) * 12 + (now.month - startMonth.month);
+    if (done < 0) return totalCount; // まだ返済が始まっていない
+    final left = totalCount - done;
+    return left < 0 ? 0 : left;
+  }
+
+  // 残債（毎月の返済額 × 残り回数の目安）
+  int remainingAmountAt(DateTime now) => monthlyAmount * remainingCountAt(now);
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'name': name,
+        'principal': principal,
+        'interestRate': interestRate,
+        'totalCount': totalCount,
+        'startMonth': startMonth.toIso8601String(),
+        'payDay': payDay,
+        'method': method,
+        'monthlyOverride': monthlyOverride,
+      };
+
+  factory Loan.fromJson(Map<String, dynamic> json) => Loan(
+        id: json['id'],
+        name: json['name'] ?? '',
+        principal: json['principal'] ?? 0,
+        interestRate: (json['interestRate'] ?? 0).toDouble(),
+        totalCount: json['totalCount'] ?? 1,
+        startMonth: DateTime.parse(json['startMonth']),
+        payDay: json['payDay'] ?? 27,
+        method: json['method'] ?? '',
+        monthlyOverride: json['monthlyOverride'] ?? 0,
+      );
+}
+
 // ───────────────────────── 定期支払い ─────────────────────────
 // 定期支払いの「手動」支払いを表す値（method に入る）
 const String kManualPayMethod = '手動';
@@ -987,6 +1073,7 @@ class AppState extends ChangeNotifier {
   List<Payment> payments = [];
   List<Installment> installments = [];
   List<Subscription> subscriptions = [];
+  List<Loan> loans = [];
   List<Withdrawal> withdrawals = [];
 
   int currentBalance = 0;
@@ -2643,11 +2730,19 @@ class AppState extends ChangeNotifier {
       });
     }
 
+    // 💡 カード払いのローンも、分割払いと同じくカードの請求に含めて落ちる
+    if (!isExpenseConfirmedByBank(month)) {
+      loanTotalByCardOf(month).forEach((card, amount) {
+        totals[card] = (totals[card] ?? 0) + amount;
+      });
+    }
+
     totals.forEach((card, amount) {
       if (amount > 0) {
         out.add((label: card, amount: amount, colorValue: cardColorOf(card).toARGB32()));
       }
     });
+
     // カードが決まっていない分割は足せないので、消さずに別枠で残す
     if (!isExpenseConfirmedByBank(month)) {
       final unassigned = unassignedInstallmentTotalOf(month);
@@ -2658,6 +2753,15 @@ class AppState extends ChangeNotifier {
           colorValue: Colors.deepOrange.toARGB32(),
         ));
       }
+    }
+    // 💡 口座から直接引かれるローンは、返済日が個別なので1本ずつ出す
+    for (final l in activeLoansIn(month)) {
+      if (!l.isFromAccount) continue;
+      out.add((
+        label: l.name,
+        amount: l.monthlyAmount,
+        colorValue: Colors.indigo.toARGB32(),
+      ));
     }
     final subTotal = subscriptionTotalOf(month);
     if (subTotal > 0) {
@@ -2702,6 +2806,16 @@ class AppState extends ChangeNotifier {
         if (diff >= 0 && diff < i.installmentCount) {
           out.add((title: i.name, subtitle: '${diff + 1}/${i.installmentCount}回目', amount: i.monthlyAmount));
         }
+      }
+    } else if (loans.any((l) => l.isFromAccount && l.name == label)) {
+      for (final l in loans.where((e) => e.isFromAccount && e.name == label)) {
+        final n = l.countIn(month);
+        if (n == 0) continue;
+        out.add((
+          title: l.name,
+          subtitle: '$n/${l.totalCount}回目 ・ 毎月${l.payDay}日',
+          amount: l.monthlyAmount,
+        ));
       }
     } else if (label == 'ATM') {
       for (final w in withdrawals) {
@@ -2979,6 +3093,63 @@ class AppState extends ChangeNotifier {
         .fold(0, (sum, s) => sum + s.amount);
   }
 
+  // ───── ローン ─────
+  // 💡 口座から直接引かれるローンは、返済日が個別なので1本ずつのスライスにする。
+  //   （まとめて1つにすると、分割払いで起きたのと同じ「引き落とし日のズレ」が出る）
+  List<Loan> activeLoansIn(DateTime month) =>
+      loans.where((l) => l.isActiveIn(month)).toList();
+
+  // カード払いのローンは、そのカードの請求に含めて落ちる
+  Map<String, int> loanTotalByCardOf(DateTime month) {
+    final out = <String, int>{};
+    for (final l in loans) {
+      if (!l.isCardPayment || !l.isActiveIn(month)) continue;
+      out[l.method] = (out[l.method] ?? 0) + l.monthlyAmount;
+    }
+    return out;
+  }
+
+  // 口座から直接引かれるローンの合計（参考表示用）
+  int loanTotalFromAccountOf(DateTime month) => loans
+      .where((l) => l.isFromAccount && l.isActiveIn(month))
+      .fold(0, (s, l) => s + l.monthlyAmount);
+
+  void addLoan({
+    required String name,
+    required int principal,
+    required int totalCount,
+    required DateTime startMonth,
+    double interestRate = 0,
+    int payDay = 27,
+    String method = '',
+    int monthlyOverride = 0,
+  }) {
+    loans.add(Loan(
+      id: _id(),
+      name: name.trim(),
+      principal: principal,
+      totalCount: totalCount < 1 ? 1 : totalCount,
+      startMonth: DateTime(startMonth.year, startMonth.month),
+      interestRate: interestRate,
+      payDay: payDay.clamp(1, 31),
+      method: method,
+      monthlyOverride: monthlyOverride,
+    ));
+    saveData();
+    notifyListeners();
+  }
+
+  void updateLoan(Loan loan) {
+    saveData();
+    notifyListeners();
+  }
+
+  void removeLoan(String id) {
+    loans.removeWhere((l) => l.id == id);
+    saveData();
+    notifyListeners();
+  }
+
   // 指定月のATM引き出し合計
   int withdrawalsOf(DateTime month) {
     final prefix = DateFormat('yyyy-MM').format(month);
@@ -3060,6 +3231,10 @@ class AppState extends ChangeNotifier {
   int _drawDayOf(String label) {
     final card = cardPaymentDays[label];
     if (card != null) return card;
+    // ローンは名前がそのままラベルになる。自分の返済日で落ちる。
+    for (final l in loans) {
+      if (l.isFromAccount && l.name == label) return l.payDay;
+    }
     if (label == '定期支払い' && subscriptions.isNotEmpty) {
       return subscriptions.map((s) => s.payDay).reduce((a, b) => a < b ? a : b);
     }
@@ -3451,6 +3626,7 @@ class AppState extends ChangeNotifier {
       'payments': payments.map((e) => e.toJson()).toList(),
       'installments': installments.map((e) => e.toJson()).toList(),
       'subscriptions': subscriptions.map((e) => e.toJson()).toList(),
+      'loans': loans.map((e) => e.toJson()).toList(),
       'withdrawals': withdrawals.map((e) => e.toJson()).toList(),
       'currentBalance': currentBalance,
       'walletCash': walletCash,
@@ -3805,6 +3981,7 @@ class AppState extends ChangeNotifier {
         (map['installments'] as List? ?? []).map((e) => Installment.fromJson(e)).toList();
     subscriptions =
         (map['subscriptions'] as List? ?? []).map((e) => Subscription.fromJson(e)).toList();
+    loans = (map['loans'] as List? ?? []).map((e) => Loan.fromJson(e)).toList();
     withdrawals =
         (map['withdrawals'] as List? ?? []).map((e) => Withdrawal.fromJson(e)).toList();
 
@@ -3902,6 +4079,8 @@ class AppState extends ChangeNotifier {
         jsonEncode(installments.map((e) => e.toJson()).toList()));
     await prefs.setString('saved_subscriptions',
         jsonEncode(subscriptions.map((e) => e.toJson()).toList()));
+    await prefs.setString(
+        'saved_loans', jsonEncode(loans.map((e) => e.toJson()).toList()));
     await prefs.setString('saved_withdrawals',
         jsonEncode(withdrawals.map((e) => e.toJson()).toList()));
     await prefs.setInt('saved_balance', currentBalance);
@@ -4023,6 +4202,11 @@ class AppState extends ChangeNotifier {
       subscriptions = (jsonDecode(subsStr) as List)
           .map((e) => Subscription.fromJson(e))
           .toList();
+    }
+
+    final loanStr = prefs.getString('saved_loans');
+    if (loanStr != null) {
+      loans = (jsonDecode(loanStr) as List).map((e) => Loan.fromJson(e)).toList();
     }
 
     final wdStr = prefs.getString('saved_withdrawals');

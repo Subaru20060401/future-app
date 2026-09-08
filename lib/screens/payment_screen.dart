@@ -76,6 +76,7 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
             Tab(text: 'カード'),
             Tab(text: '分割'),
             Tab(text: '定期'),
+            Tab(text: 'ローン'),
             Tab(text: 'ATM'),
           ],
         ),
@@ -87,6 +88,7 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
           _cardList(appState),
           _installmentList(appState),
           _subscriptionList(appState),
+          _loanList(appState),
           _withdrawalList(appState),
         ],
       ),
@@ -108,8 +110,233 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
       case 2:
         _addSubscription(appState);
       case 3:
+        _addLoan(appState);
+      case 4:
         _addWithdrawal(appState);
     }
+  }
+
+
+  // ───────────────────────── ローン ─────────────────────────
+  // 💡 分割払いとの違いは「口座から直接引かれる」こと。返済日も個別。
+  //   奨学金のように返済開始が先のものもあるので、開始年月を持つ。
+  Widget _loanList(AppState appState) {
+    final now = DateTime.now();
+    final loans = appState.loans;
+    if (loans.isEmpty) {
+      return _empty('ローンはありません\n奨学金や車のローンを登録できます');
+    }
+    return ListView(
+      children: loans.map((l) {
+        final left = l.remainingCountAt(now);
+        final started = !DateTime(now.year, now.month).isBefore(l.startMonth);
+        return SwipeToDelete(
+          itemKey: ValueKey('loan_${l.id}'),
+          onDelete: () => appState.removeLoan(l.id),
+          child: Card(
+            child: ListTile(
+              leading: const Icon(Icons.account_balance, color: Colors.indigo),
+              title: Text(l.name),
+              subtitle: Text(
+                started
+                    ? '毎月${l.payDay}日 ・ 残り$left回 ・ ${l.isFromAccount ? '口座から' : l.method}\n'
+                        '完済予定 ${l.finishMonth.year}年${l.finishMonth.month}月'
+                    : '${l.startMonth.year}年${l.startMonth.month}月から返済開始\n'
+                        '全${l.totalCount}回 ・ ${l.isFromAccount ? '口座から' : l.method}',
+                style: const TextStyle(fontSize: 12),
+              ),
+              isThreeLine: true,
+              trailing: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  Text('¥${l.monthlyAmount}',
+                      style: const TextStyle(
+                          fontWeight: FontWeight.bold, color: Colors.indigo)),
+                  Text('残債 ¥${l.remainingAmountAt(now)}',
+                      style: const TextStyle(fontSize: 11, color: Colors.grey)),
+                ],
+              ),
+              onTap: () => _editLoan(appState, l),
+            ),
+          ),
+        );
+      }).toList(),
+    );
+  }
+
+  void _addLoan(AppState appState) => _loanDialog(appState, null);
+
+  void _editLoan(AppState appState, Loan loan) => _loanDialog(appState, loan);
+
+  void _loanDialog(AppState appState, Loan? edit) {
+    final nameCtrl = TextEditingController(text: edit?.name ?? '');
+    final principalCtrl =
+        TextEditingController(text: edit == null ? '' : edit.principal.toString());
+    final countCtrl =
+        TextEditingController(text: (edit?.totalCount ?? 120).toString());
+    final rateCtrl =
+        TextEditingController(text: (edit?.interestRate ?? 0).toStringAsFixed(1));
+    final dayCtrl = TextEditingController(text: (edit?.payDay ?? 27).toString());
+    final monthlyCtrl = TextEditingController(
+        text: (edit?.monthlyOverride ?? 0) > 0 ? '${edit!.monthlyOverride}' : '');
+    var start = edit?.startMonth ?? DateTime(DateTime.now().year, DateTime.now().month);
+    var method = edit?.method ?? '';
+
+    final cards = appState.cardChoices
+        .where((c) => c != AppState.kOtherCard)
+        .toList();
+
+    showDialog(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setLocal) {
+          final principal = int.tryParse(principalCtrl.text) ?? 0;
+          final count = int.tryParse(countCtrl.text) ?? 0;
+          final rate = double.tryParse(rateCtrl.text) ?? 0;
+          final override = int.tryParse(monthlyCtrl.text) ?? 0;
+          final monthly = override > 0
+              ? override
+              : (count > 0 ? computeInstallmentMonthly(principal, count, rate) : 0);
+          final valid = nameCtrl.text.trim().isNotEmpty && count > 0;
+
+          return AlertDialog(
+            title: Text(edit == null ? 'ローンを追加' : 'ローンを編集'),
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  TextField(
+                    controller: nameCtrl,
+                    decoration: const InputDecoration(
+                        labelText: '名前', hintText: '例: 奨学金、車のローン'),
+                    onChanged: (_) => setLocal(() {}),
+                  ),
+                  TextField(
+                    controller: principalCtrl,
+                    keyboardType: TextInputType.number,
+                    decoration: const InputDecoration(labelText: '借入総額(円)'),
+                    onChanged: (_) => setLocal(() {}),
+                  ),
+                  TextField(
+                    controller: countCtrl,
+                    keyboardType: TextInputType.number,
+                    decoration: const InputDecoration(labelText: '返済回数（月）'),
+                    onChanged: (_) => setLocal(() {}),
+                  ),
+                  TextField(
+                    controller: rateCtrl,
+                    keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                    decoration: const InputDecoration(
+                        labelText: '年利(%)', hintText: '無利息なら 0'),
+                    onChanged: (_) => setLocal(() {}),
+                  ),
+                  TextField(
+                    controller: dayCtrl,
+                    keyboardType: TextInputType.number,
+                    decoration: const InputDecoration(labelText: '返済日（毎月）'),
+                  ),
+                  const SizedBox(height: 8),
+                  // 💡 奨学金のように「卒業後から返済」があるので開始年月を持つ
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('返済開始', style: TextStyle(fontSize: 14)),
+                    subtitle: const Text('この月から予想残高に反映されます',
+                        style: TextStyle(fontSize: 11, color: Colors.grey)),
+                    trailing: Text('${start.year}年${start.month}月'),
+                    onTap: () async {
+                      final picked = await showDatePicker(
+                        context: context,
+                        initialDate: start,
+                        firstDate: DateTime(2020),
+                        lastDate: DateTime(2060),
+                        helpText: '返済開始の月を選ぶ',
+                      );
+                      if (picked != null) {
+                        setLocal(() => start = DateTime(picked.year, picked.month));
+                      }
+                    },
+                  ),
+                  const Text('引き落とし方法', style: TextStyle(fontSize: 12, color: Colors.grey)),
+                  Wrap(
+                    spacing: 6,
+                    children: [
+                      ChoiceChip(
+                        label: const Text('口座から', style: TextStyle(fontSize: 12)),
+                        selected: method.isEmpty,
+                        onSelected: (_) => setLocal(() => method = ''),
+                      ),
+                      ...cards.map((c) => ChoiceChip(
+                            label: Text(c, style: const TextStyle(fontSize: 12)),
+                            selected: method == c,
+                            onSelected: (_) => setLocal(() => method = c),
+                          )),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: monthlyCtrl,
+                    keyboardType: TextInputType.number,
+                    decoration: const InputDecoration(
+                      labelText: '毎月の返済額を指定（任意）',
+                      hintText: '空欄なら借入額と金利から計算',
+                    ),
+                    onChanged: (_) => setLocal(() {}),
+                  ),
+                  const SizedBox(height: 10),
+                  Text('毎月 ¥$monthly × $count回',
+                      style: const TextStyle(fontWeight: FontWeight.bold)),
+                  if (count > 0)
+                    Text(
+                      '完済予定 '
+                      '${DateTime(start.year, start.month + count - 1).year}年'
+                      '${DateTime(start.year, start.month + count - 1).month}月',
+                      style: const TextStyle(fontSize: 12, color: Colors.grey),
+                    ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('キャンセル')),
+              ElevatedButton(
+                onPressed: !valid
+                    ? null
+                    : () {
+                        if (edit == null) {
+                          appState.addLoan(
+                            name: nameCtrl.text,
+                            principal: principal,
+                            totalCount: count,
+                            startMonth: start,
+                            interestRate: rate,
+                            payDay: int.tryParse(dayCtrl.text) ?? 27,
+                            method: method,
+                            monthlyOverride: override,
+                          );
+                        } else {
+                          edit
+                            ..name = nameCtrl.text.trim()
+                            ..principal = principal
+                            ..totalCount = count
+                            ..startMonth = start
+                            ..interestRate = rate
+                            ..payDay = (int.tryParse(dayCtrl.text) ?? 27).clamp(1, 31)
+                            ..method = method
+                            ..monthlyOverride = override;
+                          appState.updateLoan(edit);
+                        }
+                        Navigator.pop(context);
+                      },
+                child: const Text('保存'),
+              ),
+            ],
+          );
+        },
+      ),
+    );
   }
 
   Widget _empty(String text) => Center(child: Text(text, style: const TextStyle(color: Colors.grey)));
