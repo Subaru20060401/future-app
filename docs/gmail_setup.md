@@ -17,7 +17,12 @@
 1. 「APIとサービス」→「OAuth同意画面」
 2. User Type: **External（外部）** を選択
 3. アプリ名・サポートメール（自分のGmail）を入力
-4. **スコープを追加** → `.../auth/gmail.readonly` と `.../auth/drive.appdata` を追加
+4. **スコープを追加** → 次を追加
+   - `.../auth/gmail.readonly`（メールの取り込み）
+   - `.../auth/drive.appdata`（端末間の同期）
+   - `.../auth/calendar` と `.../auth/calendar.events`（Googleカレンダー連携）
+   ※ 使う機能に応じて、対応するAPIも有効化すること
+   （Gmail API / Google Drive API / Google Calendar API）
 5. **テストユーザー** に自分のGmailアドレスを追加
    - テストモードのままで自分のアカウントは利用可能（審査不要）
 

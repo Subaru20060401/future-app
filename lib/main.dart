@@ -11,7 +11,7 @@ import 'gmail_service.dart';
 import 'google_redirect_auth.dart';
 import 'lock_service.dart';
 import 'notification_service.dart';
-import 'calendar_sync.dart';
+import 'google_calendar_sync.dart';
 import 'drive_sync.dart';
 import 'gmail_sync.dart';
 import 'screens/calendar_screen.dart';
@@ -43,9 +43,12 @@ void main() async {
   await LockService.instance.load();
 
   final appState = AppState();
+  // 💡 カレンダー連携はGoogleカレンダー経由にする。
+  //   iPhone/Macの純正カレンダーには、端末側でGoogleアカウントを追加すれば届く。
+  //   端末アプリ専用だった device_calendar と違い、Web版でも動く。
+  //   ⚠️ 両方つなぐと同じ予定が二重に出るので、Apple側は繋がない。
+  appState.calendarSync = GoogleCalendarSync(appState);
   if (!kIsWeb) {
-    // 💡 Appleカレンダー自動連携の実装を接続（OFFのときは何もしない）
-    appState.calendarSync = AppleCalendarSync(appState);
     // 💡 データが変わるたびに通知を組み立て直す
     appState.addListener(() {
       NotificationService.instance.rescheduleAll(appState);

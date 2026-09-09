@@ -5,6 +5,7 @@ import 'package:extension_google_sign_in_as_googleapis_auth/extension_google_sig
 import 'package:googleapis_auth/googleapis_auth.dart' as gauth;
 import 'package:http/http.dart' as http;
 import 'google_redirect_auth.dart';
+import 'package:googleapis/calendar/v3.dart' as gcal;
 import 'package:googleapis/drive/v3.dart' as drive;
 import 'package:googleapis/gmail/v1.dart' as gmail;
 import 'package:shared_preferences/shared_preferences.dart';
@@ -154,6 +155,11 @@ class GmailService {
   static const List<String> _scopes = <String>[
     gmail.GmailApi.gmailReadonlyScope,
     drive.DriveApi.driveAppdataScope,
+    // 💡 アプリの予定をGoogleカレンダーへ書き出すため。
+    //   events は「予定の読み書き」のみで、カレンダーの作成・削除はできない。
+    gcal.CalendarApi.calendarEventsScope,
+    // 専用カレンダー「ポケットメイド」を作るために必要
+    gcal.CalendarApi.calendarScope,
   ];
   final GoogleSignIn _googleSignIn = GoogleSignIn(scopes: _scopes);
 
@@ -474,6 +480,13 @@ class GmailService {
     final client = await _authClient();
     if (client == null) return null;
     return drive.DriveApi(client);
+  }
+
+  // 💡 Googleカレンダーのアプリ。未連携・期限切れなら null。
+  Future<gcal.CalendarApi?> calendarApi() async {
+    final client = await _authClient();
+    if (client == null) return null;
+    return gcal.CalendarApi(client);
   }
 
   Future<void> signOut() async {

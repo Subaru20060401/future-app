@@ -25,6 +25,7 @@ import 'workplace_list_screen.dart';
 import 'budget_screen.dart';
 import '../widgets/app_sheet.dart';
 import '../card_styles.dart';
+import '../google_calendar_sync.dart';
 
 class SettingsScreen extends StatelessWidget {
   const SettingsScreen({super.key});
@@ -838,13 +839,17 @@ class SettingsScreen extends StatelessWidget {
             value: appState.showWalletCash,
             onChanged: (v) => appState.setShowWalletCash(v),
           ),
-          if (!kIsWeb)
+          // 💡 Googleカレンダーへ書き出す。iPhone/Macの純正カレンダーには、
+          //   端末側でGoogleアカウントを追加すれば自動的に届く。
           SwitchListTile(
             secondary: const Icon(Icons.event_available, color: Colors.red),
-            title: const Text('Appleカレンダーに自動連携'),
-            subtitle: const Text('シフト・予定の追加/編集/削除を純正カレンダーへ自動反映'),
+            title: const Text('Googleカレンダーに自動連携'),
+            subtitle: const Text(
+                'シフト・予定・給料日・引き落とし日を「ポケットメイド」カレンダーへ書き出し'),
             value: appState.calendarAutoSync,
             onChanged: (v) async {
+              if (v && !await ensureGoogleConnected(context)) return;
+              if (!context.mounted) return;
               if (v) {
                 ScaffoldMessenger.of(context).showSnackBar(
                   const SnackBar(content: Text('カレンダーへ同期中...')),
@@ -852,15 +857,28 @@ class SettingsScreen extends StatelessWidget {
               }
               final ok = await appState.setCalendarAutoSync(v);
               if (context.mounted && v) {
+                final sync = appState.calendarSync;
+                final why = sync is GoogleCalendarSync ? sync.lastError : null;
                 ScaffoldMessenger.of(context)
                   ..hideCurrentSnackBar()
                   ..showSnackBar(SnackBar(
-                      content: Text(ok
-                          ? 'Appleカレンダーに連携しました'
-                          : 'カレンダーの許可が必要です（設定アプリで許可してください）')));
+                    content: Text(ok
+                        ? 'Googleカレンダーに連携しました'
+                        : (why ?? 'カレンダーに連携できませんでした')),
+                    duration: Duration(seconds: ok ? 4 : 8),
+                  ));
               }
             },
           ),
+          if (appState.calendarAutoSync)
+            const Padding(
+              padding: EdgeInsets.fromLTRB(16, 0, 16, 12),
+              child: Text(
+                'iPhoneやMacの純正カレンダーにも出したいときは、端末の設定で'
+                'Googleアカウントを追加してください（アプリ側の設定は不要です）。',
+                style: TextStyle(fontSize: 11, color: Colors.black54),
+              ),
+            ),
           const Divider(),
           const Padding(
             padding: EdgeInsets.fromLTRB(16, 12, 16, 4),
