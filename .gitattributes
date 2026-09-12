@@ -1,0 +1,16 @@
+# 💡 Mac と Windows の両方で開発するため、改行コードを LF に揃える。
+#   揃えないと Windows で開いただけで全行が「変更あり」になり、差分が読めなくなる。
+* text=auto eol=lf
+
+# Windows のスクリプトは CRLF のまま
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# バイナリは改行変換しない
+*.png binary
+*.jpg binary
+*.ico binary
+*.ttf binary
+*.otf binary
+*.pdf binary
