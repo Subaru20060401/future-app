@@ -41,16 +41,48 @@ String? get redirectUri {
       .toString();
 }
 
-void startGoogleRedirect(String clientId, String redirect, List<String> scopes) {
+void startGoogleRedirect(String clientId, String redirect, List<String> scopes,
+    {bool silent = false, String? loginHint}) {
   final url = Uri.https('accounts.google.com', '/o/oauth2/v2/auth', {
     'client_id': clientId,
     'redirect_uri': redirect,
     'response_type': 'token', // ブラウザだけで完結する方式
     'scope': scopes.join(' '),
     'include_granted_scopes': 'true',
-    // prompt は付けない。許可済みなら確認画面を挟まずすぐ戻ってくる。
+    // 通常は prompt を付けない。許可済みなら確認画面を挟まずすぐ戻ってくる。
+    // 💡 silent＝トークンの取り直しだけが目的。許可済みなら画面を一切出さずに戻る。
+    //   ⚠️ 許可や再ログインが要る状態だと、画面を出さずに
+    //     #error=interaction_required（login_required / consent_required）で戻ってくる。
+    if (silent) 'prompt': 'none',
+    // 💡 どのアカウントで取り直すかを伝える（複数ログインしていると選択画面で止まるため）
+    if (silent && loginHint != null && loginHint.isNotEmpty) 'login_hint': loginHint,
   });
   web.window.location.href = url.toString();
+}
+
+// ───── 静かな再取得のループ止め ─────
+// ⚠️ prompt=none が失敗したときに何度も飛ぶと、リダイレクトの無限ループになる。
+//   タブ（sessionStorage）に「試した」を記録して、1回きりにする。
+const String _kSilentTried = 'pm_silent_auth_tried';
+
+bool get silentAuthTried {
+  try {
+    return web.window.sessionStorage.getItem(_kSilentTried) != null;
+  } catch (_) {
+    return true; // 読めない環境では試さない（ループを避ける方に倒す）
+  }
+}
+
+void markSilentAuthTried() {
+  try {
+    web.window.sessionStorage.setItem(_kSilentTried, '1');
+  } catch (_) {}
+}
+
+void clearSilentAuthTried() {
+  try {
+    web.window.sessionStorage.removeItem(_kSilentTried);
+  } catch (_) {}
 }
 
 // 戻ってきたURLの # からトークンを取り出し、URLからは消す（履歴に残さない）
@@ -67,5 +99,23 @@ void startGoogleRedirect(String clientId, String redirect, List<String> scopes) 
   final loc = web.window.location;
   web.window.history.replaceState(
       null, '', '${loc.origin}${loc.pathname}${loc.search}');
+  // 💡 取り直せたので、次に切れたときはまた静かに試してよい
+  clearSilentAuthTried();
   return (token: token, expiry: expiry);
+}
+
+// 💡 prompt=none で断られたときの理由を取り出し、URLからは消す。
+//   （interaction_required / login_required / consent_required など）
+//   これが返ったら自動では直せないので、画面に「連携し直す」を出す。
+String? consumeRedirectError() {
+  final hash = web.window.location.hash;
+  if (!hash.contains('error=')) return null;
+  final params =
+      Uri.splitQueryString(hash.startsWith('#') ? hash.substring(1) : hash);
+  final err = params['error'];
+  if (err == null || err.isEmpty) return null;
+  final loc = web.window.location;
+  web.window.history.replaceState(
+      null, '', '${loc.origin}${loc.pathname}${loc.search}');
+  return err;
 }

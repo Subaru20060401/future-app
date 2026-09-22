@@ -145,6 +145,19 @@ class _CardRule {
   const _CardRule(this.name, this.query);
 }
 
+// 💡 起動時に「静かな再取得（prompt=none）」を試してよいかの判定。
+//   ⚠️ 判断を間違えるとリダイレクトの無限ループか、逆に毎回の再連携になる。
+//     ブラウザ無しで固定できるよう、純粋な関数にしてテストで担保する
+//     （test/silent_auth_test.dart）。
+bool shouldTrySilentAuth({
+  required bool isWeb, // 端末アプリはリフレッシュトークンが効くので不要
+  required bool canRedirect, // リダイレクト方式が使える環境か
+  required bool signedInOnce, // 一度も連携していないなら、まず本人に押してもらう
+  required bool hasValidToken, // まだ使えるトークンがあるなら飛ばない
+  required bool alreadyTried, // このタブで試し済みなら繰り返さない
+}) =>
+    isWeb && canRedirect && signedInOnce && !hasValidToken && !alreadyTried;
+
 class GmailService {
   GmailService._();
   static final GmailService instance = GmailService._();
@@ -213,13 +226,50 @@ class GmailService {
 
   // 💡 ページごと移動してGoogleの許可画面へ行く（ポップアップを使わない）。
   //   iOSはポップアップとFedCMが塞がれることがあり、これが唯一通る経路になる。
-  bool startRedirectSignIn() {
+  bool startRedirectSignIn({bool silent = false}) {
     if (!kIsWeb || !canUseRedirectAuth) return false;
     final id = webClientId;
     final uri = redirectUri;
     if (id == null || uri == null) return false;
-    startGoogleRedirect(id, uri, _scopes);
+    startGoogleRedirect(id, uri, _scopes,
+        silent: silent, loginHint: silent ? savedEmail : null);
     return true;
+  }
+
+  // 💡 期限切れのトークンを、ボタンを押させずに取り直す（起動時に呼ぶ）。
+  //   ブラウザではリフレッシュトークンが発行できないので、
+  //   「ページごとGoogleへ行って prompt=none ですぐ戻る」のが唯一の代わりになる。
+  //   許可済みのアカウントなら画面は一切出ない。戻り先で
+  //   consumeRedirectResult() が新しいトークンを拾って保存する。
+  //   true＝これからページが移動する（呼び出し側はそのつもりでいること）。
+  Future<bool> tryRestoreSilently() async {
+    if (!shouldTrySilentAuth(
+      isWeb: kIsWeb,
+      canRedirect: canUseRedirectAuth,
+      signedInOnce: signedInOnce,
+      hasValidToken: await _cachedCredentials() != null,
+      alreadyTried: silentAuthTried,
+    )) {
+      return false;
+    }
+    // ⚠️ 飛ぶ前に記録する。戻ってこられなかったときに繰り返さないため。
+    markSilentAuthTried();
+    if (startRedirectSignIn(silent: true)) return true;
+    return false;
+  }
+
+  // 💡 prompt=none で断られたときは、自動では直せない（本人の操作が要る）。
+  //   画面に理由を出して「連携し直す」を押してもらう。
+  void noteRedirectError(String code) {
+    switch (code) {
+      case 'interaction_required':
+      case 'login_required':
+      case 'consent_required':
+        lastAuthError = '自動での更新ができませんでした（$code）。'
+            '「連携し直す」を押してください。';
+      default:
+        lastAuthError = 'Googleから $code が返りました。';
+    }
   }
 
   Future<void> _clearToken() async {

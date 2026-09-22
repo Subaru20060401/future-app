@@ -37,6 +37,20 @@ void main() async {
   if (redirected != null) {
     await GmailService.instance
         .saveRedirectToken(redirected.token, redirected.expiry);
+  } else {
+    // 💡 アクセストークンは1時間で切れるうえ、ブラウザではリフレッシュできない。
+    //   そのままだと開くたびに「連携し直す」を押すことになるので、
+    //   切れていたら黙って取り直す（許可済みなら画面は出ずにすぐ戻る）。
+    //   ⚠️ ページが移動するので、ここから下の組み立ては途中で捨てられる。
+    //     取り込みも同期も「最後まで終わってから反映」なので、途中で切れても壊れない。
+    await GmailService.instance.loadAuthState();
+    final authError = consumeRedirectError();
+    if (authError != null) {
+      // prompt=none で断られた＝本人の操作が要る。画面で理由を出す。
+      GmailService.instance.noteRedirectError(authError);
+    } else {
+      await GmailService.instance.tryRestoreSilently();
+    }
   }
 
   // 💡 パスコードの設定を先に読む（ロック中は中身を一切描画しないため）
