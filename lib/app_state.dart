@@ -1253,6 +1253,13 @@ class AppState extends ChangeNotifier {
   final Set<String> convertedPaymentKeys = {};
   final Set<String> convertedSourceIds = {};
 
+  // 💡 残高へ畳み込み済みのデビット（もう差し引かない）。
+  // ⚠️ 基準日(balanceUpdatedAt)は「日付」単位なので、同じ日のデビットは
+  //   畳み込んだ後もまだ「基準日より後」と判定される。記録しておかないと
+  //   二重に引かれる。キーは削除の墓石と同じ dupKey（取り込みの作り直しで
+  //   明細のidが変わっても外れないように）。
+  final Set<String> foldedDebitKeys = {};
+
   // ───── ゴミ箱（削除した支払い）と墓石（更新で復活させない）─────
   // 削除した支払いを退避するフォルダ（PCのゴミ箱と同じ。復元可能）。
   List<Payment> trashedPayments = [];
@@ -2100,10 +2107,41 @@ class AppState extends ChangeNotifier {
   }
 
   void updateBalance(int balance) {
+    // 💡 手で書いた残高は通帳の値＝その時点までのデビットは既に引かれている。
+    //   金額は動かさず「済み」とだけ記録する（引くと二重になる）。
+    _markDebitsAccounted();
     currentBalance = balance;
     balanceUpdatedAt = DateTime.now(); // #6 編集日時を記録
     saveData();
     notifyListeners();
+  }
+
+  // 💡 残高を「増減で」動かす前に、それまでのデビット利用を残高へ畳み込む。
+  // ⚠️ 基準日(balanceUpdatedAt)が進むと、それより前のデビットは「反映済み」と
+  //   みなされて差し引かれなくなる。畳み込まずに基準日だけ進めると、
+  //   使ったはずのデビットが消えて残高が増えて見える。
+  //   （手入力の updateBalance では呼ばないこと＝二重に引くため）
+  // 💡 いま時点までのデビットを「残高に入っている」ことにする（金額は動かさない）。
+  //   手で残高を書き直したときに使う。
+  void _markDebitsAccounted() {
+    final now = DateTime.now();
+    for (final p in payments) {
+      if (!_isDebit(p.cardName)) continue;
+      if (p.paymentDate.isAfter(now)) continue; // これから使うぶんは対象外
+      foldedDebitKeys.add(_debitKey(p));
+    }
+  }
+
+  void _foldDebitsIntoBalance() {
+    var spent = 0;
+    for (final p in payments) {
+      if (!_isDebit(p.cardName) || !_afterSnapshot(p.paymentDate)) continue;
+      final k = _debitKey(p);
+      if (foldedDebitKeys.contains(k)) continue;
+      spent += p.amount;
+      foldedDebitKeys.add(k); // 二度と引かない
+    }
+    if (spent > 0) currentBalance -= spent;
   }
 
   void updateWalletCash(int amount) {
@@ -2194,6 +2232,7 @@ class AppState extends ChangeNotifier {
         orElse: () => PlannedIncome(id: '', title: '入金', amount: 0, date: date));
     receivedPlannedKeys.add(_plannedKey(id, date));
     if (amount > 0) {
+      _foldDebitsIntoBalance();
       currentBalance += amount;
       balanceUpdatedAt = DateTime.now();
       _recordBalanceEntry(
@@ -2325,6 +2364,7 @@ class AppState extends ChangeNotifier {
     final i = balanceHistory.indexWhere((e) => e.id == entryId);
     if (i < 0) return;
     final e = balanceHistory[i];
+    _foldDebitsIntoBalance();
     currentBalance -= e.signedAmount; // 反映を打ち消す
     balanceUpdatedAt = DateTime.now();
     balanceHistory.removeAt(i);
@@ -2354,6 +2394,7 @@ class AppState extends ChangeNotifier {
   //   残高の編集日時も更新するので、この入金が予想残高で二重計上されない。
   void addDeposit(int amount, {String? workplaceId, DateTime? date, String? sourceKey}) {
     if (amount == 0) return;
+    _foldDebitsIntoBalance();
     currentBalance += amount;
     balanceUpdatedAt = DateTime.now();
     final d = date ?? DateTime.now();
@@ -2493,6 +2534,7 @@ class AppState extends ChangeNotifier {
   // 💡 引き落としを口座残高から引く（残高の編集日時も更新するので二重計上しない）
   void applyDraw(String id, int amount, {String? label}) {
     if (amount != 0) {
+      _foldDebitsIntoBalance();
       currentBalance -= amount;
       balanceUpdatedAt = DateTime.now();
       _recordBalanceEntry(
@@ -2526,6 +2568,7 @@ class AppState extends ChangeNotifier {
   // 口座からの支払いを手入力で引く（引き落とし・現金払いなど）
   void subtractFromBalance(int amount, {String label = '手入力'}) {
     if (amount == 0) return;
+    _foldDebitsIntoBalance();
     currentBalance -= amount;
     balanceUpdatedAt = DateTime.now();
     _recordBalanceEntry(
@@ -3509,10 +3552,16 @@ class AppState extends ChangeNotifier {
     return d.isAfter(DateTime(since.year, since.month, since.day));
   }
 
-  // #5 #6 残高編集後に使ったデビット（即時口座引落）の合計。
+  // #5 #6 残高編集後に使ったデビット（即時口座引落）のうち、まだ残高に入っていない合計。
   int debitsAfterSnapshot() => payments
-      .where((p) => _isDebit(p.cardName) && _afterSnapshot(p.paymentDate))
+      .where((p) =>
+          _isDebit(p.cardName) &&
+          _afterSnapshot(p.paymentDate) &&
+          !foldedDebitKeys.contains(_debitKey(p)))
       .fold(0, (s, p) => s + p.amount);
+
+  String _debitKey(Payment p) =>
+      _dupKey(p.cardName, p.amount, p.paymentDate, p.source);
 
   // #5 #6 実効的な現在残高＝編集時の残高 − 編集後に使ったデビット。
   int get effectiveBalance => currentBalance - debitsAfterSnapshot();
@@ -4103,6 +4152,7 @@ class AppState extends ChangeNotifier {
       'salaryPaidThroughMonth': salaryPaidThroughMonth?.toIso8601String(),
       'cardInterestRates': cardInterestRates,
       'convertedPaymentKeys': convertedPaymentKeys.toList(),
+      'foldedDebitKeys': foldedDebitKeys.toList(),
       'convertedSourceIds': convertedSourceIds.toList(),
       'trashedPayments': trashedPayments.map((e) => e.toJson()).toList(),
       'deletedSourceIds': deletedSourceIds.toList(),
@@ -4489,6 +4539,9 @@ class AppState extends ChangeNotifier {
     convertedPaymentKeys
       ..clear()
       ..addAll((map['convertedPaymentKeys'] as List? ?? []).map((e) => e.toString()));
+    foldedDebitKeys
+      ..clear()
+      ..addAll((map['foldedDebitKeys'] as List? ?? []).map((e) => e.toString()));
     convertedSourceIds
       ..clear()
       ..addAll((map['convertedSourceIds'] as List? ?? []).map((e) => e.toString()));
@@ -4572,6 +4625,7 @@ class AppState extends ChangeNotifier {
         'saved_salary_paid_through', salaryPaidThroughMonth?.toIso8601String() ?? '');
     await prefs.setString('saved_card_rates', jsonEncode(cardInterestRates));
     await prefs.setStringList('saved_converted_keys', convertedPaymentKeys.toList());
+    await prefs.setStringList('saved_folded_debit_keys', foldedDebitKeys.toList());
     await prefs.setStringList('saved_converted_source_ids', convertedSourceIds.toList());
     await prefs.setString(
         'saved_trashed_payments', jsonEncode(trashedPayments.map((e) => e.toJson()).toList()));
@@ -4749,6 +4803,9 @@ class AppState extends ChangeNotifier {
     convertedPaymentKeys
       ..clear()
       ..addAll(prefs.getStringList('saved_converted_keys') ?? const []);
+    foldedDebitKeys
+      ..clear()
+      ..addAll(prefs.getStringList('saved_folded_debit_keys') ?? const []);
     convertedSourceIds
       ..clear()
       ..addAll(prefs.getStringList('saved_converted_source_ids') ?? const []);
