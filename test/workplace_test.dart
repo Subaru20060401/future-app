@@ -942,7 +942,9 @@ void main() {
         Payment(id: 'u', cardName: '楽天カード', amount: 5000,
             paymentDate: DateTime(prev.year, prev.month, 5), source: PaymentSource.usage),
       ];
-      final drawDate = DateTime(now.year, now.month, 27);
+      // ⚠️ 27日が土日祝なら引き落としは翌営業日にズレる。日付を直書きすると
+      //   27日が週末に当たる月だけこのテストが落ちる。実装と同じ計算で出す。
+      final drawDate = app.cardDrawDateOf('楽天カード', DateTime(now.year, now.month));
       final pending = app.pendingDraws.where((d) => d.label.contains('楽天')).toList();
       if (!drawDate.isAfter(DateTime(now.year, now.month, now.day))) {
         // 27日を過ぎていれば「（予定）」として出る
