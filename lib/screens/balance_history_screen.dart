@@ -19,19 +19,19 @@ class _BalanceHistoryScreenState extends State<BalanceHistoryScreen> {
   @override
   Widget build(BuildContext context) {
     final appState = context.watch<AppState>();
-    final all = appState.balanceHistory;
+    // 💡 デビットは残高を書き換えないので履歴に残らない。口座からは出ていくお金なので、
+    //   明細から作って一緒に並べる（balanceLedger）。
+    final all = appState.balanceLedger();
     final list = switch (_filter) {
-      1 => all.where((e) => e.kind == BalanceEntryKind.deposit).toList(),
-      2 => all.where((e) => e.kind == BalanceEntryKind.draw).toList(),
+      1 => all.where((e) => e.isDeposit).toList(),
+      2 => all.where((e) => !e.isDeposit).toList(),
       _ => all,
     };
 
-    final depositTotal = all
-        .where((e) => e.kind == BalanceEntryKind.deposit)
-        .fold<int>(0, (s, e) => s + e.amount);
-    final drawTotal = all
-        .where((e) => e.kind == BalanceEntryKind.draw)
-        .fold<int>(0, (s, e) => s + e.amount);
+    final depositTotal =
+        all.where((e) => e.isDeposit).fold<int>(0, (s, e) => s + e.amount);
+    final drawTotal =
+        all.where((e) => !e.isDeposit).fold<int>(0, (s, e) => s + e.amount);
 
     return Scaffold(
       appBar: AppBar(title: const Text('入出金の履歴')),
@@ -91,7 +91,7 @@ class _BalanceHistoryScreenState extends State<BalanceHistoryScreen> {
                     itemCount: list.length,
                     itemBuilder: (context, i) {
                       final e = list[i];
-                      final isDeposit = e.kind == BalanceEntryKind.deposit;
+                      final isDeposit = e.isDeposit;
                       final color = isDeposit ? Colors.green : Colors.red;
                       return Card(
                         child: ListTile(
@@ -103,10 +103,32 @@ class _BalanceHistoryScreenState extends State<BalanceHistoryScreen> {
                               size: 18,
                             ),
                           ),
-                          title: Text(e.label,
-                              style: const TextStyle(fontWeight: FontWeight.bold)),
+                          title: Row(
+                            children: [
+                              Flexible(
+                                child: Text(e.label,
+                                    style: const TextStyle(fontWeight: FontWeight.bold)),
+                              ),
+                              // 💡 デビットは明細から作った行。残高は動かしていない
+                              if (e.isDebit)
+                                Container(
+                                  margin: const EdgeInsets.only(left: 6),
+                                  padding: const EdgeInsets.symmetric(
+                                      horizontal: 6, vertical: 1),
+                                  decoration: BoxDecoration(
+                                    color: Colors.blueGrey.withValues(alpha: 0.15),
+                                    borderRadius: BorderRadius.circular(6),
+                                  ),
+                                  child: const Text('デビット',
+                                      style: TextStyle(
+                                          fontSize: 10, color: Colors.blueGrey)),
+                                ),
+                            ],
+                          ),
                           subtitle: Text(
-                            '${DateFormat('M/d HH:mm').format(e.at)}  →  残高 ¥${e.balanceAfter}',
+                            e.balanceAfter == null
+                                ? '${DateFormat('M/d HH:mm').format(e.at)}  ・  使った時点で口座から引かれています'
+                                : '${DateFormat('M/d HH:mm').format(e.at)}  →  残高 ¥${e.balanceAfter}',
                             style: const TextStyle(fontSize: 12),
                           ),
                           trailing: Row(
@@ -117,12 +139,15 @@ class _BalanceHistoryScreenState extends State<BalanceHistoryScreen> {
                                 style: TextStyle(
                                     color: color, fontWeight: FontWeight.bold),
                               ),
-                              IconButton(
-                                tooltip: '取り消す',
-                                visualDensity: VisualDensity.compact,
-                                icon: const Icon(Icons.undo, size: 18),
-                                onPressed: () => _confirmUndo(context, appState, e),
-                              ),
+                              // デビットは明細が正本なので、ここでは取り消せない
+                              if (!e.isDebit)
+                                IconButton(
+                                  tooltip: '取り消す',
+                                  visualDensity: VisualDensity.compact,
+                                  icon: const Icon(Icons.undo, size: 18),
+                                  onPressed: () =>
+                                      _confirmUndo(context, appState, e.entry!),
+                                ),
                             ],
                           ),
                         ),

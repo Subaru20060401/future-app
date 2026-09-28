@@ -1024,6 +1024,29 @@ class PlannedIncome {
 //   「いつ・何を・いくら反映したか」を後から確認でき、間違えたら取り消せる。
 enum BalanceEntryKind { deposit, draw }
 
+// 💡 入出金の履歴に出す1行。
+//   保存した履歴（entry あり）と、明細から作るデビットの利用（entry なし）の両方を運ぶ。
+class LedgerRow {
+  final DateTime at;
+  final String label;
+  final int amount; // 正の数
+  final bool isDeposit;
+  final BalanceEntry? entry; // 保存した履歴なら中身（取り消しに使う）
+  final int? balanceAfter; // 反映後の残高。デビットは残高を動かさないので null
+
+  const LedgerRow({
+    required this.at,
+    required this.label,
+    required this.amount,
+    required this.isDeposit,
+    this.entry,
+    this.balanceAfter,
+  });
+
+  // デビットの利用（明細から作った行）は取り消せない。明細側で直す。
+  bool get isDebit => entry == null;
+}
+
 class BalanceEntry {
   final String id;
   final BalanceEntryKind kind;
@@ -2240,6 +2263,36 @@ class AppState extends ChangeNotifier {
     if (balanceHistory.length > 300) {
       balanceHistory = balanceHistory.sublist(0, 300);
     }
+  }
+
+  // 💡 入出金の履歴に並べるものを1本化する。
+  //   デビットは口座から即時に出ていくお金なのに、残高そのものを書き換えない
+  //   （予想の起点で差し引く方式）ため、履歴に出てこなかった。
+  // ⚠️ デビットを BalanceEntry として保存してはいけない。
+  //   Gmailの取り込みは「自動明細の作り直し」なので、明細が変わったときに
+  //   履歴だけが残ってズレる。表示のたびに明細から作ること。
+  List<LedgerRow> balanceLedger() {
+    final out = <LedgerRow>[
+      for (final e in balanceHistory)
+        LedgerRow(
+          at: e.at,
+          label: e.label,
+          amount: e.amount,
+          isDeposit: e.kind == BalanceEntryKind.deposit,
+          entry: e,
+          balanceAfter: e.balanceAfter,
+        ),
+      for (final p in payments)
+        if (_isDebit(p.cardName) && !p.infoOnly)
+          LedgerRow(
+            at: p.paymentDate,
+            label: p.note.isEmpty ? p.cardName : '${p.cardName}（${p.note}）',
+            amount: p.amount,
+            isDeposit: false,
+          ),
+    ];
+    out.sort((a, b) => b.at.compareTo(a.at)); // 新しい順
+    return out;
   }
 
   // 💡 過去の入金・引き落としを履歴だけに書き足す（残高は変えない）。
