@@ -430,6 +430,191 @@ class IncomeScreen extends StatelessWidget {
     );
   }
 
+  // 💡 月末のあいだの谷（最低残高）。月末が足りていても、次の給料日までに
+  //   底を打つことがあるので、いつ・いくらまで減るかを常に出す。
+  Widget _lowestBalanceRow(BuildContext context, AppState appState) {
+    final low = appState.lowestBalanceAhead()!;
+    final isShort = low.balance < 0; // 引き落としに足りない
+    return Column(
+      children: [
+        const Divider(height: 24),
+        InkWell(
+          borderRadius: BorderRadius.circular(12),
+          onTap: () => _showLowPointDetail(context, appState),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 4),
+            child: Column(
+              children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    if (isShort)
+                      const Padding(
+                        padding: EdgeInsets.only(right: 4),
+                        child: Icon(Icons.warning_amber, size: 16, color: Colors.red),
+                      ),
+                    Text(
+                      '最低残高（${low.date.month}月${low.date.day}日）',
+                      style: TextStyle(
+                          fontSize: 13,
+                          color: isShort ? Colors.red : Colors.black54),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 4),
+                Text('¥ ${low.balance}',
+                    style: TextStyle(
+                        fontSize: 20,
+                        fontWeight: FontWeight.bold,
+                        color: isShort ? Colors.red : Colors.pink[300])),
+                const SizedBox(height: 2),
+                Text(
+                  isShort ? '引き落としに足りません。タップで内訳' : 'タップで内訳',
+                  style: TextStyle(
+                      fontSize: 11,
+                      color: isShort ? Colors.red : Colors.black38),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  // 💡 引き落としで足りなくなる日の一覧。日付・カード名・そのときの残高を出す。
+  Widget _shortfallCard(AppState appState) {
+    final days = appState.shortfallDaysAhead();
+    return Card(
+      color: Colors.red[50],
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Row(
+              children: [
+                Icon(Icons.warning_amber, color: Colors.red, size: 20),
+                SizedBox(width: 6),
+                Text('引き落としに足りない日',
+                    style: TextStyle(fontWeight: FontWeight.bold, color: Colors.red)),
+              ],
+            ),
+            const SizedBox(height: 6),
+            ...days.take(5).map((e) => Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 2),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      SizedBox(
+                        width: 52,
+                        child: Text('${e.date.month}/${e.date.day}',
+                            style: const TextStyle(
+                                fontSize: 13, fontWeight: FontWeight.bold, color: Colors.red)),
+                      ),
+                      Expanded(
+                        child: Text(
+                          e.labels.isEmpty ? '引き落とし' : e.labels.join('・'),
+                          style: const TextStyle(fontSize: 13, color: Colors.red),
+                        ),
+                      ),
+                      Text('¥${e.balance}',
+                          style: const TextStyle(
+                              fontSize: 13, fontWeight: FontWeight.bold, color: Colors.red)),
+                    ],
+                  ),
+                )),
+            if (days.length > 5)
+              Padding(
+                padding: const EdgeInsets.only(top: 2),
+                child: Text('ほか${days.length - 5}日',
+                    style: const TextStyle(fontSize: 12, color: Colors.red)),
+              ),
+            const SizedBox(height: 4),
+            const Text('その日の引き落とし後の残高です。入金を早めるか、支払いを分ける必要があります',
+                style: TextStyle(fontSize: 11, color: Colors.black54)),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // 谷までの内訳（いつ・何で減って、どこで底を打つか）
+  void _showLowPointDetail(BuildContext context, AppState appState) {
+    final low = appState.lowestBalanceAhead();
+    if (low == null) return;
+    final events = appState
+        .cashEventsAhead()
+        .where((e) => !e.date.isAfter(low.date))
+        .toList();
+
+    Widget row(String label, int value, {String? date, bool bold = false}) {
+      final color = value > 0 ? Colors.green[700]! : (value < 0 ? Colors.red : Colors.black54);
+      final sign = value > 0 ? '+' : '';
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 5),
+        child: Row(
+          children: [
+            SizedBox(
+              width: 58,
+              child: Text(date ?? '',
+                  style: const TextStyle(fontSize: 12, color: Colors.black45)),
+            ),
+            Expanded(child: Text(label, style: const TextStyle(fontSize: 14))),
+            Text('$sign¥$value',
+                style: TextStyle(
+                    fontWeight: bold ? FontWeight.bold : FontWeight.w600,
+                    color: color,
+                    fontSize: 14)),
+          ],
+        ),
+      );
+    }
+
+    showAppSheet(context, (_) => Padding(
+        padding: const EdgeInsets.fromLTRB(20, 20, 20, 32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text('最低残高までの内訳',
+                style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 4),
+            Text(
+              '${low.date.month}月${low.date.day}日が、いちばん残高が少なくなる日です。'
+              '月末の予想だけでは見えません',
+              style: const TextStyle(fontSize: 12, color: Colors.black54),
+            ),
+            const SizedBox(height: 12),
+            row('現在の残高', appState.effectiveBalance),
+            if (appState.effectiveWalletCash != 0)
+              row('財布の現金', appState.effectiveWalletCash),
+            ...events.map((e) => row(
+                  e.label,
+                  e.amount,
+                  date: '${e.date.month}/${e.date.day}',
+                )),
+            const Divider(height: 20),
+            Row(
+              children: [
+                Expanded(
+                  child: Text('= ${low.date.month}月${low.date.day}日の残高',
+                      style: const TextStyle(
+                          fontWeight: FontWeight.bold, fontSize: 15)),
+                ),
+                Text('¥${low.balance}',
+                    style: TextStyle(
+                        fontSize: 20,
+                        fontWeight: FontWeight.bold,
+                        color: low.balance < 0 ? Colors.red : Colors.pink)),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   // グラフの棒を作成する補助関数
   BarChartGroupData _makeGroupData(int x, double y, Color color) {
     return BarChartGroupData(
@@ -600,10 +785,20 @@ class IncomeScreen extends StatelessWidget {
                       ),
                     ),
                   ],
+                  // 💡 月末と月末のあいだの谷。
+                  //   10日引き落としのカードのように月末をまたいで落ちるものがあると、
+                  //   月末の予想は足りていても、次の給料日までに底を打つことがある。
+                  if (appState.lowestBalanceAhead() != null)
+                    _lowestBalanceRow(context, appState),
                 ],
               ),
             ),
             const SizedBox(height: 16),
+
+            // 💡 引き落としで残高が足りなくなる日。どのカードで割るかまで出す
+            //   （どれを遅らせるか・いつ入金するかを決められるように）。
+            if (appState.shortfallDaysAhead().isNotEmpty)
+              _shortfallCard(appState),
 
             // 扶養・社保の「壁」アラート
             if (appState.salaryOfYear(DateTime.now().year) > 0) _fuyouWallCard(appState),

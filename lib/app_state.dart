@@ -1088,6 +1088,15 @@ abstract class CalendarSyncHook {
 }
 
 // ════════════════════════ AppState ════════════════════════
+// 💡 日付つきのお金の動き（予想の谷を見つけるためだけに使う）。
+//   amount は ＋が入金・−が引き落とし。
+class CashEvent {
+  final DateTime date;
+  final String label;
+  final int amount;
+  const CashEvent({required this.date, required this.label, required this.amount});
+}
+
 class AppState extends ChangeNotifier {
   final Map<String, List<ShiftData>> shifts = {};
   final List<Workplace> workplaces = [];
@@ -3570,6 +3579,127 @@ class AppState extends ChangeNotifier {
         incomeForecastIn(now) -
         drawnInMonth(now) -
         oneTimeExpenseForecastIn(now);
+  }
+
+  // ────── 予想の谷（月末と月末のあいだ） ──────
+  // 💡 月末の予想は「その月の引き落としを全部引いた後」なので、
+  //   月末を越えてから次の給料日までに落ちるぶん（例：10日引き落としのカード）で
+  //   足りなくなる谷が見えない。日付に並べ直して、いちばん減る日を出す。
+  // ⚠️ 材料は月ごとの予想（incomeForecastIn / drawBreakdownOf / oneTimeExpensesIn）と
+  //   同じものだけを使い、並べ替えるだけにする。ここで独自に足し引きすると
+  //   月末の金額と食い違う。test/cash_flow_test.dart で月末との一致を固定している。
+  List<CashEvent> cashEventsAhead({int monthsAhead = 2}) {
+    final now = DateTime.now();
+    final out = <CashEvent>[];
+    for (var i = 0; i <= monthsAhead; i++) {
+      final m = DateTime(now.year, now.month + i, 1);
+      final lastDay = DateTime(m.year, m.month + 1, 0).day;
+
+      // ── 入金（incomeForecastIn と同じ分岐にする） ──
+      if (balanceUpdatedAt == null || workplaces.isEmpty) {
+        // 💡 勤務先ごとに分けられない経路。日付は給料日に寄せる
+        //   （勤務先があればいちばん早い給料日、無ければ既定の25日）。
+        final amount = incomeArrivingIn(m);
+        if (amount != 0) {
+          final dates = [for (final w in workplaces) w.paydayIn(m)]..sort();
+          out.add(CashEvent(
+            date: dates.isEmpty
+                ? DateTime(m.year, m.month, 25 > lastDay ? lastDay : 25)
+                : dates.first,
+            label: '給料',
+            amount: amount,
+          ));
+        }
+      } else {
+        for (final w in workplaces) {
+          final wm = DateTime(m.year, m.month - w.paydayMonthOffset);
+          final payDate = w.paydayIn(m);
+          if (!_forecastInclude(payDate)) continue;
+          final amount = takeHomeOfWorkplace(wm, w.id);
+          if (amount != 0) {
+            out.add(CashEvent(date: payDate, label: w.name, amount: amount));
+          }
+        }
+      }
+      for (final e in plannedIncomesIn(m)) {
+        if (!_forecastInclude(e.date)) continue;
+        out.add(CashEvent(
+            date: e.date, label: e.income.title, amount: e.income.amount));
+      }
+
+      // ── 引き落とし（drawBreakdownOf がゲート済み。日付だけ付け直す） ──
+      for (final e in drawBreakdownOf(m)) {
+        final day = _drawDayOf(e.label).clamp(1, lastDay);
+        out.add(CashEvent(
+          date: nextBusinessDay(DateTime(m.year, m.month, day)),
+          label: e.label,
+          amount: -e.amount,
+        ));
+      }
+
+      // ── 一度きりの出費（頭金・予定支出。月ズレさせず日付どおり） ──
+      for (final e in oneTimeExpensesIn(m)) {
+        if (!_forecastInclude(e.date)) continue;
+        out.add(CashEvent(date: e.date, label: e.label, amount: -e.amount));
+      }
+    }
+    out.sort((a, b) => a.date.compareTo(b.date));
+    return out;
+  }
+
+  // 💡 今日から先で、残高がいちばん少なくなる日とそのときの残高。
+  //   同じ日の入金と引き落としは相殺してから見る（一瞬のヘコみで騒がない）。
+  //   ⚠️ 残高の編集日より後なら、日付が今日より前の引き落としも「まだ落ちていない」
+  //     ものとして積む（月末予想と同じ扱い）。ただし谷の候補にはしない。
+  ({DateTime date, int balance})? lowestBalanceAhead({int monthsAhead = 2}) {
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final events = cashEventsAhead(monthsAhead: monthsAhead);
+    var running = effectiveBalance + effectiveWalletCash;
+    DateTime? lowDate;
+    int? low;
+    var i = 0;
+    while (i < events.length) {
+      final date = events[i].date;
+      while (i < events.length && events[i].date == date) {
+        running += events[i].amount;
+        i++;
+      }
+      if (date.isBefore(today)) continue; // 今の残高に織り込むだけ
+      if (low == null || running < low) {
+        low = running;
+        lowDate = date;
+      }
+    }
+    if (low == null || lowDate == null) return null;
+    return (date: lowDate, balance: low);
+  }
+
+  // 💡 残高が足りなくなる日と、その日の引き落とし。
+  //   最低残高（＝いちばん低い1日）だけだと「どの引き落としで割ったか」が分からず、
+  //   どれを遅らせればいいか判断できないので、割る日を全部返す。
+  List<({DateTime date, int balance, List<String> labels})> shortfallDaysAhead(
+      {int monthsAhead = 2}) {
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final events = cashEventsAhead(monthsAhead: monthsAhead);
+    var running = effectiveBalance + effectiveWalletCash;
+    final out = <({DateTime date, int balance, List<String> labels})>[];
+    var i = 0;
+    while (i < events.length) {
+      final date = events[i].date;
+      final draws = <String>[];
+      while (i < events.length && events[i].date == date) {
+        running += events[i].amount;
+        if (events[i].amount < 0) draws.add(events[i].label);
+        i++;
+      }
+      if (date.isBefore(today)) continue; // 今の残高に織り込み済み
+      if (running < 0) {
+        out.add((date: date, balance: running, labels: draws));
+      }
+    }
+    return out;
   }
 
   // 来月末残高
