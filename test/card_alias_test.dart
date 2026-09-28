@@ -106,4 +106,124 @@ void main() {
       expect(app.resolveCardName('ミツビシUFJニコス'), 'ミツビシUFJニコス');
     });
   });
+
+  // 💡 表記違いで2枚とも「登録済み」になってしまった場合（例: 三菱UFJ と MUFGカード）。
+  //   ⚠️ カード名は明細以外にもいろいろな場所に文字列で入っている。
+  //     1か所でも残ると、金額が予想から消えたり削除した明細が復活する。
+  group('登録済みカードどうしをまとめる', () {
+    AppState twoCards() => AppState()
+      ..setCardPaymentDay('三菱UFJ', 10)
+      ..setCardClosingDay('三菱UFJ', 15)
+      ..setCardPaymentDay('MUFGカード', 10);
+
+    test('設定は1枚になり、まとめ先の締め日・引き落とし日が残る', () {
+      final app = twoCards();
+      app.renameOrMergeCard('MUFGカード', '三菱UFJ');
+      expect(app.cardPaymentDays.containsKey('MUFGカード'), isFalse);
+      expect(app.cardPaymentDays['三菱UFJ'], 10);
+      expect(app.closingDayOf('三菱UFJ'), 15);
+    });
+
+    test('明細・分割・定期・ローン・頭金・Amazon付け替えが全部移る', () {
+      final app = twoCards();
+      app.payments.add(Payment(
+          id: 'p1',
+          cardName: 'MUFGカード',
+          amount: 3000,
+          paymentDate: d,
+          source: PaymentSource.usage));
+      app.installments.add(Installment(
+        id: 'i1',
+        name: 'PC',
+        cardName: 'MUFGカード',
+        totalAmount: 120000,
+        installmentCount: 12,
+        remainingMonths: 12,
+        monthlyAmount: 10000,
+        interestRate: 15.0,
+      ));
+      app.addSubscription(title: 'Netflix', amount: 1500, payDay: 10, method: 'MUFGカード');
+      app.loans.add(Loan(
+        id: 'l1',
+        name: '車',
+        principal: 600000,
+        interestRate: 3.0,
+        totalCount: 12,
+        startMonth: DateTime(2026, 9),
+        payDay: 10,
+        method: 'MUFGカード', // カード払いのローン
+        downPayment: 50000,
+        downPaymentDate: DateTime(2026, 9, 20),
+        downPaymentMethod: 'MUFGカード', // 頭金もカード払い
+      ));
+      app.amazonCardOverrides['amazon#1'] = 'MUFGカード';
+      app.setBudget('MUFGカード', 20000);
+      app.setInterestRate('MUFGカード', 12.0);
+
+      app.renameOrMergeCard('MUFGカード', '三菱UFJ');
+
+      expect(app.payments.single.cardName, '三菱UFJ');
+      expect(app.installments.single.cardName, '三菱UFJ');
+      expect(app.subscriptions.single.method, '三菱UFJ');
+      expect(app.loans.single.method, '三菱UFJ');
+      expect(app.loans.single.downPaymentMethod, '三菱UFJ');
+      expect(app.amazonCardOverrides['amazon#1'], '三菱UFJ');
+      expect(app.budgets['MUFGカード'], isNull);
+      expect(app.budgets['三菱UFJ'], 20000);
+      expect(app.interestRateOf('三菱UFJ'), 12.0);
+    });
+
+    test('予算が両方にあれば足す（どちらも消えない）', () {
+      final app = twoCards()
+        ..setBudget('三菱UFJ', 30000)
+        ..setBudget('MUFGカード', 20000);
+      app.renameOrMergeCard('MUFGカード', '三菱UFJ');
+      expect(app.budgets['三菱UFJ'], 50000);
+    });
+
+    test('削除した明細は、まとめた後の取り込みでも復活しない', () {
+      final app = twoCards();
+      app.reconcilePayments([item('MUFGカード', 8000, d, 'b1#0')]);
+      final id = app.payments.single.id;
+      app.removePayment(id); // ゴミ箱へ（墓石を記録）
+      expect(app.payments, isEmpty);
+
+      app.renameOrMergeCard('MUFGカード', '三菱UFJ');
+      // 銀行は相変わらず古い表記で送ってくる
+      app.reconcilePayments([item('MUFGカード', 8000, d, 'b1#0')]);
+      expect(app.payments, isEmpty); // 復活しない
+    });
+
+    test('前にまとめた名前の行き先も付け替わる（迷子にしない）', () {
+      final app = twoCards();
+      app.mergeCardName('ミツビシUFJニコス', 'MUFGカード'); // 銀行表記 → MUFGカード
+      app.renameOrMergeCard('MUFGカード', '三菱UFJ'); // さらに1枚にまとめる
+      expect(app.resolveCardName('ミツビシUFJニコス'), '三菱UFJ');
+      expect(app.resolveCardName('MUFGカード'), '三菱UFJ');
+    });
+  });
+
+  group('カード名を変える（まとめ先が無い場合）', () {
+    test('締め日・引き落とし日を引き継いで、名前だけ変わる', () {
+      final app = AppState()
+        ..setCardPaymentDay('三菱UFJ', 10)
+        ..setCardClosingDay('三菱UFJ', 15);
+      app.renameOrMergeCard('三菱UFJ', '三菱UFJカード');
+      expect(app.cardPaymentDays.containsKey('三菱UFJ'), isFalse);
+      expect(app.cardPaymentDays['三菱UFJカード'], 10);
+      expect(app.closingDayOf('三菱UFJカード'), 15);
+      // 締め期間も引き継いだ設定で計算される（9/16〜10/15 → 11月の引き落とし）
+      final r = app.cardClosingPeriodOf('三菱UFJカード', DateTime(2026, 11));
+      expect(r.start, DateTime(2026, 9, 16));
+      expect(r.end, DateTime(2026, 10, 15));
+    });
+
+    test('空の名前や同じ名前では何も壊さない', () {
+      final app = AppState()..setCardPaymentDay('三菱UFJ', 10);
+      app.renameOrMergeCard('三菱UFJ', '   ');
+      app.renameOrMergeCard('三菱UFJ', '三菱UFJ');
+      expect(app.cardPaymentDays['三菱UFJ'], 10);
+      expect(app.cardAliases, isEmpty);
+    });
+  });
 }

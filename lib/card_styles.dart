@@ -25,6 +25,10 @@ CardStyle cardStyleOf(String name) {
   if (name.contains('メル')) {
     return const CardStyle(Color(0xFFD81B60), Icons.credit_card); // メル: ピンク
   }
+  // 💡 三菱UFJ。楽天の赤と見分けがつくように紫にする（グラフで隣に並ぶため）
+  if (name.contains('三菱') || name.contains('UFJ') || name.contains('MUFG')) {
+    return const CardStyle(Color(0xFF5E35B1), Icons.credit_card); // 三菱UFJ: 紫
+  }
   return _defaultStyle;
 }
 

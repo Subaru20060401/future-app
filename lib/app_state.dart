@@ -1577,25 +1577,80 @@ class AppState extends ChangeNotifier {
     return out;
   }
 
-  // 💡 割れているカード名を1つにまとめる。既存の明細もその場で付け替える。
-  void mergeCardName(String from, String to) {
-    if (from == to || from.trim().isEmpty) return;
-    cardAliases[from] = to;
+  // 💡 割れているカード名を1つにまとめる（銀行表記 → 自分が付けた名前）。
+  void mergeCardName(String from, String to) => renameOrMergeCard(from, to);
+
+  // 💡 カード名を変える／2枚を1枚にまとめる。
+  //   to が未登録なら「名前の変更」（締め日と引き落とし日を引き継ぐ）、
+  //   登録済みなら「まとめる」になる。
+  // ⚠️ カード名は明細・分割・定期・ローン・予算・重複防止キーに
+  //   「文字列として」散らばっている。1か所でも取りこぼすと、
+  //   金額が予想から消えたり、削除した明細が次の取り込みで復活したりする。
+  //   （test/card_alias_test.dart で全部の行き先を固定している）
+  void renameOrMergeCard(String from, String to) {
+    final target = to.trim();
+    if (from == target || from.trim().isEmpty || target.isEmpty) return;
+
+    // 未登録の名前へ＝名前の変更。引き落とし日と締め日を持って行く。
+    if (!cardPaymentDays.containsKey(target) &&
+        cardPaymentDays.containsKey(from)) {
+      cardPaymentDays[target] = cardPaymentDays[from]!;
+      final closing = cardClosingDays[from];
+      if (closing != null) cardClosingDays[target] = closing;
+    }
+
+    // 次の取り込みで同じ名前が来ても、まとめ先に寄せる
+    cardAliases[from] = target;
+    // 前にまとめた名前が from を指していたら、その行き先も付け替える
+    for (final k in cardAliases.keys.toList()) {
+      if (cardAliases[k] == from) cardAliases[k] = target;
+    }
+
     for (final p in payments) {
-      if (p.cardName == from) p.cardName = to;
+      if (p.cardName == from) p.cardName = target;
     }
     for (final i in installments) {
-      if (i.cardName == from) i.cardName = to;
+      if (i.cardName == from) i.cardName = target;
     }
     for (final s in subscriptions) {
-      if (s.method == from) s.method = to;
+      if (s.method == from) s.method = target;
     }
+    // ローンは「カード払い」のときだけカード名を持つ（'' は口座払い）
+    for (final l in loans) {
+      if (l.method == from) l.method = target;
+      if (l.downPaymentMethod == from) l.downPaymentMethod = target;
+    }
+    // Amazon明細の付け替え先
+    for (final k in amazonCardOverrides.keys.toList()) {
+      if (amazonCardOverrides[k] == from) amazonCardOverrides[k] = target;
+    }
+    // 予算はラベル（＝カード名）がキー。両方にあれば足す
+    final budget = budgets.remove(from);
+    if (budget != null) budgets[target] = (budgets[target] ?? 0) + budget;
+    // 分割の金利（まとめ先に設定があればそちらを優先）
+    final rate = cardInterestRates.remove(from);
+    if (rate != null) cardInterestRates.putIfAbsent(target, () => rate);
+    // ⚠️ 重複防止キーはカード名を含む（_dupKey）。張り替えないと、
+    //   削除した明細が復活し、分割へ移した明細がカードに戻る。
+    _renameInDupKeys(deletedDupKeys, from, target);
+    _renameInDupKeys(convertedPaymentKeys, from, target);
+
     // 設定側にも残っていたら消す（まとめ先へ寄せる）
     cardPaymentDays.remove(from);
     cardClosingDays.remove(from);
     saveData();
     _saveCardPaymentDays();
     notifyListeners();
+  }
+
+  void _renameInDupKeys(Set<String> keys, String from, String to) {
+    final moved = <String>[];
+    keys.removeWhere((k) {
+      if (!k.startsWith('$from|')) return false;
+      moved.add('$to|${k.substring(from.length + 1)}');
+      return true;
+    });
+    keys.addAll(moved);
   }
 
   void unmergeCardName(String from) {

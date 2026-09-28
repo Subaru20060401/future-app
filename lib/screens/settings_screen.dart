@@ -162,6 +162,15 @@ class SettingsScreen extends StatelessWidget {
                         setLocal(() {});
                       },
                     ),
+                    // 💡 同じカードが2つに割れているとき（表記違いで別々に登録した等）、
+                    //   名前を揃えれば1枚として扱える。
+                    TextButton(
+                      child: const Text('名前', style: TextStyle(fontSize: 15)),
+                      onPressed: () async {
+                        await _renameCard(context, appState, e.key);
+                        setLocal(() {});
+                      },
+                    ),
                     IconButton(
                       tooltip: '一覧から外す',
                       icon: const Icon(Icons.close, size: 18, color: Colors.grey),
@@ -338,6 +347,55 @@ class SettingsScreen extends StatelessWidget {
         card,
         (int.tryParse(dayCtrl.text) ?? appState.cardPaymentDays[card] ?? 27)
             .clamp(1, 31));
+  }
+
+  // 💡 カード名を変える。既にあるカード名を入れると、その1枚にまとまる。
+  //   明細・分割・定期・ローン・予算・重複防止の記録もまとめて付け替わる。
+  Future<void> _renameCard(
+      BuildContext context, AppState appState, String card) async {
+    final ctrl = TextEditingController(text: card);
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('カード名を変える'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            TextField(
+              controller: ctrl,
+              autofocus: true,
+              decoration: const InputDecoration(labelText: 'カード名'),
+            ),
+            const SizedBox(height: 8),
+            const Text(
+                '既にあるカード名を入れると、その1枚にまとまります。'
+                '明細・分割払い・定期支払い・ローン・予算もすべて付け替わります。',
+                style: TextStyle(fontSize: 12, color: Colors.black54)),
+          ],
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('キャンセル')),
+          ElevatedButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('保存')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final to = ctrl.text.trim();
+    if (to.isEmpty || to == card) return;
+    // まとめる（＝既存のカードへ寄せる）ときは、取り消しにくいので一度確認する
+    if (appState.cardPaymentDays.containsKey(to)) {
+      if (!context.mounted) return;
+      final merge = await _confirm(context, '$card を $to にまとめる',
+          '$card の明細・分割払い・定期支払い・ローン・予算が $to に移り、'
+          '$card は一覧から消えます。');
+      if (merge != true) return;
+    }
+    appState.renameOrMergeCard(card, to);
   }
 
   // 取り返しがつかない操作の確認
