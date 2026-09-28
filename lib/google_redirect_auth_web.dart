@@ -62,20 +62,27 @@ void startGoogleRedirect(String clientId, String redirect, List<String> scopes,
 
 // ───── 静かな再取得のループ止め ─────
 // ⚠️ prompt=none が失敗したときに何度も飛ぶと、リダイレクトの無限ループになる。
-//   タブ（sessionStorage）に「試した」を記録して、1回きりにする。
+//   かといって「1回きり」にすると、開いたままの端末で二度と取り直せない。
+//   そこで「最後に試した時刻」だけを持ち、空けてよいかの判断は
+//   gmail_service 側（silentAuthOnCooldown）に任せる（テストで固定するため）。
 const String _kSilentTried = 'pm_silent_auth_tried';
 
-bool get silentAuthTried {
+// 最後に試した時刻（エポックミリ秒）。まだ試していなければ null。
+int? get silentAuthTriedAtMs {
   try {
-    return web.window.sessionStorage.getItem(_kSilentTried) != null;
+    final v = web.window.sessionStorage.getItem(_kSilentTried);
+    if (v == null) return null;
+    // 読めない値なら「今さっき試した」とみなして飛ばさない
+    return int.tryParse(v) ?? DateTime.now().millisecondsSinceEpoch;
   } catch (_) {
-    return true; // 読めない環境では試さない（ループを避ける方に倒す）
+    return DateTime.now().millisecondsSinceEpoch;
   }
 }
 
 void markSilentAuthTried() {
   try {
-    web.window.sessionStorage.setItem(_kSilentTried, '1');
+    web.window.sessionStorage
+        .setItem(_kSilentTried, '${DateTime.now().millisecondsSinceEpoch}');
   } catch (_) {}
 }
 

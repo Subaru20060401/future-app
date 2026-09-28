@@ -154,9 +154,22 @@ bool shouldTrySilentAuth({
   required bool canRedirect, // リダイレクト方式が使える環境か
   required bool signedInOnce, // 一度も連携していないなら、まず本人に押してもらう
   required bool hasValidToken, // まだ使えるトークンがあるなら飛ばない
-  required bool alreadyTried, // このタブで試し済みなら繰り返さない
+  required bool alreadyTried, // さっき試したばかりなら繰り返さない
 }) =>
     isWeb && canRedirect && signedInOnce && !hasValidToken && !alreadyTried;
+
+// 💡 取り直しを試してよい間隔。
+//   ⚠️ 短すぎるとリダイレクトのループに近づき、長すぎると
+//     「アプリに戻ったのにまだ未連携」が続く。
+const Duration kSilentAuthCooldown = Duration(minutes: 10);
+
+// 💡 さっき試したばかりか。lastTriedMs が null＝まだ試していない。
+bool silentAuthOnCooldown(int? lastTriedMs, DateTime now) {
+  if (lastTriedMs == null) return false;
+  final elapsed = now.millisecondsSinceEpoch - lastTriedMs;
+  if (elapsed < 0) return true; // 時計が巻き戻ったときは飛ばさない側に倒す
+  return elapsed < kSilentAuthCooldown.inMilliseconds;
+}
 
 class GmailService {
   GmailService._();
@@ -248,7 +261,7 @@ class GmailService {
       canRedirect: canUseRedirectAuth,
       signedInOnce: signedInOnce,
       hasValidToken: await _cachedCredentials() != null,
-      alreadyTried: silentAuthTried,
+      alreadyTried: silentAuthOnCooldown(silentAuthTriedAtMs, DateTime.now()),
     )) {
       return false;
     }

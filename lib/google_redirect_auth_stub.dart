@@ -8,7 +8,7 @@ void startGoogleRedirect(String clientId, String redirectUri, List<String> scope
 ({String token, DateTime expiry})? consumeRedirectResult() => null;
 String? consumeRedirectError() => null;
 // 💡 端末アプリはリフレッシュトークンが効くので、静かな再取得はそもそも不要。
-//   「試した」を常に true にして、この経路に入らないようにする。
-bool get silentAuthTried => true;
+//   canUseRedirectAuth が false なので、この値は参照されない。
+int? get silentAuthTriedAtMs => null;
 void markSilentAuthTried() {}
 void clearSilentAuthTried() {}

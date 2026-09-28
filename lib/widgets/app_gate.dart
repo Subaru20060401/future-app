@@ -42,12 +42,23 @@ class _AppGateState extends State<AppGate> with WidgetsBindingObserver {
     // 戻ってきたら猶予時間を過ぎている場合だけロックし直す
     if (state == AppLifecycleState.resumed) {
       LockService.instance.onResume();
+      // 💡 アクセストークンは1時間で切れる。
+      //   ⚠️ iOSのホーム画面アプリは、戻ってきてもページを読み込み直さないことがある。
+      //     起動時だけの取り直しでは「数時間空けたら未連携」が直らないので、
+      //     戻ってきた時点でも切れていれば黙って取り直す（ページが移動することがある）。
+      //     ロック中は画面を出さない約束なので、解除された後にする。
+      if (!LockService.instance.isLocked) {
+        GmailService.instance.tryRestoreSilently();
+      }
       if (mounted) setState(() {});
     }
   }
 
   Future<void> _checkLogin() async {
     final appState = context.read<AppState>();
+    // 💡 ログインを求めない設定でも、連携の記憶は読んでおく。
+    //   再開時の「黙って取り直す」が signedInOnce を見るため。
+    await GmailService.instance.loadAuthState();
     if (!appState.requireGoogleLogin) {
       if (mounted) setState(() => _checkingLogin = false);
       return;
@@ -79,7 +90,11 @@ class _AppGateState extends State<AppGate> with WidgetsBindingObserver {
   Widget build(BuildContext context) {
     // パスコードが最優先（ログイン画面すら見せない）
     if (LockService.instance.isLocked) {
-      return LockScreen(onUnlocked: () => setState(() {}));
+      return LockScreen(onUnlocked: () {
+        // ロック中は飛ばさなかったので、解除された今、切れていれば取り直す
+        GmailService.instance.tryRestoreSilently();
+        setState(() {});
+      });
     }
 
     final appState = context.watch<AppState>();

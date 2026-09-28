@@ -45,4 +45,30 @@ void main() {
       expect(decide(canRedirect: false), isFalse);
     });
   });
+
+  // 💡 「1回きり」だと、開いたままの端末（iOSのホーム画面アプリは戻っても
+  //   ページを読み込み直さない）で二度と取り直せなくなる。時間で空けて繰り返す。
+  group('取り直しの間隔', () {
+    final now = DateTime(2026, 9, 28, 12, 0);
+    int msAgo(Duration d) => now.subtract(d).millisecondsSinceEpoch;
+
+    test('まだ一度も試していなければ、すぐ試せる', () {
+      expect(silentAuthOnCooldown(null, now), isFalse);
+    });
+
+    test('さっき試したばかりなら繰り返さない（ループ防止）', () {
+      expect(silentAuthOnCooldown(msAgo(const Duration(minutes: 1)), now), isTrue);
+      expect(silentAuthOnCooldown(msAgo(const Duration(minutes: 9)), now), isTrue);
+    });
+
+    test('時間が空いたらまた試す（数時間後に戻ってきた場合）', () {
+      expect(silentAuthOnCooldown(msAgo(const Duration(minutes: 11)), now), isFalse);
+      expect(silentAuthOnCooldown(msAgo(const Duration(hours: 5)), now), isFalse);
+    });
+
+    test('時計が巻き戻っても飛び続けない', () {
+      expect(silentAuthOnCooldown(now.add(const Duration(hours: 1)).millisecondsSinceEpoch, now),
+          isTrue);
+    });
+  });
 }
