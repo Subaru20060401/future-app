@@ -14,8 +14,12 @@ String _fmt(DateTime? d) =>
 //
 // 💡 pullOnly: 同期をONにしていない状態（ログインしただけ）で使う。
 //   勝手にアップロードはせず、ドライブに置いてあるものを降ろす方向だけ行う。
-Future<bool> runDriveSync(BuildContext context, AppState appState,
-    {bool silent = false, bool pullOnly = false}) async {
+Future<bool> runDriveSync(
+  BuildContext context,
+  AppState appState, {
+  bool silent = false,
+  bool pullOnly = false,
+}) async {
   // 💡 silent は「順調なときに黙る」ためのもの。
   //   失敗まで黙ると「ログインしても何も起きない」になるので、エラーは必ず出す。
   void toast(String text, {Color? color, bool always = false}) {
@@ -33,6 +37,9 @@ Future<bool> runDriveSync(BuildContext context, AppState appState,
       toast('ドライブと同じ内容です');
       return false;
 
+    case DriveSyncState.restoringAuth:
+      return false; // 💡 ページ移動中に未連携の警告を重ねない
+
     case DriveSyncState.notSignedIn:
     case DriveSyncState.error:
       toast(r.message, color: Colors.orange[800], always: true);
@@ -43,35 +50,53 @@ Future<bool> runDriveSync(BuildContext context, AppState appState,
       // 同期OFFのまま勝手に上げない（ユーザーが許可していない）
       if (pullOnly) return false;
       final up = await DriveSync.instance.pushNow(appState);
-      toast(up.state == DriveSyncState.error ? up.message : 'ドライブへ保存しました',
-          color: up.state == DriveSyncState.error ? Colors.orange[800] : null,
-          always: up.state == DriveSyncState.error);
+      toast(
+        up.state == DriveSyncState.error ? up.message : 'ドライブへ保存しました',
+        color: up.state == DriveSyncState.error ? Colors.orange[800] : null,
+        always: up.state == DriveSyncState.error,
+      );
       return up.state != DriveSyncState.error;
 
     case DriveSyncState.remoteNewer:
       // こちらに未同期の変更が無いので、そのまま取り込んで安全
-      final down = await DriveSync.instance.pullNow(appState, snapshot: r.remote);
+      final down = await DriveSync.instance.pullNow(
+        appState,
+        snapshot: r.remote,
+      );
       toast(
-          down.state == DriveSyncState.error
-              ? down.message
-              : '別の端末の変更を取り込みました（${r.remote?.device ?? ''}）',
-          color: down.state == DriveSyncState.error ? Colors.orange[800] : null,
-          always: down.state == DriveSyncState.error);
+        down.state == DriveSyncState.error
+            ? down.message
+            : '別の端末の変更を取り込みました（${r.remote?.device ?? ''}）',
+        color: down.state == DriveSyncState.error ? Colors.orange[800] : null,
+        always: down.state == DriveSyncState.error,
+      );
       return down.state != DriveSyncState.error;
 
     case DriveSyncState.conflict:
       // 💡 ここを取りこぼすと「ログインしたのに何も起きない」になる。
       //   両方にデータがあるのは普通の状況なので、必ず選ばせる。
-      final keep = await _askConflict(context, appState, r.remote!, pullOnly: pullOnly);
+      final keep = await _askConflict(
+        context,
+        appState,
+        r.remote!,
+        pullOnly: pullOnly,
+      );
       if (keep == null || !context.mounted) return false;
       if (keep == _Keep.local) {
         if (pullOnly) return false; // 同期OFFなら「この端末のまま」＝何もしない
         final up = await DriveSync.instance.pushNow(appState);
-        toast(up.state == DriveSyncState.error ? up.message : 'この端末の内容で上書きしました');
+        toast(
+          up.state == DriveSyncState.error ? up.message : 'この端末の内容で上書きしました',
+        );
         return up.state != DriveSyncState.error;
       }
-      final down = await DriveSync.instance.pullNow(appState, snapshot: r.remote);
-      toast(down.state == DriveSyncState.error ? down.message : 'ドライブの内容で置き換えました');
+      final down = await DriveSync.instance.pullNow(
+        appState,
+        snapshot: r.remote,
+      );
+      toast(
+        down.state == DriveSyncState.error ? down.message : 'ドライブの内容で置き換えました',
+      );
       return down.state != DriveSyncState.error;
   }
 }
@@ -79,8 +104,11 @@ Future<bool> runDriveSync(BuildContext context, AppState appState,
 enum _Keep { local, remote }
 
 Future<_Keep?> _askConflict(
-    BuildContext context, AppState appState, DriveSnapshot remote,
-    {bool pullOnly = false}) {
+  BuildContext context,
+  AppState appState,
+  DriveSnapshot remote, {
+  bool pullOnly = false,
+}) {
   return showDialog<_Keep>(
     context: context,
     barrierDismissible: false,
@@ -93,17 +121,21 @@ Future<_Keep?> _askConflict(
           Text(
             pullOnly
                 ? 'ドライブに別の端末のデータがあります。'
-                  '取り込むと、この端末のデータは置き換わります。'
+                      '取り込むと、この端末のデータは置き換わります。'
                 : 'この端末と別の端末の両方でデータが変わっています。'
-                  '選ばなかった方の変更は消えます。',
+                      '選ばなかった方の変更は消えます。',
             style: const TextStyle(fontSize: 13),
           ),
           const SizedBox(height: 12),
-          Text('この端末（${appState.deviceLabel}）\n'
-              '最終変更 ${_fmt(appState.dataUpdatedAt)}'),
+          Text(
+            'この端末（${appState.deviceLabel}）\n'
+            '最終変更 ${_fmt(appState.dataUpdatedAt)}',
+          ),
           const SizedBox(height: 8),
-          Text('ドライブ（${remote.device}）\n'
-              '最終変更 ${_fmt(remote.updatedAt)}'),
+          Text(
+            'ドライブ（${remote.device}）\n'
+            '最終変更 ${_fmt(remote.updatedAt)}',
+          ),
         ],
       ),
       actions: [

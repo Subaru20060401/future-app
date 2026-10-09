@@ -5,6 +5,8 @@ import 'package:extension_google_sign_in_as_googleapis_auth/extension_google_sig
 import 'package:googleapis_auth/googleapis_auth.dart' as gauth;
 import 'package:http/http.dart' as http;
 import 'google_redirect_auth.dart';
+import 'google_auth_recovery.dart';
+export 'google_auth_recovery.dart';
 import 'package:googleapis/calendar/v3.dart' as gcal;
 import 'package:googleapis/drive/v3.dart' as drive;
 import 'package:googleapis/gmail/v1.dart' as gmail;
@@ -179,6 +181,7 @@ class GmailService {
   // 💡 drive.appdata はユーザーのDriveの「見えない領域」で、このアプリが作った
   //   ファイルしか読み書きできない。他のファイルには一切アクセスしない。
   static const List<String> _scopes = <String>[
+    'https://www.googleapis.com/auth/userinfo.email',
     gmail.GmailApi.gmailReadonlyScope,
     drive.DriveApi.driveAppdataScope,
     // 💡 アプリの予定をGoogleカレンダーへ書き出すため。
@@ -208,8 +211,8 @@ class GmailService {
   // 💡 ブラウザ版のGoogleログインは、アクセストークンをメモリにしか持たない。
   //   そのため再読み込みのたびに「未連携」に戻ってしまう（毎回ポップアップが必要）。
   //   トークンは1時間ほど有効なので、期限まで保存して使い回す。
-  //   ⚠️ リフレッシュトークンはブラウザだけでは発行できないため、
-  //     期限が切れたらもう一度「連携する」を押してもらう必要がある。
+  //   ⚠️ この認証方式には更新用トークンが無い。期限切れ時はまず
+  //     自動で取り直し、Googleが操作を求めた場合だけ手動連携にする。
   static const String _kToken = 'saved_google_access_token';
   static const String _kTokenExpiry = 'saved_google_token_expiry';
 
@@ -234,6 +237,26 @@ class GmailService {
       _scopeCheckedAt = DateTime.now();
       lastAuthError = null;
       await _rememberSignedIn();
+      // 💡 リダイレクトではプラグインのcurrentUserが無い。本人のメールを
+      //   Googleから取得し、次回の取り直し先を固定する（明細は取得しない）。
+      try {
+        final response = await http
+            .get(
+              Uri.https('www.googleapis.com', '/oauth2/v2/userinfo'),
+              headers: {'Authorization': 'Bearer $token'},
+            )
+            .timeout(const Duration(seconds: 5));
+        if (response.statusCode == 200) {
+          final info = jsonDecode(response.body) as Map<String, dynamic>;
+          final email = info['email'];
+          if (email is String && email.isNotEmpty) {
+            savedEmail = email;
+            await prefs.setString(_kEmail, email);
+          }
+        }
+      } catch (_) {
+        // ⚠️ 本人情報の取得失敗で、有効なAPIトークンは捨てない。
+      }
     } catch (_) {}
   }
 
@@ -244,8 +267,14 @@ class GmailService {
     final id = webClientId;
     final uri = redirectUri;
     if (id == null || uri == null) return false;
-    startGoogleRedirect(id, uri, _scopes,
-        silent: silent, loginHint: silent ? savedEmail : null);
+    _redirecting = true;
+    startGoogleRedirect(
+      id,
+      uri,
+      _scopes,
+      silent: silent,
+      loginHint: savedEmail,
+    );
     return true;
   }
 
@@ -256,6 +285,8 @@ class GmailService {
   //   consumeRedirectResult() が新しいトークンを拾って保存する。
   //   true＝これからページが移動する（呼び出し側はそのつもりでいること）。
   Future<bool> tryRestoreSilently() async {
+    if (_redirecting) return true;
+    await loadAuthState();
     if (!shouldTrySilentAuth(
       isWeb: kIsWeb,
       canRedirect: canUseRedirectAuth,
@@ -278,7 +309,8 @@ class GmailService {
       case 'interaction_required':
       case 'login_required':
       case 'consent_required':
-        lastAuthError = '自動での更新ができませんでした（$code）。'
+        lastAuthError =
+            '自動での更新ができませんでした（$code）。'
             '「連携し直す」を押してください。';
       default:
         lastAuthError = 'Googleから $code が返りました。';
@@ -302,7 +334,9 @@ class GmailService {
       if (data == null || expiryStr == null) return null;
       final expiry = DateTime.tryParse(expiryStr)?.toUtc();
       if (expiry == null) return null;
-      if (expiry.isBefore(DateTime.now().toUtc().add(const Duration(minutes: 2)))) {
+      if (expiry.isBefore(
+        DateTime.now().toUtc().add(const Duration(minutes: 2)),
+      )) {
         return null;
       }
       return gauth.AccessCredentials(
@@ -316,8 +350,12 @@ class GmailService {
   }
 
   // 💡 API呼び出しに使うクライアント。
-  //   プラグインが持っていればそれを、無ければ保存したトークンで組み立てる。
+  //   有効な保存トークンを優先し、期限切れならプラグインを確認する。
   Future<http.Client?> _authClient() async {
+    // 💡 有効な保存トークンは先に使う。iPhoneで不要なJS認証を走らせない。
+    final cached = await _cachedCredentials();
+    if (cached != null) return gauth.authenticatedClient(http.Client(), cached);
+    if (isPopupUnfriendly) return null;
     try {
       final client = await _googleSignIn.authenticatedClient();
       if (client != null) {
@@ -336,6 +374,28 @@ class GmailService {
   bool signedInOnce = false;
   String? savedEmail;
 
+  bool _redirecting = false;
+  bool get isRedirecting => _redirecting;
+  Future<GoogleAccessState>? _restoringAccess;
+
+  // 💡 Gmail・Driveで同じ復帰経路を使い、同時更新は一度の認証にまとめる。
+  Future<GoogleAccessState> ensureAccess() {
+    return _restoringAccess ??= _restoreAccess().whenComplete(() {
+      _restoringAccess = null;
+    });
+  }
+
+  Future<GoogleAccessState> _restoreAccess() async {
+    if (_redirecting) return GoogleAccessState.redirecting;
+    await loadAuthState();
+    return recoverGoogleAccess(
+      isUsable: () => isUsable,
+      restorePlugin: signInSilently,
+      restoreRedirect: tryRestoreSilently,
+      preferRedirect: isPopupUnfriendly,
+    );
+  }
+
   // 💡 いま本当にAPIを叩けるか。表示と実態を食い違わせないための判定。
   //   「連携したことがある」だけでは叩けない（トークンが切れている）。
   Future<bool> get isUsable async => (await _authClient()) != null;
@@ -345,7 +405,9 @@ class GmailService {
     final sb = StringBuffer();
     sb.writeln('連携したことがある: ${signedInOnce ? 'はい' : 'いいえ'}');
     sb.writeln('アカウント: ${displayEmail ?? '—'}');
-    sb.writeln('currentUser: ${_googleSignIn.currentUser == null ? 'なし' : 'あり'}');
+    sb.writeln(
+      'currentUser: ${_googleSignIn.currentUser == null ? 'なし' : 'あり'}',
+    );
     try {
       final prefs = await SharedPreferences.getInstance();
       final exp = prefs.getString(_kTokenExpiry);
@@ -357,7 +419,9 @@ class GmailService {
     }
     if (kIsWeb) {
       try {
-        sb.writeln('スコープ許可: ${await _googleSignIn.canAccessScopes(_scopes) ? 'あり' : 'なし'}');
+        sb.writeln(
+          'スコープ許可: ${await _googleSignIn.canAccessScopes(_scopes) ? 'あり' : 'なし'}',
+        );
       } catch (e) {
         sb.writeln('スコープ確認に失敗: $e');
       }
@@ -422,7 +486,9 @@ class GmailService {
     }
     if (_googleSignIn.currentUser == null) return false;
     final at = _scopeCheckedAt;
-    if (_scopeGranted && at != null && DateTime.now().difference(at) < _scopeTtl) {
+    if (_scopeGranted &&
+        at != null &&
+        DateTime.now().difference(at) < _scopeTtl) {
       return true;
     }
     try {
@@ -498,22 +564,29 @@ class GmailService {
   //   403は原因が複数あるので、メッセージで切り分ける。
   Object _describeApiError(Object e) {
     final text = e.toString();
-    final is403 = (e is gmail.DetailedApiRequestError && e.status == 403) ||
+    final is403 =
+        (e is gmail.DetailedApiRequestError && e.status == 403) ||
         text.contains('403');
     if (!is403) return e;
     final lower = text.toLowerCase();
     if (lower.contains('quota') || lower.contains('rate limit')) {
-      return Exception('Gmailの取得が混み合っています（403 クォータ超過）。'
-          '1〜2分ほど待ってから、もう一度更新してください。');
+      return Exception(
+        'Gmailの取得が混み合っています（403 クォータ超過）。'
+        '1〜2分ほど待ってから、もう一度更新してください。',
+      );
     }
     if (lower.contains('scope') || lower.contains('insufficient')) {
       _scopeGranted = false;
-      return Exception('Gmailの読み取りが許可されていません（403）。'
-          '「Gmailのアクセスを許可」を押して、Googleの画面で許可してください。');
+      return Exception(
+        'Gmailの読み取りが許可されていません（403）。'
+        '「Gmailのアクセスを許可」を押して、Googleの画面で許可してください。',
+      );
     }
     if (lower.contains('has not been used') || lower.contains('disabled')) {
-      return Exception('Gmail APIが無効になっています（403）。'
-          'Google CloudでGmail APIを有効にしてください。');
+      return Exception(
+        'Gmail APIが無効になっています（403）。'
+        'Google CloudでGmail APIを有効にしてください。',
+      );
     }
     return Exception('Gmailにアクセスできませんでした（403）。$text');
   }
@@ -594,10 +667,17 @@ class GmailService {
   }
 
   Future<bool> signInSilently() async {
-    final acc = await _googleSignIn.signInSilently();
-    // 💡 ここでは許可を「要求」しない（操作外なのでポップアップが塞がれる）。確認だけ。
-    if (acc != null) await hasGmailAccess();
-    return acc != null;
+    if (await _cachedCredentials() != null) return true;
+    if (isPopupUnfriendly) return false;
+    try {
+      final acc = await _googleSignIn.signInSilently();
+      // 💡 ここでは許可を「要求」しない（操作外なのでポップアップが塞がれる）。確認だけ。
+      if (acc != null) await hasGmailAccess();
+      return acc != null;
+    } catch (e) {
+      lastAuthError = e.toString();
+      return false;
+    }
   }
 
   // 銀行（三井住友銀行）の引き落とし事前お知らせ

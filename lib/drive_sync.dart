@@ -27,6 +27,7 @@ class DriveSnapshot {
 
 // 同期の状況
 enum DriveSyncState {
+  restoringAuth, // 認証を取り直すためページ移動中
   notSignedIn, // 未連携
   noRemote, // ドライブにまだ無い
   upToDate, // 同じ
@@ -45,6 +46,8 @@ class DriveSyncResult {
 
   String get message {
     switch (state) {
+      case DriveSyncState.restoringAuth:
+        return 'Google連携を復帰しています…';
       case DriveSyncState.notSignedIn:
         return 'Googleの有効期限が切れています。設定→Google連携で「連携し直す」を押してください';
       case DriveSyncState.noRemote:
@@ -63,7 +66,6 @@ class DriveSyncResult {
   }
 }
 
-
 // 💡 どちらが新しいかの判定。データ消失に直結するので純粋関数にして
 //   test/drive_sync_test.dart で固めている。
 //   - knownRemoteAt: 前回そろえた時点の「ドライブ側の更新時刻」
@@ -79,7 +81,8 @@ DriveSyncState decideSyncState({
   final remoteChanged =
       knownRemoteAt == null || remoteUpdatedAt.isAfter(knownRemoteAt);
   // この端末が、前回そろえたときから変わっているか
-  final localChanged = dataUpdatedAt != null &&
+  final localChanged =
+      dataUpdatedAt != null &&
       (syncedAt == null || dataUpdatedAt.isAfter(syncedAt));
 
   if (remoteChanged && localChanged) return DriveSyncState.conflict;
@@ -87,7 +90,6 @@ DriveSyncState decideSyncState({
   if (localChanged) return DriveSyncState.localNewer;
   return DriveSyncState.upToDate;
 }
-
 
 // 💡 同期の失敗は原因が分かれば自分で直せるものが多いので、
 //   生のAPIエラーではなく「次に何をすればいいか」を返す。
@@ -141,10 +143,12 @@ class DriveSync {
     final id = await _findFileId(api);
     if (id == null) return null;
 
-    final media = await api.files.get(
-      id,
-      downloadOptions: drive.DownloadOptions.fullMedia,
-    ) as drive.Media;
+    final media =
+        await api.files.get(
+              id,
+              downloadOptions: drive.DownloadOptions.fullMedia,
+            )
+            as drive.Media;
 
     final bytes = <int>[];
     await for (final chunk in media.stream) {
@@ -195,7 +199,11 @@ class DriveSync {
   Future<DriveSyncResult> check(AppState app) async {
     try {
       // 💡 「連携したことがある」ではなく「いま本当に叩けるか」で判定する。
-      if (!await GmailService.instance.isUsable) {
+      final access = await GmailService.instance.ensureAccess();
+      if (access == GoogleAccessState.redirecting) {
+        return const DriveSyncResult(DriveSyncState.restoringAuth);
+      }
+      if (access == GoogleAccessState.needsInteraction) {
         return const DriveSyncResult(DriveSyncState.notSignedIn);
       }
       final remote = await fetch();
@@ -270,7 +278,10 @@ class DriveSync {
   }
 
   // ドライブの内容をこの端末へ取り込む
-  Future<DriveSyncResult> pullNow(AppState app, {DriveSnapshot? snapshot}) async {
+  Future<DriveSyncResult> pullNow(
+    AppState app, {
+    DriveSnapshot? snapshot,
+  }) async {
     try {
       final remote = snapshot ?? await fetch();
       if (remote == null) return const DriveSyncResult(DriveSyncState.noRemote);

@@ -11,6 +11,7 @@ class GmailSyncResult {
   final int missed; // 取得できなかったメール数（>0なら反映を中止している）
   // 💡 Web用。サインイン済みだがGmail読み取りの許可が無い（403の原因）。
   final bool needsPermission;
+  final bool restoringAuth;
 
   GmailSyncResult({
     this.added = 0,
@@ -20,12 +21,14 @@ class GmailSyncResult {
     this.notSignedIn = false,
     this.missed = 0,
     this.needsPermission = false,
+    this.restoringAuth = false,
   });
 
   // 取りこぼしがあり、データを守るため反映を見送ったか
   bool get skipped => missed > 0;
 
   String get message {
+    if (restoringAuth) return 'Google連携を復帰しています…';
     if (notSignedIn) return 'Googleに連携されていません（設定→Google連携）';
     if (needsPermission) {
       return 'Googleの有効期限が切れています。設定→Google連携で「連携し直す」を押してください';
@@ -72,17 +75,21 @@ Future<GmailSyncResult> syncGmail(AppState appState, {bool full = false}) {
   return f;
 }
 
-Future<GmailSyncResult> _syncGmail(AppState appState, {bool full = false}) async {
+Future<GmailSyncResult> _syncGmail(
+  AppState appState, {
+  bool full = false,
+}) async {
   final gmail = GmailService.instance;
   // ⚠️ ここで isSignedIn（GoogleのJSライブラリのログイン状態）を見てはいけない。
-  //   iOSではそれが永久に成立しないため、保存したトークンがあっても
+  //   リダイレクト認証ではそれが成立しないため、保存したトークンがあっても
   //   必ず「未連携」で止まってしまう。
   //   実際にAPIを叩けるか（isUsable）で判定する。
-  if (!await gmail.isUsable) {
-    await gmail.signInSilently(); // 復帰できるなら復帰させる
-    if (!await gmail.isUsable) {
-      return GmailSyncResult(needsPermission: true);
-    }
+  final access = await gmail.ensureAccess();
+  if (access == GoogleAccessState.redirecting) {
+    return GmailSyncResult(restoringAuth: true);
+  }
+  if (access == GoogleAccessState.needsInteraction) {
+    return GmailSyncResult(needsPermission: true);
   }
   final now = DateTime.now();
   // 通常更新は先月1日から（＝直近1〜2ヶ月）。full のときだけ全期間。
@@ -94,17 +101,21 @@ Future<GmailSyncResult> _syncGmail(AppState appState, {bool full = false}) async
     //   1件でも取れなかったら今回は反映しない＝データを壊さない。
     if (gmail.lastFetchFailures > 0) {
       return GmailSyncResult(
-          fetched: list.length, missed: gmail.lastFetchFailures);
+        fetched: list.length,
+        missed: gmail.lastFetchFailures,
+      );
     }
     final r = appState.reconcilePayments(
-      list.map((p) => (
-            cardName: p.cardName,
-            amount: p.amount,
-            date: p.date,
-            source: _toSource(_kindOf(p)),
-            sourceId: p.sourceId,
-            note: p.note,
-          )),
+      list.map(
+        (p) => (
+          cardName: p.cardName,
+          amount: p.amount,
+          date: p.date,
+          source: _toSource(_kindOf(p)),
+          sourceId: p.sourceId,
+          note: p.note,
+        ),
+      ),
       since: since,
     );
     // 💡 「振込入金のお知らせ」も取得。金額はメールに無いので、
@@ -115,7 +126,11 @@ Future<GmailSyncResult> _syncGmail(AppState appState, {bool full = false}) async
       // 入金通知の取得に失敗しても、カードの取り込み結果は返す
     }
     appState.markGmailSynced();
-    return GmailSyncResult(added: r.added, removed: r.removed, fetched: list.length);
+    return GmailSyncResult(
+      added: r.added,
+      removed: r.removed,
+      fetched: list.length,
+    );
   } catch (e) {
     return GmailSyncResult(error: e.toString());
   }

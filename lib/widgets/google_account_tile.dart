@@ -12,12 +12,14 @@ Future<bool> ensureGoogleConnected(BuildContext context) async {
   // 「連携したことがある」ではなく「いま叩けるか」で判定する
   if (await GmailService.instance.isUsable) return true;
   final ok = await GmailService.instance.requestGmailAccess();
-  if (!ok && context.mounted) {
+  if (!ok && !GmailService.instance.isRedirecting && context.mounted) {
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
-      ..showSnackBar(const SnackBar(
-        content: Text('Googleとの連携が必要です。ポップアップがブロックされていないか確認してください。'),
-      ));
+      ..showSnackBar(
+        const SnackBar(
+          content: Text('Googleとの連携が必要です。ポップアップがブロックされていないか確認してください。'),
+        ),
+      );
   }
   return ok;
 }
@@ -66,8 +68,12 @@ class _GoogleAccountTileState extends State<GoogleAccountTile> {
     // 💡 連携できたら、ドライブに自分のデータが置いてないか見に行く。
     //   （同期OFFのままだと勝手には上げない＝降ろす方向だけ聞く）
     final appState = context.read<AppState>();
-    await runDriveSync(context, appState,
-        silent: true, pullOnly: !appState.driveSyncEnabled);
+    await runDriveSync(
+      context,
+      appState,
+      silent: true,
+      pullOnly: !appState.driveSyncEnabled,
+    );
   }
 
   Future<void> _disconnect(AppState appState) async {
@@ -76,15 +82,18 @@ class _GoogleAccountTileState extends State<GoogleAccountTile> {
       builder: (_) => AlertDialog(
         title: const Text('Google連携を解除'),
         content: const Text(
-            'メールの取り込みとドライブ同期が止まります。\n'
-            'この端末に入っているデータは消えません。'),
+          'メールの取り込みとドライブ同期が止まります。\n'
+          'この端末に入っているデータは消えません。',
+        ),
         actions: [
           TextButton(
-              onPressed: () => Navigator.pop(context, false),
-              child: const Text('キャンセル')),
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('キャンセル'),
+          ),
           ElevatedButton(
-              onPressed: () => Navigator.pop(context, true),
-              child: const Text('解除する')),
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('解除する'),
+          ),
         ],
       ),
     );
@@ -114,14 +123,17 @@ class _GoogleAccountTileState extends State<GoogleAccountTile> {
         _connected
             ? '連携中${_email == null ? '' : '：$_email'}\nメール取り込みとドライブ同期に使います'
             : (_known
-                ? '${_email ?? ''}\n有効期限が切れています。「連携し直す」を押してください'
-                : '未連携。メール取り込みとドライブ同期に必要です'),
+                  ? '${_email ?? ''}\n有効期限が切れています。「連携し直す」を押してください'
+                  : '未連携。メール取り込みとドライブ同期に必要です'),
         style: const TextStyle(fontSize: 12),
       ),
       isThreeLine: _connected || _known,
       trailing: _busy
           ? const SizedBox(
-              width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
+              width: 18,
+              height: 18,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            )
           : Row(
               mainAxisSize: MainAxisSize.min,
               children: [
@@ -132,7 +144,10 @@ class _GoogleAccountTileState extends State<GoogleAccountTile> {
                 if (_connected || _known)
                   TextButton(
                     onPressed: () => _disconnect(appState),
-                    child: const Text('解除', style: TextStyle(color: Colors.grey)),
+                    child: const Text(
+                      '解除',
+                      style: TextStyle(color: Colors.grey),
+                    ),
                   ),
               ],
             ),

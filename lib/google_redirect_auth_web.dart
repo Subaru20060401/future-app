@@ -20,7 +20,9 @@ bool get isPopupUnfriendly {
 
 // index.html の meta タグに入れてあるクライアントIDを読む（二重管理しない）
 String? get webClientId {
-  final meta = web.document.querySelector('meta[name="google-signin-client_id"]');
+  final meta = web.document.querySelector(
+    'meta[name="google-signin-client_id"]',
+  );
   final id = (meta as web.HTMLMetaElement?)?.content;
   return (id == null || id.isEmpty) ? null : id;
 }
@@ -37,12 +39,21 @@ String? get redirectUri {
   }
   // 念のためクエリとフラグメントを落とす
   final u = Uri.parse(base);
-  return Uri(scheme: u.scheme, host: u.host, port: u.hasPort ? u.port : null, path: u.path)
-      .toString();
+  return Uri(
+    scheme: u.scheme,
+    host: u.host,
+    port: u.hasPort ? u.port : null,
+    path: u.path,
+  ).toString();
 }
 
-void startGoogleRedirect(String clientId, String redirect, List<String> scopes,
-    {bool silent = false, String? loginHint}) {
+void startGoogleRedirect(
+  String clientId,
+  String redirect,
+  List<String> scopes, {
+  bool silent = false,
+  String? loginHint,
+}) {
   final url = Uri.https('accounts.google.com', '/o/oauth2/v2/auth', {
     'client_id': clientId,
     'redirect_uri': redirect,
@@ -55,7 +66,7 @@ void startGoogleRedirect(String clientId, String redirect, List<String> scopes,
     //     #error=interaction_required（login_required / consent_required）で戻ってくる。
     if (silent) 'prompt': 'none',
     // 💡 どのアカウントで取り直すかを伝える（複数ログインしていると選択画面で止まるため）
-    if (silent && loginHint != null && loginHint.isNotEmpty) 'login_hint': loginHint,
+    if (loginHint != null && loginHint.isNotEmpty) 'login_hint': loginHint,
   });
   web.window.location.href = url.toString();
 }
@@ -81,8 +92,10 @@ int? get silentAuthTriedAtMs {
 
 void markSilentAuthTried() {
   try {
-    web.window.sessionStorage
-        .setItem(_kSilentTried, '${DateTime.now().millisecondsSinceEpoch}');
+    web.window.sessionStorage.setItem(
+      _kSilentTried,
+      '${DateTime.now().millisecondsSinceEpoch}',
+    );
   } catch (_) {}
 }
 
@@ -96,7 +109,9 @@ void clearSilentAuthTried() {
 ({String token, DateTime expiry})? consumeRedirectResult() {
   final hash = web.window.location.hash;
   if (!hash.contains('access_token=')) return null;
-  final params = Uri.splitQueryString(hash.startsWith('#') ? hash.substring(1) : hash);
+  final params = Uri.splitQueryString(
+    hash.startsWith('#') ? hash.substring(1) : hash,
+  );
   final token = params['access_token'];
   if (token == null || token.isEmpty) return null;
   final seconds = int.tryParse(params['expires_in'] ?? '') ?? 3600;
@@ -105,7 +120,10 @@ void clearSilentAuthTried() {
   // アドレスバーからトークンを消す
   final loc = web.window.location;
   web.window.history.replaceState(
-      null, '', '${loc.origin}${loc.pathname}${loc.search}');
+    null,
+    '',
+    '${loc.origin}${loc.pathname}${loc.search}',
+  );
   // 💡 取り直せたので、次に切れたときはまた静かに試してよい
   clearSilentAuthTried();
   return (token: token, expiry: expiry);
@@ -117,12 +135,16 @@ void clearSilentAuthTried() {
 String? consumeRedirectError() {
   final hash = web.window.location.hash;
   if (!hash.contains('error=')) return null;
-  final params =
-      Uri.splitQueryString(hash.startsWith('#') ? hash.substring(1) : hash);
+  final params = Uri.splitQueryString(
+    hash.startsWith('#') ? hash.substring(1) : hash,
+  );
   final err = params['error'];
   if (err == null || err.isEmpty) return null;
   final loc = web.window.location;
   web.window.history.replaceState(
-      null, '', '${loc.origin}${loc.pathname}${loc.search}');
+    null,
+    '',
+    '${loc.origin}${loc.pathname}${loc.search}',
+  );
   return err;
 }

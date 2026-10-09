@@ -182,14 +182,14 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
       //   両方変わっていたらダイアログで選ばせる＝勝手に消さない。
       if (appState.driveSyncEnabled) {
         await runDriveSync(context, appState, silent: true);
-        if (!mounted) return;
+        if (!mounted || GmailService.instance.isRedirecting) return;
       }
       _startDriveAutoPush(appState);
       // 前回までに溜まっている入金通知・引き落としがあれば先に聞く
       await _askPendingDeposits(appState);
       await _askPendingDraws(appState);
       final result = await syncGmail(appState);
-      if (!mounted || result.notSignedIn) return;
+      if (!mounted || result.notSignedIn || result.restoringAuth) return;
       if (result.skipped) {
         // 取りこぼしで反映を見送ったときは、気づけるように知らせる
         ScaffoldMessenger.of(context).showSnackBar(
