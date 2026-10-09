@@ -115,4 +115,86 @@ void main() {
       expect(restored.closingDayOf('楽天カード'), 15);
     });
   });
+
+  // ⚠️ 締め期間で集計するのは利用明細だけ。分割払い・カード払いのローン・頭金は
+  //   月ごとに積まれるので、別で足さないと予想から丸ごと消える。
+  //   （注記には「うち分割払い」と出るのに合計に入っていない、という形で出た）
+  group('締め日を設定したカードに乗っているもの', () {
+    Installment monthly(String card, int amount) => Installment(
+          id: 'i_$card',
+          name: 'PC',
+          cardName: card,
+          totalAmount: amount * 12,
+          installmentCount: 12,
+          remainingMonths: 12,
+          monthlyAmount: amount,
+          interestRate: 15.0,
+          startDate: DateTime(2026, 9, 1),
+        );
+
+    int drawOf(AppState app, String card, DateTime payMonth) => app
+        .drawBreakdownOf(payMonth)
+        .where((e) => e.label == card)
+        .fold(0, (s, e) => s + e.amount);
+
+    test('分割払いも請求に合算される（月末締めと同じ額になる）', () {
+      // 15日締め・翌月10日払い: 9/16〜10/15 の利用が11月の引き落とし
+      final app = AppState()
+        ..setCardPaymentDay('三菱UFJカード', 10)
+        ..setCardClosingDay('三菱UFJカード', 15);
+      app.payments.add(usage('三菱UFJカード', 20000, DateTime(2026, 9, 20)));
+      app.installments.add(monthly('三菱UFJカード', 10000));
+      expect(drawOf(app, '三菱UFJカード', DateTime(2026, 11)), 30000);
+
+      // 月末締めのカードと同じ扱いであること
+      final other = AppState()..setCardPaymentDay('楽天カード', 27);
+      other.payments.add(usage('楽天カード', 20000, DateTime(2026, 10, 20)));
+      other.installments.add(monthly('楽天カード', 10000));
+      expect(drawOf(other, '楽天カード', DateTime(2026, 11)), 30000);
+    });
+
+    test('カード払いのローンも合算される', () {
+      final app = AppState()
+        ..setCardPaymentDay('三菱UFJカード', 10)
+        ..setCardClosingDay('三菱UFJカード', 15);
+      app.loans.add(Loan(
+        id: 'l1',
+        name: '車',
+        principal: 240000,
+        interestRate: 0,
+        totalCount: 24,
+        startMonth: DateTime(2026, 9),
+        payDay: 10,
+        method: '三菱UFJカード', // カードの請求に含める
+      ));
+      expect(drawOf(app, '三菱UFJカード', DateTime(2026, 11)), 10000);
+    });
+
+    test('銀行の引落確定がある月は足さない（確定額が正本）', () {
+      final app = AppState()
+        ..setCardPaymentDay('三菱UFJカード', 10)
+        ..setCardClosingDay('三菱UFJカード', 15);
+      app.installments.add(monthly('三菱UFJカード', 10000));
+      app.payments.add(Payment(
+        id: 'b1',
+        cardName: '三菱UFJカード',
+        amount: 25000,
+        paymentDate: DateTime(2026, 11, 10), // 11月の引落確定
+        source: PaymentSource.bank,
+      ));
+      // 確定の25000だけ。分割の10000を足して35000にしない
+      expect(drawOf(app, '三菱UFJカード', DateTime(2026, 11)), 25000);
+    });
+
+    test('注記の「うち分割払い」と合計が食い違わない', () {
+      final app = AppState()
+        ..setCardPaymentDay('三菱UFJカード', 10)
+        ..setCardClosingDay('三菱UFJカード', 15);
+      app.installments.add(monthly('三菱UFJカード', 10000));
+      final payMonth = DateTime(2026, 11);
+      // 注記に出る額は、合計の中に含まれていること
+      expect(app.installmentPartOfDraw(payMonth), 10000);
+      expect(app.drawnInMonth(payMonth), greaterThanOrEqualTo(10000));
+    });
+  });
 }

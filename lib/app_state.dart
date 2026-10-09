@@ -2962,6 +2962,17 @@ class AppState extends ChangeNotifier {
 
   // 💡 その月にカードへ合算した分割払いの合計（「※うち分割払い」の参考表示用）。
   //   銀行確定済みの月は確定額に既に含まれているので0。
+  // 💡 そのカードの請求に合算されるぶん（分割払い・カード払いのローン・頭金）。
+  //   月末締めのカードは expenseBreakdownOf の中で足されているので、
+  //   こちらは締め期間で集計するカード（締め日が月末以外）のために使う。
+  // ⚠️ 銀行の引落確定が来ている月は確定額が正本。足すと二重計上になる。
+  int cardFoldedExtrasOf(String cardName, DateTime useMonth) {
+    if (isExpenseConfirmedByBank(useMonth)) return 0;
+    return (installmentTotalByCardOf(useMonth)[cardName] ?? 0) +
+        (loanTotalByCardOf(useMonth)[cardName] ?? 0) +
+        (downPaymentByCardOf(useMonth)[cardName] ?? 0);
+  }
+
   int installmentFoldedInto(DateTime month) {
     if (isExpenseConfirmedByBank(month)) return 0;
     return installmentTotalByCardOf(month).values.fold(0, (s, v) => s + v);
@@ -3628,7 +3639,11 @@ class AppState extends ChangeNotifier {
       if (isMonthEndClosing(card) || _excludedFromDraw(card)) continue;
       byPeriod.add(card);
       if (!afterEdit(card)) continue;
-      final amount = cardUsageInClosingPeriod(card, payMonth);
+      // ⚠️ 締め期間で集計するのは「利用明細」だけ。分割払い・カード払いのローン・
+      //   頭金は月ごとに積まれるので、ここで足さないと丸ごと消える
+      //   （注記には「うち分割払い」と出るのに合計に入っていない状態になる）。
+      final amount = cardUsageInClosingPeriod(card, payMonth) +
+          cardFoldedExtrasOf(card, useMonth);
       if (amount <= 0) continue;
       out.add((label: card, amount: amount, colorValue: cardColorOf(card).toARGB32()));
     }
