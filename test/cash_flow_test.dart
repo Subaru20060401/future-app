@@ -124,6 +124,24 @@ void main() {
       expect(days.single.balance, -50000);
     });
 
+    test('入金だけの日は「足りない日」に出さない（引き落としが無いのに引き落としと出ていた）', () {
+      final app = build();
+      app.currentBalance = 0;
+      app.payments.add(usage('三菱カード', 90000, DateTime(now.year, now.month, 5)));
+      app.plannedIncomes.add(PlannedIncome(
+        id: 'salary',
+        title: 'バイト代',
+        amount: 10000,
+        date: DateTime(now.year, now.month, 25),
+        monthly: true,
+      ));
+      // 来月10日に −80000。その後の25日は入金で −70000 に戻るだけ（引き落としは無い）
+      final days = app.shortfallDaysAhead();
+      expect(days, hasLength(1));
+      expect(days.single.date, app.cardDrawDateOf('三菱カード', nextMonth));
+      expect(days.single.labels, ['三菱カード']);
+    });
+
     test('同じ日に複数の引き落としがあれば両方の名前を出す', () {
       final app = build();
       app.currentBalance = 0;

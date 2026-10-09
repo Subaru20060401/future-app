@@ -3650,19 +3650,33 @@ class AppState extends ChangeNotifier {
     return 27; // 分割など、日付が無いものは月末寄りの27日とみなす
   }
 
+  // 💡 n月にその項目が口座から引き落とされる日。
+  //   銀行の引落確定が来ていれば、そこに載っている実際の日付を使う。
+  //   無ければ設定した引き落とし日（土日祝なら翌営業日）。
+  // ⚠️ 反映済みかどうか（残高の基準日より前か）の判定はこの日付で行う。
+  //   設定日で判定すると、実際の日付とズレたとき「残高から引いたのに予想でも
+  //   また引く」二重計上や、逆に「まだ落ちていないのに予想から消える」が起きる。
+  DateTime drawDateOf(String label, DateTime payMonth) {
+    DateTime? bankDate;
+    for (final p in payments) {
+      if (p.source != PaymentSource.bank || p.cardName != label) continue;
+      if (p.paymentDate.year != payMonth.year || p.paymentDate.month != payMonth.month) continue;
+      final d = DateTime(p.paymentDate.year, p.paymentDate.month, p.paymentDate.day);
+      if (bankDate == null || d.isAfter(bankDate)) bankDate = d;
+    }
+    if (bankDate != null) return bankDate;
+    final lastDay = DateTime(payMonth.year, payMonth.month + 1, 0).day;
+    final day = _drawDayOf(label).clamp(1, lastDay);
+    return nextBusinessDay(DateTime(payMonth.year, payMonth.month, day));
+  }
+
   // n月に口座から引き落とされる支出の内訳。＝ n-1月の「月ごとの支出詳細」から
   //   デビット/Vポイント/ATMを除き、編集日より後の引き落としだけを残す。
   List<({String label, int amount, int colorValue})> drawBreakdownOf(DateTime payMonth) {
     final useMonth = DateTime(payMonth.year, payMonth.month - 1);
-    final lastDay = DateTime(payMonth.year, payMonth.month + 1, 0).day;
 
     // 二重計上ゲート（引き落とし日が残高の編集日より後か）
-    bool afterEdit(String label) {
-      final day = _drawDayOf(label).clamp(1, lastDay);
-      // 土日祝なら翌営業日にずれる
-      return _forecastInclude(
-          nextBusinessDay(DateTime(payMonth.year, payMonth.month, day)));
-    }
+    bool afterEdit(String label) => _forecastInclude(drawDateOf(label, payMonth));
 
     final out = <({String label, int amount, int colorValue})>[];
 
@@ -3780,9 +3794,8 @@ class AppState extends ChangeNotifier {
 
       // ── 引き落とし（drawBreakdownOf がゲート済み。日付だけ付け直す） ──
       for (final e in drawBreakdownOf(m)) {
-        final day = _drawDayOf(e.label).clamp(1, lastDay);
         out.add(CashEvent(
-          date: nextBusinessDay(DateTime(m.year, m.month, day)),
+          date: drawDateOf(e.label, m), // 判定と同じ日付に置く
           label: e.label,
           amount: -e.amount,
         ));
@@ -3846,7 +3859,9 @@ class AppState extends ChangeNotifier {
         i++;
       }
       if (date.isBefore(today)) continue; // 今の残高に織り込み済み
-      if (running < 0) {
+      // ⚠️ 引き落としがある日だけ。入金だけの日（給料日など）はマイナスのままでも
+      //   「引き落としに足りない日」ではない（以前は「引き落とし」と出ていた）。
+      if (running < 0 && draws.isNotEmpty) {
         out.add((date: date, balance: running, labels: draws));
       }
     }

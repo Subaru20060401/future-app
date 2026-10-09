@@ -186,6 +186,37 @@ void main() {
       expect(drawOf(app, '三菱UFJカード', DateTime(2026, 11)), 25000);
     });
 
+    // ⚠️ 反映済みかどうか（残高の基準日より前か）は、銀行の確定に載っている
+    //   実際の引き落とし日で決める。設定した日（土日祝ずらし込み）で決めると、
+    //   日付がズレたときに「残高から引いたのに予想でもまた引く」二重計上になる。
+    test('銀行確定の実際の日付が基準日より前なら、予想ではもう引かない', () {
+      final app = AppState()..setCardPaymentDay('三菱UFJカード', 10);
+      // 11月の引き落としは 11/6 に実際に落ちた（設定の10日より前）
+      app.payments.add(Payment(
+        id: 'b1',
+        cardName: '三菱UFJカード',
+        amount: 32000,
+        paymentDate: DateTime(2026, 11, 6),
+        source: PaymentSource.bank,
+      ));
+      app.balanceUpdatedAt = DateTime(2026, 11, 8); // 11/8 に残高へ反映済み
+      expect(drawOf(app, '三菱UFJカード', DateTime(2026, 11)), 0,
+          reason: '11/6に落ちたものは11/8の残高に入っている');
+    });
+
+    test('銀行確定の実際の日付が基準日より後なら、予想で引く', () {
+      final app = AppState()..setCardPaymentDay('三菱UFJカード', 10);
+      app.payments.add(Payment(
+        id: 'b1',
+        cardName: '三菱UFJカード',
+        amount: 32000,
+        paymentDate: DateTime(2026, 11, 12), // 設定の10日より後に落ちる
+        source: PaymentSource.bank,
+      ));
+      app.balanceUpdatedAt = DateTime(2026, 11, 11);
+      expect(drawOf(app, '三菱UFJカード', DateTime(2026, 11)), 32000);
+    });
+
     test('注記の「うち分割払い」と合計が食い違わない', () {
       final app = AppState()
         ..setCardPaymentDay('三菱UFJカード', 10)
