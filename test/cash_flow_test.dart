@@ -90,13 +90,17 @@ void main() {
     }
 
     test('月末の予想では見えない谷を見つける', () {
+      // 💡 谷が今の残高より下になる組み合わせにする（引き落としが給料より大きい）。
+      //   今日が25日の前でも後でも同じ答えになる。
       final app = dipCase();
+      app.currentBalance = 100000;
+      app.payments.add(usage('三菱カード', 60000, DateTime(now.year, now.month, 7)));
       final low = app.lowestBalanceAhead()!;
-      // 50000 ＋今月25日の10万 −来月10日の9万 ＝ 60000
-      expect(low.balance, 60000);
+      // 10万 ＋今月25日の10万 −来月10日の15万 ＝ 50000
+      expect(low.balance, 50000);
       expect(low.date, app.cardDrawDateOf('三菱カード', nextMonth));
-      // 月末だけ見ていると 16万あるように見えてしまう
-      expect(app.nextMonthBalance, 160000);
+      // 月末だけ見ていると 15万あるように見えてしまう
+      expect(app.nextMonthBalance, 150000);
       expect(low.balance, lessThan(app.nextMonthBalance));
     });
 
@@ -111,6 +115,19 @@ void main() {
       expect(low.date, app.cardDrawDateOf('三菱カード', nextMonth));
       // 来月末まで待てば戻るので、月末だけ見ていると気づけない
       expect(app.nextMonthBalance, greaterThan(0));
+    });
+
+    test('入金しか無いときは、今の残高が最低（入金後の額を最低と出さない）', () {
+      final app = build(); // 残高5万、カードの利用なし
+      app.plannedIncomes.add(PlannedIncome(
+        id: 'salary',
+        title: 'バイト代',
+        amount: 7000,
+        date: DateTime(now.year, now.month + 1, 25),
+      ));
+      final low = app.lowestBalanceAhead()!;
+      expect(low.balance, 50000, reason: '来月25日までは5万のまま。入金後の5.7万は最低ではない');
+      expect(low.date, DateTime(now.year, now.month, now.day));
     });
 
     test('足りない日は、日付とカード名つきで全部出す', () {
@@ -159,7 +176,8 @@ void main() {
     test('足りる場合は警告を出さない', () {
       final app = dipCase(); // 残高5万＋給料10万 −9万 ＝ 6万で足りる
       expect(app.shortfallDaysAhead(), isEmpty);
-      expect(app.lowestBalanceAhead()!.balance, 60000);
+      // 最低は「今の5万」か「10日の6万」（今日が25日の前か後かで変わる）。どちらでも足りる
+      expect(app.lowestBalanceAhead()!.balance, greaterThan(0));
     });
 
     test('同じ日に入金があるぶんは相殺して見る（一瞬のヘコみで騒がない）', () {

@@ -3930,23 +3930,29 @@ class AppState extends ChangeNotifier {
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
     final events = cashEventsAhead(monthsAhead: monthsAhead);
+    if (events.isEmpty) return null; // 何も動かないなら出すものが無い
     var running = effectiveBalance + effectiveWalletCash;
-    DateTime? lowDate;
-    int? low;
     var i = 0;
+    // 今日より前の日付のもの（基準日より後で、まだ反映していないもの）は今の残高に織り込む
+    while (i < events.length && events[i].date.isBefore(today)) {
+      running += events[i].amount;
+      i++;
+    }
+    // ⚠️ 今この時点の残高も候補にする。入金が先に来るとき、入金後の額を
+    //   「最低残高」と出してしまっていた（実際はそれまでの今の残高の方が低い）。
+    var low = running;
+    var lowDate = today;
     while (i < events.length) {
       final date = events[i].date;
       while (i < events.length && events[i].date == date) {
         running += events[i].amount;
         i++;
       }
-      if (date.isBefore(today)) continue; // 今の残高に織り込むだけ
-      if (low == null || running < low) {
+      if (running < low) {
         low = running;
         lowDate = date;
       }
     }
-    if (low == null || lowDate == null) return null;
     return (date: lowDate, balance: low);
   }
 
