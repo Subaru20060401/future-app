@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
 import '../app_state.dart';
+import 'add_entry_sheets.dart';
 import 'app_sheet.dart';
 import 'deposit_dialog.dart';
 import 'planned_income_sheet.dart';
@@ -214,6 +215,39 @@ class UpcomingScheduleCard extends StatelessWidget {
             if (items.length > 5)
               Text('ほか${items.length - 5}件（カレンダーで確認）',
                   style: const TextStyle(fontSize: 12, color: Colors.black54)),
+            const SizedBox(height: 8),
+            // 💡 カレンダーと同じ追加画面を開く。
+            //   シフトの入力画面には日付の欄が無い（カレンダーで選んだ日に入る作り）ので、
+            //   先に日付を選んでもらう。予定の画面は中で日付を変えられるので今日で開く。
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: () async {
+                      final day = await showDatePicker(
+                        context: context,
+                        initialDate: today,
+                        firstDate: today.subtract(const Duration(days: 365)),
+                        lastDate: today.add(const Duration(days: 365)),
+                        helpText: 'シフトの日付',
+                      );
+                      if (day == null || !context.mounted) return;
+                      showAddShiftSheet(context, appState, day);
+                    },
+                    icon: const Icon(Icons.work_outline, size: 18),
+                    label: const FittedBox(child: Text('シフト追加')), // 狭い幅で2行に折れないように
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: () => openAddEvent(context, appState, today),
+                    icon: const Icon(Icons.event, size: 18),
+                    label: const FittedBox(child: Text('予定追加')),
+                  ),
+                ),
+              ],
+            ),
           ],
         ),
       ),
