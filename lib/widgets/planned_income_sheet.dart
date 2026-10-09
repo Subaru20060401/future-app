@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import '../app_state.dart';
 import 'app_sheet.dart';
+import 'deposit_dialog.dart';
 
 // 💡 予定入金（仕送り・返金・臨時収入など）の管理シート。
 //   給料はシフトから自動計算するので、それ以外の入ってくるお金をここに登録する。
@@ -65,7 +66,9 @@ Future<void> showPlannedIncomeSheet(BuildContext context, AppState appState) asy
                             TextButton(
                               style: TextButton.styleFrom(
                                   visualDensity: VisualDensity.compact),
-                              onPressed: () {
+                              onPressed: () async {
+                                // ⚠️ 受け取りも残高の基準日を進める。未処理の引き落としを先に
+                                if (!await confirmDrawsBeforeDeposit(ctx, appState)) return;
                                 appState.receivePlannedIncome(
                                     e.income.id, e.income.amount, e.date);
                                 setLocal(() {});

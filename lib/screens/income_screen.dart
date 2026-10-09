@@ -7,6 +7,7 @@ import '../widgets/gmail_refresh_button.dart';
 import '../widgets/deposit_dialog.dart';
 import '../widgets/planned_expense_sheet.dart';
 import '../widgets/planned_income_sheet.dart';
+import '../widgets/home_cards.dart';
 import 'history_screen.dart';
 import 'balance_history_screen.dart';
 import 'breakdown_screen.dart';
@@ -231,9 +232,14 @@ class IncomeScreen extends StatelessWidget {
               children: [
                 Icon(Icons.flag, color: color, size: 20),
                 const SizedBox(width: 6),
-                Text('扶養・社保の壁（$year年）',
-                    style: const TextStyle(fontWeight: FontWeight.bold)),
-                const Spacer(),
+                // 💡 スマホ幅（375px前後）で右の金額とぶつかってはみ出していたので、
+                //   見出しの方を縮める（金額は削らない）
+                Expanded(
+                  child: Text('扶養・社保の壁（$year年）',
+                      style: const TextStyle(fontWeight: FontWeight.bold),
+                      overflow: TextOverflow.ellipsis),
+                ),
+                const SizedBox(width: 6),
                 Column(
                   crossAxisAlignment: CrossAxisAlignment.end,
                   children: [
@@ -424,6 +430,33 @@ class IncomeScreen extends StatelessWidget {
                         color: total < 0 ? Colors.red : Colors.pink)),
               ],
             ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // 来月末・翌々月末の小さい表示（今月末より目立たせない）。タップで詳細。
+  Widget _smallMonthTile(BuildContext context, AppState appState,
+      {required String label, required int value, required int which}) {
+    return InkWell(
+      borderRadius: BorderRadius.circular(12),
+      onTap: () => _showBalanceDetail(context, appState, which: which),
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 10),
+        decoration: BoxDecoration(
+          color: Colors.white.withValues(alpha: 0.6),
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Column(
+          children: [
+            Text('$labelの予想', style: const TextStyle(fontSize: 12, color: Colors.black54)),
+            const SizedBox(height: 2),
+            Text('¥ $value',
+                style: TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                    color: value < 0 ? Colors.red : Colors.pink[300])),
           ],
         ),
       ),
@@ -680,8 +713,18 @@ class IncomeScreen extends StatelessWidget {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('未来の口座残高'),
+        title: const Text('ホーム'),
         actions: [
+          // 💡 確認待ちの件数。開いても件数は減らない（反映・スキップで解消する）
+          IconButton(
+            tooltip: '確認待ち',
+            onPressed: () => showAllNotices(context, appState),
+            icon: Badge(
+              isLabelVisible: appState.homeNotices.isNotEmpty,
+              label: Text('${appState.homeNotices.length}'),
+              child: const Icon(Icons.notifications_none),
+            ),
+          ),
           IconButton(
             tooltip: '収入・支出の推移',
             icon: const Icon(Icons.show_chart),
@@ -715,7 +758,38 @@ class IncomeScreen extends StatelessWidget {
               ),
               child: Column(
                 children: [
-                  // 今月末（◯月末）タップで詳細
+                  // 💡 現在の残高（デビット反映後の実効残高）。タップで手入力し直せる。
+                  //   未反映の引き落としがあるときは、まだ残高に入っていないことを添える。
+                  InkWell(
+                    borderRadius: BorderRadius.circular(12),
+                    onTap: () => _showEditDialog(
+                        context, '現在の残高', appState.currentBalance, appState.updateBalance),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 2, horizontal: 4),
+                      child: Row(
+                        children: [
+                          const Icon(Icons.account_balance_wallet, size: 18, color: Colors.black54),
+                          const SizedBox(width: 6),
+                          const Text('現在の残高',
+                              style: TextStyle(fontSize: 14, color: Colors.black54)),
+                          const Spacer(),
+                          Column(
+                            crossAxisAlignment: CrossAxisAlignment.end,
+                            children: [
+                              Text('¥ ${appState.effectiveBalance}',
+                                  style: const TextStyle(
+                                      fontSize: 20, fontWeight: FontWeight.bold)),
+                              if (appState.pendingDraws.isNotEmpty)
+                                Text('未反映の引き落とし ${appState.pendingDraws.length}件',
+                                    style: TextStyle(fontSize: 11, color: Colors.red[700])),
+                            ],
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const Divider(height: 20),
+                  // 今月末（◯月末）＝いちばん大きく。タップで詳細
                   InkWell(
                     borderRadius: BorderRadius.circular(12),
                     onTap: () => _showBalanceDetail(context, appState, which: 0),
@@ -724,67 +798,36 @@ class IncomeScreen extends StatelessWidget {
                       child: Column(
                         children: [
                           Text('$thisMonthNum月末の予想残高',
-                              style: const TextStyle(fontSize: 14, color: Colors.black54)),
+                              style: const TextStyle(fontSize: 15, color: Colors.black54)),
                           const SizedBox(height: 4),
                           Text('¥ $thisMonth',
                               style: TextStyle(
-                                  fontSize: 28,
+                                  fontSize: 38,
                                   fontWeight: FontWeight.bold,
-                                  color: thisMonth < 0 ? Colors.red : Colors.pink[400])),
+                                  color: thisMonth < 0 ? Colors.red : Colors.pink)),
                           const SizedBox(height: 2),
                           const Text('タップで詳細', style: TextStyle(fontSize: 11, color: Colors.black38)),
                         ],
                       ),
                     ),
                   ),
-                  const Divider(height: 24),
-                  // 来月末（◯月末）タップで詳細
-                  InkWell(
-                    borderRadius: BorderRadius.circular(12),
-                    onTap: () => _showBalanceDetail(context, appState, which: 1),
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 4),
-                      child: Column(
-                        children: [
-                          Text('$nextMonthNum月末の予想残高',
-                              style: const TextStyle(fontSize: 16, color: Colors.grey)),
-                          const SizedBox(height: 6),
-                          Text('¥ $futureBalance',
-                              style: TextStyle(
-                                  fontSize: appState.showMonthAfterNext ? 34 : 40,
-                                  fontWeight: FontWeight.bold,
-                                  color: futureBalance < 0 ? Colors.red : Colors.pink)),
-                          const SizedBox(height: 2),
-                          const Text('タップで詳細', style: TextStyle(fontSize: 11, color: Colors.black38)),
-                        ],
+                  const SizedBox(height: 10),
+                  // 来月末・翌々月末は小さく横に並べる（翌々月末は表示ON時のみ）
+                  Row(
+                    children: [
+                      Expanded(
+                        child: _smallMonthTile(context, appState,
+                            label: '$nextMonthNum月末', value: futureBalance, which: 1),
                       ),
-                    ),
-                  ),
-                  // 翌々月末（#2 表示ON時のみ）
-                  if (appState.showMonthAfterNext) ...[
-                    const Divider(height: 24),
-                    InkWell(
-                      borderRadius: BorderRadius.circular(12),
-                      onTap: () => _showBalanceDetail(context, appState, which: 2),
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(vertical: 4),
-                        child: Column(
-                          children: [
-                            Text('$monthAfterNextNum月末の予想残高',
-                                style: const TextStyle(fontSize: 14, color: Colors.grey)),
-                            const SizedBox(height: 4),
-                            Text('¥ $monthAfterNext',
-                                style: TextStyle(
-                                    fontSize: 26,
-                                    fontWeight: FontWeight.bold,
-                                    color: monthAfterNext < 0 ? Colors.red : Colors.pink[300])),
-                            const SizedBox(height: 2),
-                            const Text('タップで詳細', style: TextStyle(fontSize: 11, color: Colors.black38)),
-                          ],
+                      if (appState.showMonthAfterNext) ...[
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: _smallMonthTile(context, appState,
+                              label: '$monthAfterNextNum月末', value: monthAfterNext, which: 2),
                         ),
-                      ),
-                    ),
-                  ],
+                      ],
+                    ],
+                  ),
                   // 💡 月末と月末のあいだの谷。
                   //   10日引き落としのカードのように月末をまたいで落ちるものがあると、
                   //   月末の予想は足りていても、次の給料日までに底を打つことがある。
@@ -799,6 +842,13 @@ class IncomeScreen extends StatelessWidget {
             //   （どれを遅らせるか・いつ入金するかを決められるように）。
             if (appState.shortfallDaysAhead().isNotEmpty)
               _shortfallCard(appState),
+
+            // 💡 確認待ち（入出金の反映待ちなど）。起動時に順番に聞くのをやめ、ここに集める。
+            HomeNoticesCard(appState: appState),
+
+            // 今日・直近の予定
+            UpcomingScheduleCard(appState: appState),
+            const SizedBox(height: 8),
 
             // 扶養・社保の「壁」アラート
             if (appState.salaryOfYear(DateTime.now().year) > 0) _fuyouWallCard(appState),

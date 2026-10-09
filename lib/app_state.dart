@@ -1111,6 +1111,39 @@ abstract class CalendarSyncHook {
 }
 
 // ════════════════════════ AppState ════════════════════════
+// 💡 ホームの「確認待ち」に並べる1件。
+//   保存はしない。開くたびに未処理の入出金などから組み立てる
+//   （金額や状態を二重に持つと、元のデータと食い違うため）。
+enum HomeNoticeKind {
+  draw, // 引き落としの反映待ち
+  deposit, // 入金の反映待ち（メールに金額が無いので入力が要る）
+  plannedIncome, // 予定入金の受け取り確認
+  installmentWithoutCard, // カード未設定の分割払い（予想から漏れる可能性）
+}
+
+class HomeNotice {
+  final HomeNoticeKind kind;
+  final String title;
+  final String detail;
+  final DateTime? date;
+  final int? amount;
+  // 操作に使う元データ（種類に応じてどれか1つ）
+  final ({String id, String label, int amount, DateTime date})? draw;
+  final DepositNotice? deposit;
+  final ({PlannedIncome income, DateTime date})? planned;
+
+  const HomeNotice({
+    required this.kind,
+    required this.title,
+    required this.detail,
+    this.date,
+    this.amount,
+    this.draw,
+    this.deposit,
+    this.planned,
+  });
+}
+
 // 💡 日付つきのお金の動き（予想の谷を見つけるためだけに使う）。
 //   amount は ＋が入金・−が引き落とし。
 class CashEvent {
@@ -2528,6 +2561,84 @@ class AppState extends ChangeNotifier {
     }
 
     out.sort((a, b) => a.date.compareTo(b.date)); // 古い順
+    return out;
+  }
+
+  // 💡 入金などで残高の基準日が進んだら、予想から外れてしまう未処理の引き落とし。
+  // ⚠️ 予想は「基準日より後」の引き落としだけを引く。未処理のまま入金を反映すると
+  //   基準日が今日に進み、日付の過ぎた引き落としが予想からも残高からも抜ける
+  //   （画面は壊れず、予想が実際より多く見えるだけなので気づけない）。
+  //   入金を反映する前に、これを先に確認してもらう。
+  List<({String id, String label, int amount, DateTime date})>
+      get drawsAtRiskOnSnapshotAdvance =>
+          pendingDraws.where((d) => _forecastInclude(d.date)).toList();
+
+  // 💡 ホームの「確認待ち」。重要な順（＝処理すべき順）に並べる。
+  //   引き落としを入金より先に置く（上の drawsAtRiskOnSnapshotAdvance の理由）。
+  List<HomeNotice> get homeNotices {
+    final out = <HomeNotice>[];
+    for (final d in pendingDraws) {
+      out.add(HomeNotice(
+        kind: HomeNoticeKind.draw,
+        title: '引き落としの反映待ち：${d.label}',
+        detail: '${d.date.month}/${d.date.day} に口座から引かれています',
+        date: d.date,
+        amount: d.amount,
+        draw: d,
+      ));
+    }
+    for (final n in [...pendingDeposits]..sort((a, b) => a.date.compareTo(b.date))) {
+      out.add(HomeNotice(
+        kind: HomeNoticeKind.deposit,
+        title: '入金がありました',
+        detail: '${n.date.month}/${n.date.day} の振込入金。金額を入れて反映します',
+        date: n.date,
+        deposit: n,
+      ));
+    }
+    for (final e in duePlannedIncomes) {
+      out.add(HomeNotice(
+        kind: HomeNoticeKind.plannedIncome,
+        title: '予定入金の確認：${e.income.title.isEmpty ? '入金' : e.income.title}',
+        detail: '${e.date.month}/${e.date.day} の予定です。受け取ったか確認してください',
+        date: e.date,
+        amount: e.income.amount,
+        planned: e,
+      ));
+    }
+    final noCard = installmentsWithoutCard.where((i) => remainingMonthsOf(i) > 0);
+    if (noCard.isNotEmpty) {
+      out.add(HomeNotice(
+        kind: HomeNoticeKind.installmentWithoutCard,
+        title: 'カード未設定の分割払いが${noCard.length}件あります',
+        detail: 'どのカードの請求に入るか決めると、予想が正確になります',
+      ));
+    }
+    return out;
+  }
+
+  // 💡 ホームに出す「今日・直近の予定」（シフトと予定をまとめて時刻順）。
+  //   終わったものは出さない。終日の予定はその日の先頭に置く。
+  List<({DateTime start, DateTime? end, String title, bool isShift, bool allDay})>
+      upcomingSchedule({int days = 3, DateTime? from}) {
+    final now = from ?? DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final out = <({DateTime start, DateTime? end, String title, bool isShift, bool allDay})>[];
+    for (var i = 0; i < days; i++) {
+      final day = today.add(Duration(days: i));
+      final key = DateFormat('yyyy-MM-dd').format(day);
+      for (final s in shifts[key] ?? const <ShiftData>[]) {
+        if (s.end.isBefore(now)) continue;
+        out.add((start: s.start, end: s.end, title: s.workplace, isShift: true, allDay: false));
+      }
+      for (final e in events[key] ?? const <EventData>[]) {
+        final start = e.allDay || e.start == null ? day : e.start!;
+        final end = e.end;
+        if (!e.allDay && end != null && end.isBefore(now)) continue;
+        out.add((start: start, end: e.allDay ? null : end, title: e.title, isShift: false, allDay: e.allDay));
+      }
+    }
+    out.sort((a, b) => a.start.compareTo(b.start));
     return out;
   }
 

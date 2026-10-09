@@ -3,6 +3,80 @@ import 'package:intl/intl.dart';
 import '../app_state.dart';
 import 'app_sheet.dart';
 
+// 💡 入金を反映する前に、日付の過ぎた未処理の引き落としを先に確認してもらう。
+// ⚠️ 入金を反映すると残高の基準日が今日に進み、それより前の引き落としは
+//   予想から外れる。未処理のまま進めると、口座からは出ていったのに予想にも
+//   残高にも入らず、予想が実際より多く見える（画面は壊れないので気づけない）。
+//   true＝入金の手続きへ進んでよい。
+Future<bool> confirmDrawsBeforeDeposit(BuildContext context, AppState appState) async {
+  final atRisk = appState.drawsAtRiskOnSnapshotAdvance;
+  if (atRisk.isEmpty) return true;
+  final choice = await showDialog<String>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: const Text('先に引き落としを確認してください'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'まだ残高に反映していない引き落としがあります。'
+            'このまま入金を反映すると、これらは予想残高から外れます。',
+            style: TextStyle(fontSize: 13),
+          ),
+          const SizedBox(height: 10),
+          for (final d in atRisk.take(5))
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 2),
+              child: Row(
+                children: [
+                  Text('${d.date.month}/${d.date.day}  ',
+                      style: const TextStyle(fontSize: 13, color: Colors.black54)),
+                  Expanded(child: Text(d.label, style: const TextStyle(fontSize: 13))),
+                  Text('¥${d.amount}',
+                      style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold)),
+                ],
+              ),
+            ),
+          if (atRisk.length > 5)
+            Text('ほか${atRisk.length - 5}件',
+                style: const TextStyle(fontSize: 12, color: Colors.black54)),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context, 'cancel'),
+          child: const Text('キャンセル'),
+        ),
+        TextButton(
+          onPressed: () => Navigator.pop(context, 'proceed'),
+          child: const Text('このまま入金'),
+        ),
+        ElevatedButton(
+          onPressed: () => Navigator.pop(context, 'draws'),
+          child: const Text('引き落としを先に確認'),
+        ),
+      ],
+    ),
+  );
+  if (!context.mounted) return false;
+  switch (choice) {
+    case 'proceed':
+      return true;
+    case 'draws':
+      // 古い順に1件ずつ聞く。「あとで」で閉じたら、そこで止める（入金にも進まない）
+      for (final d in atRisk) {
+        if (!context.mounted) return false;
+        await showDrawDialog(context, appState, d);
+        final stillPending = appState.pendingDraws.any((p) => p.id == d.id);
+        if (stillPending) return false;
+      }
+      return context.mounted;
+    default:
+      return false;
+  }
+}
+
 // 💡 「振込入金のお知らせ」メールを受けて、金額を入力してもらうポップアップ。
 //   メールに金額が載らないため、ユーザーに入力してもらって口座残高へ加算する。
 //   給料日が一致する勤務先は自動で選ばれ、見込み額が金額欄に入る。
@@ -11,6 +85,8 @@ Future<void> showDepositDialog(
   AppState appState,
   DepositNotice notice,
 ) async {
+  if (!await confirmDrawsBeforeDeposit(context, appState)) return;
+  if (!context.mounted) return;
   // 💡 まだ受け取っていない勤務先だけを選択肢に出す（入金済みは消す）
   final awaiting = appState.workplacesAwaitingSalary(notice.date);
   // 入金日が給料日に近い勤務先（近い順）。未入金のものだけ推奨にする。
@@ -180,6 +256,8 @@ String _workMonthLabel(AppState appState, String wpId, DateTime date) {
 
 // 💡 手入力で口座に入金する（メール通知が無いときや現金入金用）
 Future<void> showManualDepositDialog(BuildContext context, AppState appState) async {
+  if (!await confirmDrawsBeforeDeposit(context, appState)) return;
+  if (!context.mounted) return;
   final amountCtrl = TextEditingController();
   String? selectedWpId;
 
@@ -319,7 +397,8 @@ Future<void> showDrawDialog(
                   const Text('引いた後の残高', style: TextStyle(fontSize: 12)),
                   const Spacer(),
                   Text(
-                    '¥${appState.currentBalance - (int.tryParse(amountCtrl.text) ?? draw.amount)}',
+                    // 💡 引くときはデビットも畳み込むので、実効残高から引いた額が結果になる
+                    '¥${appState.effectiveBalance - (int.tryParse(amountCtrl.text) ?? draw.amount)}',
                     style: const TextStyle(fontWeight: FontWeight.bold),
                   ),
                 ],
@@ -329,6 +408,12 @@ Future<void> showDrawDialog(
         ),
       ),
       actions: [
+        // 💡 ホームの確認待ちから自分で開くようになったので、閉じるだけの逃げ道を用意する
+        //   （以前は起動時に順番に聞いていたので、スキップか反映しか無かった）
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('あとで'),
+        ),
         TextButton(
           onPressed: () {
             appState.skipDraw(draw.id);
@@ -369,7 +454,7 @@ Future<void> showDrawSheet(BuildContext context, AppState appState) async {
               const Text('口座から引き落とし',
                   style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold)),
               const SizedBox(height: 2),
-              Text('現在の残高 ¥${appState.currentBalance}',
+              Text('現在の残高 ¥${appState.effectiveBalance}',
                   style: const TextStyle(fontSize: 12, color: Colors.grey)),
               const SizedBox(height: 12),
               if (pending.isEmpty)

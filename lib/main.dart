@@ -19,7 +19,6 @@ import 'screens/income_screen.dart';
 import 'screens/todo_screen.dart';
 import 'screens/payment_screen.dart';
 import 'screens/settings_screen.dart';
-import 'widgets/deposit_dialog.dart';
 import 'widgets/app_gate.dart';
 import 'widgets/drive_sync_dialog.dart';
 
@@ -185,9 +184,9 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
         if (!mounted || GmailService.instance.isRedirecting) return;
       }
       _startDriveAutoPush(appState);
-      // 前回までに溜まっている入金通知・引き落としがあれば先に聞く
-      await _askPendingDeposits(appState);
-      await _askPendingDraws(appState);
+      // 💡 未処理の入金・引き落としは起動時に順番に聞かず、ホームの「確認待ち」に並べる。
+      //   ⚠️ 引き落としを先に反映しないと予想から抜けるので、入金の手続きの入口
+      //     （confirmDrawsBeforeDeposit）で先に確認してもらう。
       final result = await syncGmail(appState);
       if (!mounted || result.notSignedIn || result.restoringAuth) return;
       if (result.skipped) {
@@ -204,10 +203,6 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
           SnackBar(content: Text('メール更新: ${result.message}')),
         );
       }
-      // 今回の取得で見つかった入金通知を聞く
-      await _askPendingDeposits(appState);
-      // 引き落とし済みで、まだ口座残高に反映していないものを聞く
-      await _askPendingDraws(appState);
     });
   }
 
@@ -236,36 +231,11 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
     super.dispose();
   }
 
-  // 💡 未処理の入金通知を1件ずつポップアップで聞く（古い順）
-  Future<void> _askPendingDeposits(AppState appState) async {
-    while (mounted && appState.pendingDeposits.isNotEmpty) {
-      final notice = appState.pendingDeposits.first;
-      await showDepositDialog(context, appState, notice);
-      if (!mounted) return;
-      // ダイアログで処理されなかった場合は無限ループを避けて抜ける
-      if (appState.pendingDeposits.isNotEmpty &&
-          appState.pendingDeposits.first.sourceId == notice.sourceId) {
-        return;
-      }
-    }
-  }
-
-  // 💡 まだ口座に反映していない引き落としを1件ずつ聞く（古い順）
-  Future<void> _askPendingDraws(AppState appState) async {
-    while (mounted && appState.pendingDraws.isNotEmpty) {
-      final draw = appState.pendingDraws.first;
-      await showDrawDialog(context, appState, draw);
-      if (!mounted) return;
-      // 処理されなかった場合は無限ループを避けて抜ける
-      final next = appState.pendingDraws;
-      if (next.isNotEmpty && next.first.id == draw.id) return;
-    }
-  }
-
+  // 💡 最初に開くのはホーム（残高と確認待ち）。既存の残高画面をホームに発展させた。
   final List<Widget> _screens = [
+    const IncomeScreen(),
     const CalendarScreen(),
     const TodoScreen(),
-    const IncomeScreen(),
     const PaymentScreen(),
     const SettingsScreen(),
   ];
@@ -281,9 +251,9 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
         type: BottomNavigationBarType.fixed,
         selectedItemColor: Colors.pink,
         items: const [
+          BottomNavigationBarItem(icon: Icon(Icons.home), label: 'ホーム'),
           BottomNavigationBarItem(icon: Icon(Icons.calendar_month), label: 'カレンダー'),
           BottomNavigationBarItem(icon: Icon(Icons.check_circle_outline), label: 'Todo'),
-          BottomNavigationBarItem(icon: Icon(Icons.account_balance_wallet), label: '残高'),
           BottomNavigationBarItem(icon: Icon(Icons.payments), label: '支払い'),
           BottomNavigationBarItem(icon: Icon(Icons.settings), label: '設定'),
         ],
