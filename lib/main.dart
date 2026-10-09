@@ -177,6 +177,10 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
     // 💡 アプリ起動時に自動でメールから取得（連携済みのときだけ実行）
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       final appState = context.read<AppState>();
+      // ⚠️ 端末のデータを読み終えるまで待つ。読み終える前に同期を始めると、
+      //   空の状態（明細なし）の上に取り込みや同期を重ねることになる。
+      await appState.ready;
+      if (!mounted) return;
       // 💡 まずドライブと突き合わせる（他の端末の変更を先に取り込むため）。
       //   両方変わっていたらダイアログで選ばせる＝勝手に消さない。
       if (appState.driveSyncEnabled) {

@@ -8,6 +8,7 @@ import '../widgets/deposit_dialog.dart';
 import '../widgets/planned_expense_sheet.dart';
 import '../widgets/planned_income_sheet.dart';
 import '../widgets/home_cards.dart';
+import '../widgets/animated_amount.dart';
 import 'history_screen.dart';
 import 'balance_history_screen.dart';
 import 'breakdown_screen.dart';
@@ -668,6 +669,16 @@ class IncomeScreen extends StatelessWidget {
     // 💡 監視開始（データが変わるとこの画面が自動リビルドされます）
     final appState = context.watch<AppState>();
 
+    // 💡 保存データを読み終えるまでは金額を出さない。
+    //   初期値の0円を出してから実際の金額に切り替わると、一瞬ちらついて見えるうえ、
+    //   金額の動き（AnimatedAmount）が「0円からの増加」として動いてしまう。
+    if (!appState.isLoaded) {
+      return Scaffold(
+        appBar: AppBar(title: const Text('ホーム')),
+        body: const Center(child: CircularProgressIndicator()),
+      );
+    }
+
     // データの計算（新仕様の残高予測）
     final now = DateTime.now();
     // 給料は給料日に入金される前提（給料日offsetぶん前の労働月の手取り）
@@ -776,9 +787,12 @@ class IncomeScreen extends StatelessWidget {
                           Column(
                             crossAxisAlignment: CrossAxisAlignment.end,
                             children: [
-                              Text('¥ ${appState.effectiveBalance}',
-                                  style: const TextStyle(
-                                      fontSize: 20, fontWeight: FontWeight.bold)),
+                              // 💡 金額が変わったら短く動かし、差額を添える（表示だけ）
+                              AnimatedAmount(
+                                value: appState.effectiveBalance,
+                                style: const TextStyle(
+                                    fontSize: 20, fontWeight: FontWeight.bold),
+                              ),
                               if (appState.pendingDraws.isNotEmpty)
                                 Text('未反映の引き落とし ${appState.pendingDraws.length}件',
                                     style: TextStyle(fontSize: 11, color: Colors.red[700])),
@@ -800,11 +814,15 @@ class IncomeScreen extends StatelessWidget {
                           Text('$thisMonthNum月末の予想残高',
                               style: const TextStyle(fontSize: 15, color: Colors.black54)),
                           const SizedBox(height: 4),
-                          Text('¥ $thisMonth',
-                              style: TextStyle(
-                                  fontSize: 38,
-                                  fontWeight: FontWeight.bold,
-                                  color: thisMonth < 0 ? Colors.red : Colors.pink)),
+                          AnimatedAmount(
+                            value: thisMonth,
+                            alignment: CrossAxisAlignment.center,
+                            // ⚠️ 色は最終の金額で決める（動いている途中の値で判定しない）
+                            style: TextStyle(
+                                fontSize: 38,
+                                fontWeight: FontWeight.bold,
+                                color: thisMonth < 0 ? Colors.red : Colors.pink),
+                          ),
                           const SizedBox(height: 2),
                           const Text('タップで詳細', style: TextStyle(fontSize: 11, color: Colors.black38)),
                         ],

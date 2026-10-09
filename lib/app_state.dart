@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/foundation.dart' show kIsWeb;
@@ -1304,6 +1305,14 @@ class AppState extends ChangeNotifier {
   AppState() {
     loadData();
   }
+
+  // 💡 端末に保存したデータを読み終えたか。
+  // ⚠️ 読み終える前の画面は初期値（残高0円・明細なし）なので、そのまま出すと
+  //   「0円→実際の金額」と一瞬切り替わって見える。ホームは読み終えるまで待つ。
+  //   起動時の同期（Gmail・ドライブ）も、読み終えてから始める（空の状態に重ねないため）。
+  bool isLoaded = false;
+  final Completer<void> _loaded = Completer<void>();
+  Future<void> get ready => _loaded.future;
 
   String _formatDate(DateTime date) => DateFormat('yyyy-MM-dd').format(date);
 
@@ -4826,6 +4835,18 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> loadData() async {
+    try {
+      await _loadDataInner();
+    } finally {
+      // ⚠️ 読み込みの途中で例外が出ても「読み終えた」にする。
+      //   そうしないとホームがずっと読み込み中のまま止まり、起動時の同期も始まらない。
+      isLoaded = true;
+      if (!_loaded.isCompleted) _loaded.complete();
+      notifyListeners();
+    }
+  }
+
+  Future<void> _loadDataInner() async {
     final prefs = await SharedPreferences.getInstance();
 
     final shiftsStr = prefs.getString('saved_shifts');
