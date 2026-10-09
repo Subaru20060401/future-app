@@ -157,5 +157,66 @@ void main() {
       expect(mitsui.amount, 12000, reason: '確定額に既に分割が含まれている');
       expect(a.installmentFoldedInto(aug), 0);
     });
+
+    // ⚠️ 判定はカードごと。どれか1枚の確定で全カードを止めると、
+    //   三井OLIVEの確定メールが1通来ただけで、まだ確定していない
+    //   楽天の分割払いまで予想から消える（実際に起きた）。
+    AppState mitsuiConfirmed() => app()
+      ..payments.add(Payment(
+        id: 'b1',
+        cardName: '三井OLIVE',
+        amount: 12000,
+        paymentDate: DateTime(2026, 9, 26), // 三井だけ8月利用ぶんが確定
+        source: PaymentSource.bank,
+      ));
+
+    int amountOf(AppState a, String label) => a
+        .expenseBreakdownOf(aug)
+        .where((e) => e.label == label)
+        .fold(0, (s, e) => s + e.amount);
+
+    test('別のカードが確定しても、まだのカードの分割は足す', () {
+      final a = mitsuiConfirmed()..payments.add(usage('楽天カード', 3000, augDay));
+      addInst(a, '楽天カード', 5000, augDay);
+      expect(amountOf(a, '楽天カード'), 8000, reason: '利用3000＋分割5000');
+      expect(amountOf(a, '三井OLIVE'), 12000, reason: '三井は確定額のまま');
+    });
+
+    test('注記「うち分割払い」は、実際に足した分だけ', () {
+      final a = mitsuiConfirmed();
+      addInst(a, '三井OLIVE', 4000, augDay); // 確定額の中（数えない）
+      addInst(a, '楽天カード', 5000, augDay); // まだ確定していない（足す）
+      expect(a.installmentFoldedInto(aug), 5000);
+    });
+
+    test('Amazonの分割は三井OLIVEの確定に含まれる（足さない）', () {
+      final a = mitsuiConfirmed();
+      addInst(a, 'Amazonマスター', 3000, augDay);
+      expect(amountOf(a, 'Amazonマスター'), 0);
+      expect(a.installmentFoldedInto(aug), 0);
+    });
+
+    test('カード払いのローンも、まだ確定していないカードなら足す', () {
+      final a = mitsuiConfirmed();
+      a.loans.add(Loan(
+        id: 'l1',
+        name: 'PC',
+        principal: 60000,
+        interestRate: 0,
+        totalCount: 6,
+        startMonth: aug,
+        payDay: 27,
+        method: '楽天カード',
+      ));
+      expect(amountOf(a, '楽天カード'), 10000);
+    });
+
+    test('カード払いの定期も、まだ確定していないカードなら足す', () {
+      final a = mitsuiConfirmed();
+      a.addSubscription(title: 'Netflix', amount: 1500, payDay: 27, method: '楽天カード');
+      a.addSubscription(title: 'Spotify', amount: 980, payDay: 26, method: '三井OLIVE');
+      // 楽天の定期は残る。三井の定期は確定額に含まれるので足さない
+      expect(a.subscriptionTotalOf(aug), 1500);
+    });
   });
 }

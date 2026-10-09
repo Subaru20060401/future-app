@@ -483,13 +483,17 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
         list.where((p) => !p.infoOnly).fold<int>(0, (s, p) => s + p.amount);
     // 💡 分割払いはカードの請求に含まれて落ちるので、カード別の合計にも足す。
     //   検索で絞っているときは明細の合計だけを見たいので足さない。
+    // ⚠️ 銀行確定済みかどうかはカードごとに見る（予想残高と同じ判定）。
+    //   どれか1枚の確定で全部止めると、まだ確定していないカードの分割が消える。
     final byCard = appState.installmentTotalByCardOf(_filterMonth);
-    final installmentPart = (_search.trim().isNotEmpty ||
-            appState.isExpenseConfirmedByBank(_filterMonth))
+    final filterCard = _filterCard;
+    final installmentPart = _search.trim().isNotEmpty
         ? 0
-        : (_filterCard == null
-            ? byCard.values.fold(0, (s, v) => s + v)
-            : (byCard[_filterCard] ?? 0));
+        : (filterCard == null
+            ? appState.installmentFoldedInto(_filterMonth)
+            : (appState.isCardConfirmedByBank(filterCard, _filterMonth)
+                ? 0
+                : (byCard[filterCard] ?? 0)));
 
     return Column(
       children: [

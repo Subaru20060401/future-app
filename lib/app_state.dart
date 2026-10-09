@@ -2862,6 +2862,31 @@ class AppState extends ChangeNotifier {
         p.paymentDate.month == nextMonth.month);
   }
 
+  // 💡 その月（利用月）の請求が銀行の引落確定で決まっているカードと、その確定額。
+  Map<String, int> _bankConfirmedTotalsOf(DateTime month) {
+    final nextMonth = DateTime(month.year, month.month + 1);
+    final bank = <String, int>{};
+    for (final p in payments) {
+      if (p.source == PaymentSource.bank &&
+          p.paymentDate.year == nextMonth.year &&
+          p.paymentDate.month == nextMonth.month) {
+        bank[p.cardName] = (bank[p.cardName] ?? 0) + p.amount;
+      }
+    }
+    return bank;
+  }
+
+  // 💡 そのカードの請求が銀行確定で決まっているか。
+  //   確定額には分割払い・カード払いのローン・定期が既に含まれるので、足すと二重計上になる。
+  // ⚠️ 判定は必ずカードごと。isExpenseConfirmedByBank（どれか1枚でも確定したか）で
+  //   止めると、三井OLIVEの確定メールが1通来ただけで、まだ確定していない
+  //   楽天や三菱の分割払いまで予想から消える（実際に起きた）。
+  bool isCardConfirmedByBank(String cardName, DateTime month) =>
+      _isConfirmedIn(cardName, _bankConfirmedTotalsOf(month));
+
+  bool _isConfirmedIn(String cardName, Map<String, int> bank) =>
+      bank.containsKey(cardName) || _coveredByOliveBank(cardName, bank);
+
   // 💡 Amazonマスターは三井住友(OLIVE)発行で、引き落としはOLIVEの請求に含まれる。
   //   OLIVEの銀行確定があるときはAmazon分を別計上しない（二重計上防止）。
   //   デビット/Vポイントペイは即時・プリペイドなので対象外（別枠のまま残す）。
@@ -2967,15 +2992,22 @@ class AppState extends ChangeNotifier {
   //   こちらは締め期間で集計するカード（締め日が月末以外）のために使う。
   // ⚠️ 銀行の引落確定が来ている月は確定額が正本。足すと二重計上になる。
   int cardFoldedExtrasOf(String cardName, DateTime useMonth) {
-    if (isExpenseConfirmedByBank(useMonth)) return 0;
+    if (isCardConfirmedByBank(cardName, useMonth)) return 0;
     return (installmentTotalByCardOf(useMonth)[cardName] ?? 0) +
         (loanTotalByCardOf(useMonth)[cardName] ?? 0) +
         (downPaymentByCardOf(useMonth)[cardName] ?? 0);
   }
 
+  // 💡 「うち分割払い」の注記に出す額＝実際にカードへ足し込んだ分割払いの合計。
+  //   確定済みのカードは確定額の中に入っていて内訳が分からないので数えない
+  //   （注記が合計より大きくなる、という食い違いを出さないため）。
   int installmentFoldedInto(DateTime month) {
-    if (isExpenseConfirmedByBank(month)) return 0;
-    return installmentTotalByCardOf(month).values.fold(0, (s, v) => s + v);
+    final bank = _bankConfirmedTotalsOf(month);
+    var total = 0;
+    installmentTotalByCardOf(month).forEach((card, amount) {
+      if (!_isConfirmedIn(card, bank)) total += amount;
+    });
+    return total;
   }
 
   // 💡 カードが設定されていない分割払い（古いデータ）。
@@ -3006,24 +3038,21 @@ class AppState extends ChangeNotifier {
   List<({String label, int amount, int colorValue})> expenseBreakdownOf(DateTime month) {
     final out = <({String label, int amount, int colorValue})>[];
     final totals = Map<String, int>.from(paymentTotalsByCardOf(month));
+    final bank = _bankConfirmedTotalsOf(month);
 
-    // 💡 分割払いはカードの請求に含めて落ちるので、カードの金額に足し込む。
-    //   銀行確定済みの月は確定額に既に含まれているため足さない（二重計上になる）。
-    if (!isExpenseConfirmedByBank(month)) {
-      installmentTotalByCardOf(month).forEach((card, amount) {
+    // 💡 分割払い・カード払いのローン・頭金はカードの請求に含めて落ちるので、
+    //   カードの金額に足し込む。そのカードが銀行確定済みなら確定額に既に
+    //   含まれているため足さない（二重計上）。⚠️ 判定はカードごと。
+    void fold(Map<String, int> byCard) {
+      byCard.forEach((card, amount) {
+        if (_isConfirmedIn(card, bank)) return;
         totals[card] = (totals[card] ?? 0) + amount;
       });
     }
 
-    // 💡 カード払いのローンと頭金も、分割払いと同じくカードの請求に含めて落ちる
-    if (!isExpenseConfirmedByBank(month)) {
-      loanTotalByCardOf(month).forEach((card, amount) {
-        totals[card] = (totals[card] ?? 0) + amount;
-      });
-      downPaymentByCardOf(month).forEach((card, amount) {
-        totals[card] = (totals[card] ?? 0) + amount;
-      });
-    }
+    fold(installmentTotalByCardOf(month));
+    fold(loanTotalByCardOf(month));
+    fold(downPaymentByCardOf(month));
 
     totals.forEach((card, amount) {
       if (amount > 0) {
@@ -3032,6 +3061,9 @@ class AppState extends ChangeNotifier {
     });
 
     // カードが決まっていない分割は足せないので、消さずに別枠で残す
+    // 💡 どのカードの請求に入っているか分からないので、ここだけは
+    //   「どれか1枚でも確定したら出さない」のまま（確定額に入っているかもしれないため）。
+    //   カードを設定すればカードごとの判定に乗る。
     if (!isExpenseConfirmedByBank(month)) {
       final unassigned = unassignedInstallmentTotalOf(month);
       if (unassigned > 0) {
@@ -3375,9 +3407,11 @@ class AppState extends ChangeNotifier {
   //   カード払いの定期は、その月が銀行確定していればカードの引き落とし額に既に含まれるので除く
   //   （分割払いと同じ二重計上対策）。口座振替の定期は常に計上する。
   int subscriptionTotalOf(DateTime month) {
-    final confirmed = isExpenseConfirmedByBank(month);
+    // ⚠️ 判定は定期ごとの支払いカード単位。どれか1枚の確定で全部止めると、
+    //   まだ確定していないカードで払っている定期まで予想から消える。
+    final bank = _bankConfirmedTotalsOf(month);
     return subscriptions
-        .where((s) => !s.isCardPayment || !confirmed)
+        .where((s) => !s.isCardPayment || !_isConfirmedIn(s.method, bank))
         .fold(0, (sum, s) => sum + s.amount);
   }
 
