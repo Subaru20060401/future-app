@@ -188,13 +188,15 @@ PayPayTransferMail? parsePayPayTransferText(String body, {required String messag
   );
 
   // 金額は受付日時のすぐ後ろにある最初の「◯円」（手数料の円と取り違えない）
+  // ⚠️ 実物のHTMLは <span>12000</span><span class="unit">円</span> と分かれていて、
+  //   タグを外すと「12000 円」になる。数字と円の間の空白を許す。
   final amountMatch =
-      RegExp(r'([\d,]+)円').firstMatch(t.substring(accepted.end));
+      RegExp(r'([\d,]+) ?円').firstMatch(t.substring(accepted.end));
   if (amountMatch == null) return null;
   final gross = int.tryParse(amountMatch.group(1)!.replaceAll(',', ''));
   if (gross == null || gross <= 0) return null;
 
-  final feeMatch = RegExp(r'手数料 ?([\d,]+)円').firstMatch(t);
+  final feeMatch = RegExp(r'手数料 ?([\d,]+) ?円').firstMatch(t);
   final fee = feeMatch == null ? 0 : (int.tryParse(feeMatch.group(1)!.replaceAll(',', '')) ?? 0);
 
   final sched = RegExp(r'振込予定日 ?(\d{4})年(\d{1,2})月(\d{1,2})日').firstMatch(t);

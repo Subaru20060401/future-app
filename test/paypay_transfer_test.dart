@@ -77,6 +77,36 @@ void main() {
       expect(t.id, '00000000000000000002');
     });
 
+    // ⚠️ 実物のメールの形（2026/10 時点）。HTMLのみで、金額と「円」が別の span に分かれている。
+    //   タグを外すと「12000 円」と間に空白が入る。これを読めずに出金ごと取りこぼしていた。
+    //   （値はダミー。構造だけ実物に合わせている）
+    test('実物と同じ形のHTML（金額と円が別のspan）でも読める', () {
+      const html = '''<!DOCTYPE html>
+<html lang="ja"><head><title>【PayPay】出金を受け付けました</title>
+<style>.content .total-amount{ font-size: 32px; } .unit{ font-size: 20px; }</style></head>
+<body><table class="content-box"><tr><td align="center" class="title">
+<p style="margin: 0;font-size: 16px;color: #fff;">出金を受け付けました</p></td></tr>
+<tr><td><img src="https://example.invalid/0009.png" alt="銀行アイコン" width="64"></td></tr>
+<tr><td><p style="margin: 0;font-size: 16px;"><span>三井住友銀行</span>
+</p></td></tr>
+<tr><td><p style="margin: 0;color: #909090;"><span>2026年10月13日 23時37分8秒</span></p></td></tr>
+<tr><td><p align="center" class="two-column total-amount" style="font-size: 32px;">
+<span>12000</span><span class="unit" style="font-size: 20px;">円</span>
+</p></td></tr>
+<tr><td><p align="center" class="two-column" style="padding-top: 24px;">
+振込予定日</p></td></tr>
+<tr><td><p align="center" class="two-column" style="font-size: 18px;"><span>2026年10月15日</span>前後</p></td></tr>
+<tr><td><p class="two-column">取引番号</p></td><td><p class="two-column column-right"><span>00000000000000000003</span></p></td></tr>
+</table></body></html>''';
+      final t = parsePayPayTransferText(html, messageId: 'm1');
+      expect(t, isNotNull, reason: '金額と円の間に空白が入っても読めること');
+      expect(t!.amount, 12000);
+      expect(t.scheduledDate, DateTime(2026, 10, 15));
+      expect(t.acceptedAt, DateTime(2026, 10, 13, 23, 37, 8));
+      expect(t.bank, '三井住友銀行');
+      expect(t.id, '00000000000000000003');
+    });
+
     test('振込予定日が読めなければ推測で埋めない', () {
       expect(parsePayPayTransferText(mail(scheduled: '未定'), messageId: 'm1'), isNull);
     });
