@@ -972,6 +972,49 @@ class DepositNotice {
       );
 }
 
+// ───────────────────── PayPayからの出金（口座への入金予定） ─────────────────────
+// 💡 PayPay残高を銀行へ出金すると「出金を受け付けました」メールが届く。
+//   金額と振込予定日が載っているので、着金前から予想残高に入れられる。
+//   （銀行の「振込入金のお知らせ」は金額が載らないので、それだけでは予想に入れられない）
+class PayPayTransfer {
+  final String id; // 取引番号（同じ出金を二重に数えないためのキー）
+  final int amount; // 口座に入る見込み額（手数料は差し引き済み）
+  final DateTime acceptedAt; // 出金を受け付けた日時
+  final DateTime scheduledDate; // 振込予定日（「前後」なので確定ではない）
+  final String bank;
+
+  const PayPayTransfer({
+    required this.id,
+    required this.amount,
+    required this.acceptedAt,
+    required this.scheduledDate,
+    required this.bank,
+  });
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'amount': amount,
+        'acceptedAt': acceptedAt.toIso8601String(),
+        'scheduledDate': scheduledDate.toIso8601String(),
+        'bank': bank,
+      };
+
+  static PayPayTransfer? fromJson(Map<String, dynamic> j) {
+    final id = j['id'];
+    final amount = j['amount'];
+    final acc = DateTime.tryParse('${j['acceptedAt']}');
+    final sch = DateTime.tryParse('${j['scheduledDate']}');
+    if (id is! String || amount is! int || acc == null || sch == null) return null;
+    return PayPayTransfer(
+      id: id,
+      amount: amount,
+      acceptedAt: acc,
+      scheduledDate: sch,
+      bank: j['bank'] as String? ?? '',
+    );
+  }
+}
+
 // ───────────────────── 予定入金 ─────────────────────
 // 💡 これから入ってくる予定のお金（仕送り・返金・臨時収入など）。
 //   給料はシフトから自動計算するので、それ以外の入金をここに登録する。
@@ -2415,6 +2458,8 @@ class AppState extends ChangeNotifier {
       handledDrawIds.remove(key);
       handledDepositIds.remove(key);
       pendingDeposits.removeWhere((d) => d.sourceId == key);
+      // PayPayの出金を受け取り済みにしていたら、未着に戻す（予想にまた入る）
+      receivedTransfers.removeWhere((_, src) => src == key);
     }
     // 給料入金の取り消しなら「受け取り済み」も解除
     final wp = e.workplaceId;
@@ -2432,9 +2477,94 @@ class AppState extends ChangeNotifier {
   // 入力済み/スキップ済みのメールID（同じ通知を何度も出さない）
   final Set<String> handledDepositIds = {};
 
+  // ───── PayPayからの出金（口座への入金予定） ─────
+  final List<PayPayTransfer> paypayTransfers = [];
+  // 💡 受け取り済みにした出金 → そのとき反映した入金の識別子（取り消しで戻すため）
+  final Map<String, String> receivedTransfers = {};
+
+  // 💡 口座として追っているのは三井住友銀行だけ（それ以外への出金は残高に関係しない）
+  static bool _isTrackedBank(String bank) => bank.contains('三井住友');
+
+  // 💡 Gmailから読んだ出金を足す。
+  // ⚠️ 取り込みの「作り直し」はしない（取得に失敗したときに消えないよう、足すだけ）。
+  //   同じ取引番号は1件として扱う。古いもの（振込予定日から120日超）は掃除する。
+  void addPayPayTransfers(Iterable<PayPayTransfer> list) {
+    var changed = false;
+    for (final t in list) {
+      if (!_isTrackedBank(t.bank)) continue;
+      if (paypayTransfers.any((e) => e.id == t.id)) continue;
+      paypayTransfers.add(t);
+      changed = true;
+    }
+    final oldest = DateTime.now().subtract(const Duration(days: 120));
+    final before = paypayTransfers.length;
+    paypayTransfers.removeWhere((t) => t.scheduledDate.isBefore(oldest));
+    receivedTransfers.removeWhere((id, _) => !paypayTransfers.any((t) => t.id == id));
+    if (changed || before != paypayTransfers.length) {
+      saveData();
+      notifyListeners();
+    }
+  }
+
+  // 💡 保存・書き出しから読み戻す（端末の保存とドライブ同期の両方で使う）。
+  //   置き換え（マージしない）。古いバックアップには項目が無いので空になる。
+  void _loadTransfers(Object? list, Object? received) {
+    paypayTransfers
+      ..clear()
+      ..addAll([
+        for (final e in (list is List ? list : const []))
+          if (e is Map<String, dynamic>) PayPayTransfer.fromJson(e),
+      ].whereType<PayPayTransfer>());
+    receivedTransfers
+      ..clear()
+      ..addAll({
+        if (received is Map)
+          for (final e in received.entries) '${e.key}': '${e.value}',
+      });
+  }
+
+  // まだ受け取っていない出金（振込予定日の順）
+  List<PayPayTransfer> get pendingTransfers {
+    final out = paypayTransfers.where((t) => !receivedTransfers.containsKey(t.id)).toList();
+    out.sort((a, b) => a.scheduledDate.compareTo(b.scheduledDate));
+    return out;
+  }
+
+  // 💡 n月に口座へ入る予定の出金（予想に足すぶん）。
+  //   残高を書いた日より後に振り込まれる予定のものだけ（それ以前は残高に入っている）。
+  List<PayPayTransfer> transfersForecastIn(DateTime month) => pendingTransfers
+      .where((t) =>
+          t.scheduledDate.year == month.year &&
+          t.scheduledDate.month == month.month &&
+          _forecastInclude(t.scheduledDate))
+      .toList();
+
+  int transferForecastIn(DateTime month) =>
+      transfersForecastIn(month).fold(0, (s, t) => s + t.amount);
+
+  // 💡 銀行の「振込入金のお知らせ」が、どの出金の着金かを推定する。
+  //   受付日〜振込予定日の3日後までに届いた入金通知を、予定日が近いものと結びつける。
+  //   （予定日は「前後」なので幅を持たせる）
+  PayPayTransfer? transferForDeposit(DepositNotice n) {
+    final d = DateTime(n.date.year, n.date.month, n.date.day);
+    PayPayTransfer? best;
+    for (final t in pendingTransfers) {
+      final from = DateTime(t.acceptedAt.year, t.acceptedAt.month, t.acceptedAt.day);
+      final to = t.scheduledDate.add(const Duration(days: 3));
+      if (d.isBefore(from) || d.isAfter(to)) continue;
+      if (best == null ||
+          (t.scheduledDate.difference(d).inDays.abs() <
+              best.scheduledDate.difference(d).inDays.abs())) {
+        best = t;
+      }
+    }
+    return best;
+  }
+
   // 💡 入金を口座残高へ加算する（手入力・通知どちらも共通）。
   //   残高の編集日時も更新するので、この入金が予想残高で二重計上されない。
-  void addDeposit(int amount, {String? workplaceId, DateTime? date, String? sourceKey}) {
+  void addDeposit(int amount,
+      {String? workplaceId, DateTime? date, String? sourceKey, String? label}) {
     if (amount == 0) return;
     _foldDebitsIntoBalance();
     currentBalance += amount;
@@ -2448,7 +2578,7 @@ class AppState extends ChangeNotifier {
     }
     _recordBalanceEntry(
       kind: BalanceEntryKind.deposit,
-      label: w?.name ?? 'その他の入金',
+      label: w?.name ?? label ?? 'その他の入金',
       amount: amount,
       workplaceId: w?.id,
       sourceKey: sourceKey,
@@ -2495,12 +2625,20 @@ class AppState extends ChangeNotifier {
   }
 
   // 入金通知に金額を入力して残高へ反映
-  void applyDepositNotice(String sourceId, int amount, {String? workplaceId}) {
+  void applyDepositNotice(String sourceId, int amount,
+      {String? workplaceId, String? transferId}) {
     final idx = pendingDeposits.indexWhere((e) => e.sourceId == sourceId);
     final date = idx >= 0 ? pendingDeposits[idx].date : DateTime.now();
     if (idx >= 0) pendingDeposits.removeAt(idx);
     handledDepositIds.add(sourceId);
-    addDeposit(amount, workplaceId: workplaceId, date: date, sourceKey: sourceId);
+    // 💡 PayPayの出金の着金なら「受け取り済み」にする。
+    //   ⚠️ しないと、予定日がまだ先のとき予想でもう一度足してしまう。
+    if (transferId != null) receivedTransfers[transferId] = sourceId;
+    addDeposit(amount,
+        workplaceId: workplaceId,
+        date: date,
+        sourceKey: sourceId,
+        label: transferId != null ? 'PayPayからの入金' : null);
   }
 
   // ════════════ 口座からの引き落とし ════════════
@@ -2597,11 +2735,16 @@ class AppState extends ChangeNotifier {
       ));
     }
     for (final n in [...pendingDeposits]..sort((a, b) => a.date.compareTo(b.date))) {
+      // 💡 PayPayの出金の着金と見られるなら、金額まで分かっているのでそう出す
+      final t = transferForDeposit(n);
       out.add(HomeNotice(
         kind: HomeNoticeKind.deposit,
-        title: '入金がありました',
-        detail: '${n.date.month}/${n.date.day} の振込入金。金額を入れて反映します',
+        title: t != null ? 'PayPayからの入金' : '入金がありました',
+        detail: t != null
+            ? '${n.date.month}/${n.date.day} の振込入金（PayPayの出金 ${t.acceptedAt.month}/${t.acceptedAt.day}受付）'
+            : '${n.date.month}/${n.date.day} の振込入金。金額を入れて反映します',
         date: n.date,
+        amount: t?.amount,
         deposit: n,
       ));
     }
@@ -3861,7 +4004,8 @@ class AppState extends ChangeNotifier {
     final now = DateTime.now();
     return effectiveBalance +
         effectiveWalletCash +
-        incomeForecastIn(now) -
+        incomeForecastIn(now) +
+        transferForecastIn(now) -
         drawnInMonth(now) -
         oneTimeExpenseForecastIn(now);
   }
@@ -3910,6 +4054,10 @@ class AppState extends ChangeNotifier {
         if (!_forecastInclude(e.date)) continue;
         out.add(CashEvent(
             date: e.date, label: e.income.title, amount: e.income.amount));
+      }
+      // PayPayからの出金（振込予定日に入る。月末予想と同じ transfersForecastIn を使う）
+      for (final t in transfersForecastIn(m)) {
+        out.add(CashEvent(date: t.scheduledDate, label: 'PayPayからの入金', amount: t.amount));
       }
 
       // ── 引き落とし（drawBreakdownOf がゲート済み。日付だけ付け直す） ──
@@ -3998,7 +4146,8 @@ class AppState extends ChangeNotifier {
   int get nextMonthBalance {
     final next = DateTime(DateTime.now().year, DateTime.now().month + 1, 1);
     return thisMonthBalance +
-        incomeForecastIn(next) -
+        incomeForecastIn(next) +
+        transferForecastIn(next) -
         drawnInMonth(next) -
         oneTimeExpenseForecastIn(next);
   }
@@ -4007,7 +4156,8 @@ class AppState extends ChangeNotifier {
   int get monthAfterNextBalance {
     final m2 = DateTime(DateTime.now().year, DateTime.now().month + 2, 1);
     return nextMonthBalance +
-        incomeForecastIn(m2) -
+        incomeForecastIn(m2) +
+        transferForecastIn(m2) -
         drawnInMonth(m2) -
         oneTimeExpenseForecastIn(m2);
   }
@@ -4243,6 +4393,14 @@ class AppState extends ChangeNotifier {
   }
 
   // 今月末残高の内訳（タップ詳細用）。現在の残高→デビット調整(#5#6)→給料入金→引き落とし。
+  // 💡 内訳に「PayPayからの入金（10/15頃）」を足す。同じ日が2件あれば合算する。
+  void _addTransferLines(Map<String, int> out, DateTime month) {
+    for (final t in transfersForecastIn(month)) {
+      final key = 'PayPayからの入金（${t.scheduledDate.month}/${t.scheduledDate.day}頃）';
+      out[key] = (out[key] ?? 0) + t.amount;
+    }
+  }
+
   Map<String, int> get thisMonthBreakdown {
     final now = DateTime.now();
     final out = <String, int>{'現在の残高': currentBalance};
@@ -4251,6 +4409,7 @@ class AppState extends ChangeNotifier {
     if (debit > 0) out['デビット利用（編集後・即時引落）'] = -debit;
     final income = incomeForecastIn(now);
     if (income != 0) out['給料入金（編集後）'] = income;
+    _addTransferLines(out, now);
     for (final e in drawBreakdownOf(now)) {
       out[drawLabelOf(e.label, now)] = -e.amount;
     }
@@ -4268,6 +4427,7 @@ class AppState extends ChangeNotifier {
     final out = <String, int>{'今月末残高': thisMonthBalance};
     final income = incomeForecastIn(next);
     if (income != 0) out['給料入金'] = income;
+    _addTransferLines(out, next);
     for (final e in drawBreakdownOf(next)) {
       out[drawLabelOf(e.label, next)] = -e.amount;
     }
@@ -4285,6 +4445,7 @@ class AppState extends ChangeNotifier {
     final out = <String, int>{'来月末残高': nextMonthBalance};
     final income = incomeForecastIn(m2);
     if (income != 0) out['給料入金'] = income;
+    _addTransferLines(out, m2);
     for (final e in drawBreakdownOf(m2)) {
       out[drawLabelOf(e.label, m2)] = -e.amount;
     }
@@ -4333,6 +4494,8 @@ class AppState extends ChangeNotifier {
       'currentBalance': currentBalance,
       'walletCash': walletCash,
       'pendingDeposits': pendingDeposits.map((e) => e.toJson()).toList(),
+      'paypayTransfers': paypayTransfers.map((e) => e.toJson()).toList(),
+      'receivedTransfers': receivedTransfers,
       'handledDepositIds': handledDepositIds.toList(),
       'handledDrawIds': handledDrawIds.toList(),
       'balanceHistory': balanceHistory.map((e) => e.toJson()).toList(),
@@ -4699,6 +4862,7 @@ class AppState extends ChangeNotifier {
     pendingDeposits = (map['pendingDeposits'] as List? ?? [])
         .map((e) => DepositNotice.fromJson(e))
         .toList();
+    _loadTransfers(map['paypayTransfers'], map['receivedTransfers']);
     handledDepositIds
       ..clear()
       ..addAll((map['handledDepositIds'] as List? ?? []).map((e) => e.toString()));
@@ -4804,6 +4968,9 @@ class AppState extends ChangeNotifier {
     await prefs.setString(
         'saved_pending_deposits', jsonEncode(pendingDeposits.map((e) => e.toJson()).toList()));
     await prefs.setStringList('saved_handled_deposit_ids', handledDepositIds.toList());
+    await prefs.setString('saved_paypay_transfers',
+        jsonEncode(paypayTransfers.map((e) => e.toJson()).toList()));
+    await prefs.setString('saved_received_transfers', jsonEncode(receivedTransfers));
     await prefs.setStringList('saved_handled_draw_ids', handledDrawIds.toList());
     await prefs.setString(
         'saved_balance_history', jsonEncode(balanceHistory.map((e) => e.toJson()).toList()));
@@ -4957,6 +5124,10 @@ class AppState extends ChangeNotifier {
 
     currentBalance = prefs.getInt('saved_balance') ?? 0;
     walletCash = prefs.getInt('saved_wallet_cash') ?? 0;
+    final ptStr = prefs.getString('saved_paypay_transfers');
+    final rtStr = prefs.getString('saved_received_transfers');
+    _loadTransfers(ptStr == null ? null : jsonDecode(ptStr),
+        rtStr == null ? null : jsonDecode(rtStr));
     final pdStr = prefs.getString('saved_pending_deposits');
     if (pdStr != null) {
       pendingDeposits =

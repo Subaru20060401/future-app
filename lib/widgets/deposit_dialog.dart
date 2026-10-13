@@ -106,7 +106,17 @@ Future<void> showDepositDialog(
     if (est > 0) amountCtrl.text = est.toString();
   }
 
-  fillEstimate();
+  // 💡 PayPayの出金の着金と見られるなら、メールに載っていた金額を入れて選んでおく。
+  //   ⚠️ 選んだまま保存すると「受け取り済み」になる。結びつけずに保存すると、
+  //     振込予定日がまだ先のとき予想でもう一度足されるので、既定で選ぶ。
+  final transfer = appState.transferForDeposit(notice);
+  var useTransfer = transfer != null;
+  if (transfer != null) {
+    selectedWpId = null;
+    amountCtrl.text = transfer.amount.toString();
+  } else {
+    fillEstimate();
+  }
 
   await showDialog<void>(
     context: context,
@@ -129,9 +139,11 @@ Future<void> showDepositDialog(
                 style: const TextStyle(fontSize: 13, color: Colors.black87),
               ),
               const SizedBox(height: 2),
-              const Text(
-                'メールに金額が無いため、入金額を入力してください。',
-                style: TextStyle(fontSize: 11, color: Colors.grey),
+              Text(
+                transfer != null
+                    ? 'PayPayの出金（${transfer.acceptedAt.month}/${transfer.acceptedAt.day}受付）の着金と見られます。金額が違えば直してください。'
+                    : 'メールに金額が無いため、入金額を入力してください。',
+                style: const TextStyle(fontSize: 11, color: Colors.grey),
               ),
               const SizedBox(height: 14),
               TextField(
@@ -145,7 +157,7 @@ Future<void> showDepositDialog(
                   isDense: true,
                 ),
               ),
-              if (awaiting.isNotEmpty) ...[
+              if (awaiting.isNotEmpty || transfer != null) ...[
                 const SizedBox(height: 14),
                 const Text('どの入金ですか？',
                     style: TextStyle(fontSize: 12, color: Colors.grey)),
@@ -154,6 +166,18 @@ Future<void> showDepositDialog(
                   spacing: 6,
                   runSpacing: 4,
                   children: [
+                    if (transfer != null)
+                      ChoiceChip(
+                        avatar: const Icon(Icons.account_balance_wallet, size: 14),
+                        label: Text('PayPayの出金 ¥${transfer.amount}',
+                            style: const TextStyle(fontSize: 12)),
+                        selected: useTransfer,
+                        onSelected: (_) => setLocal(() {
+                          useTransfer = true;
+                          selectedWpId = null;
+                          amountCtrl.text = transfer.amount.toString();
+                        }),
+                      ),
                     ...awaiting.map((w) {
                       // 給料日が入金日と近い勤務先には「推奨」マークを出す
                       final isPayday = candidates.any((c) => c.id == w.id);
@@ -190,8 +214,9 @@ Future<void> showDepositDialog(
                             ],
                           ],
                         ),
-                        selected: selectedWpId == w.id,
+                        selected: !useTransfer && selectedWpId == w.id,
                         onSelected: (_) => setLocal(() {
+                          useTransfer = false;
                           selectedWpId = selectedWpId == w.id ? null : w.id;
                           fillEstimate();
                         }),
@@ -199,8 +224,11 @@ Future<void> showDepositDialog(
                     }),
                     ChoiceChip(
                       label: const Text('その他の入金', style: TextStyle(fontSize: 12)),
-                      selected: selectedWpId == null,
-                      onSelected: (_) => setLocal(() => selectedWpId = null),
+                      selected: !useTransfer && selectedWpId == null,
+                      onSelected: (_) => setLocal(() {
+                        useTransfer = false;
+                        selectedWpId = null;
+                      }),
                     ),
                   ],
                 ),
@@ -233,7 +261,9 @@ Future<void> showDepositDialog(
                 );
                 return;
               }
-              appState.applyDepositNotice(notice.sourceId, amount, workplaceId: selectedWpId);
+              appState.applyDepositNotice(notice.sourceId, amount,
+                  workplaceId: selectedWpId,
+                  transferId: useTransfer ? transfer?.id : null);
               Navigator.pop(context);
               ScaffoldMessenger.of(context).showSnackBar(
                 SnackBar(content: Text('¥$amount を口座残高に追加しました')),

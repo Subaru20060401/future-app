@@ -147,6 +147,74 @@ class _CardRule {
   const _CardRule(this.name, this.query);
 }
 
+// 💡 PayPay残高から銀行への出金（＝口座への入金予定）。
+//   「【PayPay】出金を受け付けました」メールから読み取る。
+typedef PayPayTransferMail = ({
+  String id, // 取引番号（無ければメールID）
+  int amount, // 口座に入る見込み額（手数料があれば差し引いた額）
+  int fee,
+  String bank, // 振込先の銀行名
+  DateTime acceptedAt, // 出金を受け付けた日時
+  DateTime scheduledDate, // 振込予定日（メールには「◯日前後」とある）
+});
+
+// 💡 出金メールの本文から取り出す。読めない項目があれば null（推測で埋めない）。
+//   本文は表の罫線（|）や改行が混ざるので、空白に寄せてから読む。
+// ⚠️ 手数料つきの出金（例: 10100円・手数料 100円）は、メールだけでは
+//   口座に入るのが 10100円 か 10000円 か分からない。予想が多めに出ないよう
+//   手数料を引いた額にしておく（入金を反映するときに金額は直せる）。
+PayPayTransferMail? parsePayPayTransferText(String body, {required String messageId}) {
+  // ⚠️ 本文は text/plain と text/html がそのまま連結されて渡ってくる（タグは外れていない）。
+  //   HTMLだけのメールだと「振込予定日」と日付が別のセルに分かれてタグが挟まるので、
+  //   先にタグを空白に置き換えてから読む。
+  final t = body
+      .replaceAll(RegExp(r'<style[\s\S]*?</style>', caseSensitive: false), ' ')
+      .replaceAll(RegExp(r'<[^>]+>'), ' ')
+      .replaceAll('&nbsp;', ' ')
+      .replaceAll('|', ' ')
+      .replaceAll(RegExp(r'[\s　]+'), ' ');
+  if (!t.contains('出金を受け付けました')) return null;
+
+  final accepted = RegExp(r'(\d{4})年(\d{1,2})月(\d{1,2})日 ?(\d{1,2})時(\d{1,2})分(\d{1,2})秒')
+      .firstMatch(t);
+  if (accepted == null) return null;
+  final acceptedAt = DateTime(
+    int.parse(accepted.group(1)!),
+    int.parse(accepted.group(2)!),
+    int.parse(accepted.group(3)!),
+    int.parse(accepted.group(4)!),
+    int.parse(accepted.group(5)!),
+    int.parse(accepted.group(6)!),
+  );
+
+  // 金額は受付日時のすぐ後ろにある最初の「◯円」（手数料の円と取り違えない）
+  final amountMatch =
+      RegExp(r'([\d,]+)円').firstMatch(t.substring(accepted.end));
+  if (amountMatch == null) return null;
+  final gross = int.tryParse(amountMatch.group(1)!.replaceAll(',', ''));
+  if (gross == null || gross <= 0) return null;
+
+  final feeMatch = RegExp(r'手数料 ?([\d,]+)円').firstMatch(t);
+  final fee = feeMatch == null ? 0 : (int.tryParse(feeMatch.group(1)!.replaceAll(',', '')) ?? 0);
+
+  final sched = RegExp(r'振込予定日 ?(\d{4})年(\d{1,2})月(\d{1,2})日').firstMatch(t);
+  if (sched == null) return null;
+  final scheduledDate = DateTime(
+      int.parse(sched.group(1)!), int.parse(sched.group(2)!), int.parse(sched.group(3)!));
+
+  final bankMatch = RegExp(r'出金を受け付けました ?(\S+?銀行)').firstMatch(t);
+  final idMatch = RegExp(r'取引番号 ?(\d+)').firstMatch(t);
+
+  return (
+    id: idMatch?.group(1) ?? messageId,
+    amount: gross - fee,
+    fee: fee,
+    bank: bankMatch?.group(1) ?? '',
+    acceptedAt: acceptedAt,
+    scheduledDate: scheduledDate,
+  );
+}
+
 // 💡 起動時に「静かな再取得（prompt=none）」を試してよいかの判定。
 //   ⚠️ 判断を間違えるとリダイレクトの無限ループか、逆に毎回の再連携になる。
 //     ブラウザ無しで固定できるよう、純粋な関数にしてテストで担保する
@@ -716,6 +784,33 @@ class GmailService {
       out.add((sourceId: id, date: _internalDate(full) ?? DateTime.now()));
     }
     return out;
+  }
+
+  // 💡 PayPay残高から銀行への出金メール（＝口座への入金予定）。
+  //   PayPayカード（paypay-card.co.jp）とは別の差出人（paypay-corp.co.jp）。
+  static const String _paypayTransferQuery =
+      'from:paypay-corp.co.jp subject:出金を受け付けました';
+
+  Future<List<PayPayTransferMail>> fetchPayPayTransfers({DateTime? since}) async {
+    try {
+      final from = since?.subtract(const Duration(days: 1));
+      final window =
+          from != null ? 'after:${from.year}/${from.month}/${from.day}' : 'newer_than:90d';
+      final client = await _authClient();
+      if (client == null) return const [];
+      final api = gmail.GmailApi(client);
+      final ids = await _listIds(api, '($_paypayTransferQuery) $window');
+      final out = <PayPayTransferMail>[];
+      for (final full in await _getByIds(api, ids)) {
+        final id = full.id;
+        if (id == null) continue;
+        final t = parsePayPayTransferText(_toHalf(_extractBody(full)), messageId: id);
+        if (t != null) out.add(t);
+      }
+      return out;
+    } catch (e) {
+      throw _describeApiError(e);
+    }
   }
 
   // 取得対象期間。since 指定時はその日付以降（差分更新）、未指定は過去2年

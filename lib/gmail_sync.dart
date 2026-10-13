@@ -125,6 +125,20 @@ Future<GmailSyncResult> _syncGmail(
     } catch (_) {
       // 入金通知の取得に失敗しても、カードの取り込み結果は返す
     }
+    // 💡 PayPay残高から銀行への出金（金額と振込予定日が分かる＝予想に入れられる）。
+    //   足すだけなので、取りこぼしても既にあるものは消えない。
+    try {
+      final transfers = await gmail.fetchPayPayTransfers(since: since);
+      appState.addPayPayTransfers(transfers.map((t) => PayPayTransfer(
+            id: t.id,
+            amount: t.amount,
+            acceptedAt: t.acceptedAt,
+            scheduledDate: t.scheduledDate,
+            bank: t.bank,
+          )));
+    } catch (_) {
+      // 出金メールの取得に失敗しても、カードの取り込み結果は返す
+    }
     appState.markGmailSynced();
     return GmailSyncResult(
       added: r.added,
