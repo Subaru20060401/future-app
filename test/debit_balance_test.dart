@@ -16,7 +16,9 @@ void main() {
         id: 'd$amount',
         cardName: '三井OLIVE（デビット）',
         amount: amount,
-        paymentDate: DateTime.now().subtract(const Duration(hours: 1)),
+        // ⚠️ 「1時間前」にすると、0時台に流したとき前日になり残高に入っている扱いになる。
+        //   残高を書いた後に使った、という順番だけを作る。
+        paymentDate: DateTime.now(),
         source: PaymentSource.usage,
       );
 
