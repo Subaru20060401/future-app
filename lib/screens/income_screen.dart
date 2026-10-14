@@ -9,6 +9,8 @@ import '../widgets/planned_expense_sheet.dart';
 import '../widgets/planned_income_sheet.dart';
 import '../widgets/home_cards.dart';
 import '../widgets/animated_amount.dart';
+import '../widgets/sync_status.dart';
+import '../widgets/add_entry_sheets.dart';
 import 'history_screen.dart';
 import 'balance_history_screen.dart';
 import 'breakdown_screen.dart';
@@ -437,6 +439,46 @@ class IncomeScreen extends StatelessWidget {
     );
   }
 
+  // 💡 まだ何も入っていないときの案内（空のグラフの代わり）
+  Widget _homeEmptyGuide(BuildContext context, AppState appState) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text('はじめに', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 6),
+            const Text(
+              '今の口座残高を入れると、月末の予想残高が出ます。'
+              'シフトを入れると給料の見込みが、カードを連携すると引き落としが入ります。',
+              style: TextStyle(fontSize: 13, color: Colors.black87),
+            ),
+            const SizedBox(height: 10),
+            Wrap(
+              spacing: 8,
+              runSpacing: 4,
+              children: [
+                FilledButton.tonal(
+                  onPressed: () => _showEditDialog(
+                      context, '現在の残高', appState.currentBalance, appState.updateBalance),
+                  child: const Text('残高を入力'),
+                ),
+                OutlinedButton(
+                  onPressed: () {
+                    final now = DateTime.now();
+                    showAddShiftSheet(context, appState, DateTime(now.year, now.month, now.day));
+                  },
+                  child: const Text('シフトを追加'),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   // 来月末・翌々月末の小さい表示（今月末より目立たせない）。タップで詳細。
   Widget _smallMonthTile(BuildContext context, AppState appState,
       {required String label, required int value, required int which}) {
@@ -706,6 +748,9 @@ class IncomeScreen extends StatelessWidget {
       if (withdrawals > 0) (label: 'ATM', value: withdrawals, color: Colors.brown),
     ];
     final totalExpense = segments.fold<int>(0, (s, e) => s + e.value);
+    // グラフに出すものが何も無いか（残高も収入も支出も0）
+    final hasChartData =
+        appState.currentBalance != 0 || expectedIncome != 0 || totalExpense != 0;
 
     // 積み上げ棒のスタックアイテムを作成
     final stackItems = <BarChartRodStackItem>[];
@@ -759,6 +804,8 @@ class IncomeScreen extends StatelessWidget {
         padding: const EdgeInsets.all(20.0),
         child: Column(
           children: [
+            // 💡 メール更新の結果（一行。失敗・見送りなら再試行を出す）
+            const SyncStatusBar(),
             // 合計表示部分
             Container(
               padding: const EdgeInsets.all(20),
@@ -986,6 +1033,11 @@ class IncomeScreen extends StatelessWidget {
               ),
             const SizedBox(height: 30),
 
+            // 💡 データが無いのに空の大きなグラフを出していたので、そのときは
+            //   最初にやることの案内に置き換える（UI改善計画 2026-10-14 の段階3）
+            if (!hasChartData)
+              _homeEmptyGuide(context, appState)
+            else ...[
             // グラフ表示部分
             const Text('収支の内訳', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
             const SizedBox(height: 20),
@@ -1056,7 +1108,8 @@ class IncomeScreen extends StatelessWidget {
                   }).toList(),
                 ),
               ),
-            
+            ],
+
             const SizedBox(height: 30),
 
             // 設定リスト

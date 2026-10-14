@@ -191,22 +191,9 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
       // 💡 未処理の入金・引き落としは起動時に順番に聞かず、ホームの「確認待ち」に並べる。
       //   ⚠️ 引き落としを先に反映しないと予想から抜けるので、入金の手続きの入口
       //     （confirmDrawsBeforeDeposit）で先に確認してもらう。
-      final result = await syncGmail(appState);
-      if (!mounted || result.notSignedIn || result.restoringAuth) return;
-      if (result.skipped) {
-        // 取りこぼしで反映を見送ったときは、気づけるように知らせる
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(result.message),
-            backgroundColor: Colors.orange[800],
-            duration: const Duration(seconds: 6),
-          ),
-        );
-      } else if (result.added > 0 || result.removed > 0) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('メール更新: ${result.message}')),
-        );
-      }
+      // 💡 結果は通知で画面を覆わず、ホームの上の一行（SyncStatusBar）に出す。
+      //   失敗・見送りのときは、そこに再試行のボタンが出る。
+      await syncGmail(appState);
     });
   }
 
@@ -248,16 +235,27 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       // 💡 選択中の画面だけを表示（全画面同時保持をやめ、FAB/AppBarの混線を防止）
-      body: _screens[_selectedIndex],
+      // 💡 PCの広い画面では中身の幅を抑える（カードや金額が横に伸びすぎて、
+      //   ラベルと金額が離れていた）。スマホ幅では何も変わらない。
+      body: Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 960),
+          child: _screens[_selectedIndex],
+        ),
+      ),
       bottomNavigationBar: BottomNavigationBar(
         currentIndex: _selectedIndex,
         onTap: (index) => setState(() => _selectedIndex = index),
         type: BottomNavigationBarType.fixed,
         selectedItemColor: Colors.pink,
+        // 💡 選ぶと文字が大きくなる既定(14)だと、幅320pxで「カレンダー」が「カレン…」に切れた。
+        //   選択中も同じ大きさにして、5つとも読めるようにする。
+        selectedFontSize: 12,
+        unselectedFontSize: 12,
         items: const [
           BottomNavigationBarItem(icon: Icon(Icons.home), label: 'ホーム'),
           BottomNavigationBarItem(icon: Icon(Icons.calendar_month), label: 'カレンダー'),
-          BottomNavigationBarItem(icon: Icon(Icons.check_circle_outline), label: 'Todo'),
+          BottomNavigationBarItem(icon: Icon(Icons.check_circle_outline), label: 'やること'),
           BottomNavigationBarItem(icon: Icon(Icons.payments), label: '支払い'),
           BottomNavigationBarItem(icon: Icon(Icons.settings), label: '設定'),
         ],

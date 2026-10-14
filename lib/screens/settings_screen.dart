@@ -136,52 +136,58 @@ class SettingsScreen extends StatelessWidget {
               const Text('カードの締め日・引き落とし日',
                   style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold)),
               const SizedBox(height: 4),
-              const Text(
-                  '締め日＝どこまでの利用が次の引き落としに入るか。'
-                  '引き落とし日＝毎月何日に口座から引かれるか。\n'
-                  '月末締めなら「前月1日〜前月末日」の利用が当月の引き落としになります。'
-                  '15日締めなら「前々月16日〜前月15日」ぶんです'
-                  '（銀行の事前お知らせメールが届いている場合は、そちらの金額を優先）。',
-                  style: TextStyle(fontSize: 12, color: Colors.black54)),
+              // 💡 説明は折りたたむ（カードの一覧を先に見せる）
+              const ExpansionTile(
+                tilePadding: EdgeInsets.zero,
+                dense: true,
+                title: Text('締め日・引落日とは',
+                    style: TextStyle(fontSize: 13, color: Colors.black54)),
+                children: [
+                  Text(
+                      '締め日＝どこまでの利用が次の引き落としに入るか。'
+                      '引き落とし日＝毎月何日に口座から引かれるか。\n'
+                      '月末締めなら「前月1日〜前月末日」の利用が当月の引き落としになります。'
+                      '15日締めなら「前々月16日〜前月15日」ぶんです'
+                      '（銀行の事前お知らせメールが届いている場合は、そちらの金額を優先）。',
+                      style: TextStyle(fontSize: 12, color: Colors.black54)),
+                  SizedBox(height: 8),
+                ],
+              ),
               const SizedBox(height: 12),
               ...appState.cardPaymentDays.entries.map((e) => ListTile(
                 contentPadding: EdgeInsets.zero,
                 leading: const Icon(Icons.credit_card, size: 20, color: Colors.red),
+                // 💡 名前を上、条件を下に。操作はメニューへ（UI改善計画 2026-10-14 の段階2）。
+                //   以前は「変更・名前・×」が横に並び、名前と説明が押しつぶされていた。
                 title: Text(e.key),
                 subtitle: Text(
-                  '${appState.closingLabelOf(e.key)} → 毎月${e.value}日 引き落とし',
+                  '締め日 ${appState.isMonthEndClosing(e.key) ? '月末' : '${appState.closingDayOf(e.key)}日'}'
+                  '／引落日 ${e.value}日',
                   style: const TextStyle(fontSize: 12),
                 ),
-                trailing: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    TextButton(
-                      child: const Text('変更', style: TextStyle(fontSize: 15)),
-                      onPressed: () async {
+                trailing: PopupMenuButton<String>(
+                  tooltip: '操作',
+                  icon: const Icon(Icons.more_vert),
+                  onSelected: (action) async {
+                    switch (action) {
+                      case 'days':
                         await _editCardDays(context, appState, e.key);
-                        setLocal(() {});
-                      },
-                    ),
-                    // 💡 同じカードが2つに割れているとき（表記違いで別々に登録した等）、
-                    //   名前を揃えれば1枚として扱える。
-                    TextButton(
-                      child: const Text('名前', style: TextStyle(fontSize: 15)),
-                      onPressed: () async {
+                      case 'rename':
+                        // 💡 同じカードが2つに割れているとき（表記違いで別々に登録した等）、
+                        //   名前を揃えれば1枚として扱える。
                         await _renameCard(context, appState, e.key);
-                        setLocal(() {});
-                      },
-                    ),
-                    IconButton(
-                      tooltip: '一覧から外す',
-                      icon: const Icon(Icons.close, size: 18, color: Colors.grey),
-                      onPressed: () async {
+                      case 'remove':
                         final ok = await _confirm(context, '${e.key} を外す',
                             'カードの一覧から外します。登録済みの明細は消えません。');
                         if (ok != true) return;
                         appState.removeCard(e.key);
-                        setLocal(() {});
-                      },
-                    ),
+                    }
+                    setLocal(() {});
+                  },
+                  itemBuilder: (_) => const [
+                    PopupMenuItem(value: 'days', child: Text('締め日・引落日を変更')),
+                    PopupMenuItem(value: 'rename', child: Text('名前を変える・まとめる')),
+                    PopupMenuItem(value: 'remove', child: Text('一覧から外す')),
                   ],
                 ),
               )),

@@ -297,7 +297,7 @@ class _TodoScreenState extends State<TodoScreen> {
             ),
           Expanded(
             child: todos.isEmpty
-                ? const Center(child: Text('Todoはありません'))
+                ? const Center(child: Text('やることはありません。右下の＋から追加できます', style: TextStyle(color: Colors.black54)))
                 : ListView.builder(
                     itemCount: todos.length,
                     itemBuilder: (context, i) {

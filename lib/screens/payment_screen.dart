@@ -484,60 +484,48 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
 
     return Column(
       children: [
-        // 月セレクタ＋並び替え＋銀行確定トグル
+        // 月の切り替え。何の日付で振り分けているかを添える（一律に「請求」と呼ばない）
         Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
           child: Row(
             children: [
               IconButton(
+                tooltip: '前の月',
                 icon: const Icon(Icons.chevron_left),
                 onPressed: () => setState(() =>
                     _filterMonth = DateTime(_filterMonth.year, _filterMonth.month - 1)),
               ),
               Expanded(
-                child: Center(
-                  child: Text('${_filterMonth.year}年${_filterMonth.month}月',
-                      style: const TextStyle(fontWeight: FontWeight.bold)),
+                child: Column(
+                  children: [
+                    Text('${_filterMonth.year}年${_filterMonth.month}月',
+                        style: const TextStyle(fontWeight: FontWeight.bold)),
+                    Text('利用日・支払日が${_filterMonth.month}月の明細',
+                        style: const TextStyle(fontSize: 11, color: Colors.black54)),
+                  ],
                 ),
               ),
               IconButton(
+                tooltip: '次の月',
                 icon: const Icon(Icons.chevron_right),
                 onPressed: () => setState(() =>
                     _filterMonth = DateTime(_filterMonth.year, _filterMonth.month + 1)),
               ),
-              // 並べ替え（日付・金額 × 昇順・降順）
-              PopupMenuButton<_SortMode>(
-                tooltip: '並べ替え',
-                icon: Icon(Icons.swap_vert, color: Colors.pink[300]),
-                initialValue: _sortMode,
-                onSelected: (v) => setState(() => _sortMode = v),
-                itemBuilder: (_) => const [
-                  PopupMenuItem(value: _SortMode.dateAsc, child: Text('日付が古い順')),
-                  PopupMenuItem(value: _SortMode.dateDesc, child: Text('日付が新しい順')),
-                  PopupMenuItem(value: _SortMode.amountAsc, child: Text('金額が安い順')),
-                  PopupMenuItem(value: _SortMode.amountDesc, child: Text('金額が高い順')),
-                ],
-              ),
-              IconButton(
-                tooltip: _showBank ? '銀行確定を隠す' : '銀行確定(過去)を表示',
-                icon: Icon(_showBank ? Icons.history_toggle_off : Icons.history),
-                color: _showBank ? Colors.green : null,
-                onPressed: () => setState(() => _showBank = !_showBank),
-              ),
             ],
           ),
         ),
-        // 🔍 検索（利用先・カード名・金額）
+        // 🔍 検索（利用先・カード・金額）
         Padding(
           padding: const EdgeInsets.fromLTRB(12, 0, 12, 4),
           child: TextField(
             controller: _searchCtrl,
             decoration: InputDecoration(
-              hintText: '検索（利用先・カード・金額）',
+              hintText: '利用先・カード・金額',
               prefixIcon: const Icon(Icons.search, size: 20),
               suffixIcon: _search.isEmpty
                   ? null
                   : IconButton(
+                      tooltip: '検索をやめる',
                       icon: const Icon(Icons.clear, size: 18),
                       onPressed: () => setState(() {
                         _search = '';
@@ -556,82 +544,93 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
             onChanged: (v) => setState(() => _search = v),
           ),
         ),
-        // カード別フィルタ
-        if (cards.isNotEmpty)
-          SizedBox(
-            height: 48,
-            child: ListView(
-              scrollDirection: Axis.horizontal,
-              padding: const EdgeInsets.symmetric(horizontal: 8),
-              children: [
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
-                  child: ChoiceChip(
-                    label: const Text('すべて'),
-                    selected: _filterCard == null,
-                    onSelected: (_) => setState(() => _filterCard = null),
-                  ),
-                ),
-                ...cards.map((c) {
-                  final style = cardStyleOf(c);
-                  return Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
-                    child: ChoiceChip(
-                      avatar: CircleAvatar(backgroundColor: style.color, radius: 6),
-                      label: Text(c),
-                      selected: _filterCard == c,
-                      onSelected: (_) => setState(() => _filterCard = c),
-                    ),
-                  );
-                }),
-              ],
-            ),
-          ),
-        // 💡 いま絞り込んでいる範囲の合計。「すべて」なら全カード、
-        //   カードを選んでいればそのカードだけの合計になる。
+        // 💡 絞り込み・並び・表示対象を、選んでいる状態が文字で読めるボタンにする
+        //   （以前は横スクロールのチップで長いカード名が切れ、並びと銀行確定はアイコンだけだった）
         Padding(
-          padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-          child: Row(
+          padding: const EdgeInsets.fromLTRB(12, 0, 12, 4),
+          child: Wrap(
+            spacing: 6,
+            runSpacing: 4,
             children: [
-              Text(
-                _filterCard ?? 'すべてのカード',
-                style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold),
+              ActionChip(
+                avatar: const Icon(Icons.credit_card, size: 16),
+                label: Text(
+                  'カード：${_filterCard ?? 'すべて'} ▾',
+                  overflow: TextOverflow.ellipsis,
+                ),
+                onPressed: () => _pickCardFilter(cards),
               ),
-              const SizedBox(width: 8),
-              Text('${list.length}件',
-                  style: const TextStyle(fontSize: 12, color: Colors.black54)),
-              const Spacer(),
-              Text(
-                '合計 ¥${searchTotal + installmentPart}',
-                style: TextStyle(
-                    fontSize: 15,
-                    fontWeight: FontWeight.bold,
-                    color: Colors.red[700]),
+              PopupMenuButton<_SortMode>(
+                tooltip: '並べ替え',
+                initialValue: _sortMode,
+                onSelected: (v) => setState(() => _sortMode = v),
+                itemBuilder: (_) => [
+                  for (final m in _SortMode.values)
+                    PopupMenuItem(value: m, child: Text(_sortLabel(m))),
+                ],
+                child: Chip(
+                  avatar: const Icon(Icons.swap_vert, size: 16),
+                  label: Text('並び：${_sortLabel(_sortMode)} ▾'),
+                ),
+              ),
+              FilterChip(
+                label: const Text('引落確定も表示'),
+                selected: _showBank,
+                onSelected: (v) => setState(() => _showBank = v),
               ),
             ],
           ),
         ),
-        // 💡 分割払いは各カードの請求に含まれて落ちる。上の合計に足し込んであるので、
-        //   ここは内訳の参考表示（二重に足さないための注意書き）。
-        if (installmentPart > 0)
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-            child: Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    '※ うち分割払い（各カードの請求に含む・重複して数えないでください）',
-                    style: TextStyle(fontSize: 11, color: Colors.deepOrange[700]),
-                  ),
+        // 💡 合計・件数・分割の内数を別々の行にする（長いカード名と合計を同じ行に詰めない）
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 2, 16, 6),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.baseline,
+                textBaseline: TextBaseline.alphabetic,
+                children: [
+                  Text('合計 ${formatYen(searchTotal + installmentPart)}',
+                      style: TextStyle(
+                          fontSize: 16, fontWeight: FontWeight.bold, color: Colors.red[700])),
+                  const Spacer(),
+                  Text('${list.length}件',
+                      style: const TextStyle(fontSize: 12, color: Colors.black54)),
+                ],
+              ),
+              // 💡 分割払いは各カードの請求に含めて落ちる。上の合計に入っている「内数」。
+              //   警告色にはしない（不足や失敗ではないので）。説明はⓘから。
+              if (installmentPart > 0)
+                Row(
+                  children: [
+                    Text('うち分割 ${formatYen(installmentPart)}（合計に含む）',
+                        style: const TextStyle(fontSize: 12, color: Colors.black87)),
+                    IconButton(
+                      tooltip: '分割の内訳について',
+                      visualDensity: VisualDensity.compact,
+                      iconSize: 16,
+                      icon: const Icon(Icons.info_outline),
+                      onPressed: () => showDialog<void>(
+                        context: context,
+                        builder: (context) => AlertDialog(
+                          title: const Text('うち分割'),
+                          content: const Text(
+                              '分割払いは、組んだカードの毎月の請求に含まれて口座から引かれます。'
+                              'そのため上の合計に入っています。別に足すと二重に数えることになります。'),
+                          actions: [
+                            TextButton(
+                                onPressed: () => Navigator.pop(context),
+                                child: const Text('閉じる')),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
-                Text('¥$installmentPart',
-                    style: TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.bold,
-                        color: Colors.deepOrange[700])),
-              ],
-            ),
+            ],
           ),
+        ),
         Expanded(
           child: list.isEmpty
               ? _empty('この月の請求はありません')
@@ -656,6 +655,72 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
         ),
       ],
     );
+  }
+
+  String _sortLabel(_SortMode m) => switch (m) {
+        _SortMode.dateAsc => '日付が古い順',
+        _SortMode.dateDesc => '日付が新しい順',
+        _SortMode.amountAsc => '金額が安い順',
+        _SortMode.amountDesc => '金額が高い順',
+      };
+
+  // 💡 支払いの種類。似た名前のカード（三井OLIVE と 三井OLIVE（デビット））を見分けるため
+  static String cardKindLabel(String card) {
+    if (card.contains('デビット')) return 'デビット（使った時点で口座から引かれる）';
+    if (card.contains('ポイントペイ')) return 'プリペイド（チャージ済みの残高から払う）';
+    return 'クレジット（あとで請求・引き落とし）';
+  }
+
+  // 💡 カードの絞り込み。横スクロールのチップでは長い名前が切れていたので、
+  //   全名称と支払いの種類が読める一覧から選ぶ。
+  Future<void> _pickCardFilter(List<String> cards) async {
+    const all = '\u0000all'; // 「すべて」を表す値（カード名と被らない）
+    final picked = await showAppSheet<String>(context, (ctx) => SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 12, 8, 4),
+                child: Row(
+                  children: [
+                    const Expanded(
+                      child: Text('カードで絞り込む',
+                          style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                    ),
+                    IconButton(
+                      tooltip: '閉じる',
+                      icon: const Icon(Icons.close),
+                      onPressed: () => Navigator.pop(ctx),
+                    ),
+                  ],
+                ),
+              ),
+              ListTile(
+                leading: const Icon(Icons.all_inclusive),
+                title: const Text('すべてのカード'),
+                trailing: _filterCard == null ? const Icon(Icons.check, color: Colors.pink) : null,
+                onTap: () => Navigator.pop(ctx, all),
+              ),
+              for (final c in cards)
+                ListTile(
+                  leading: Icon(cardStyleOf(c).icon, color: cardStyleOf(c).color),
+                  title: Text(c), // 全名称（切らない）
+                  subtitle: Text(cardKindLabel(c), style: const TextStyle(fontSize: 12)),
+                  trailing: _filterCard == c ? const Icon(Icons.check, color: Colors.pink) : null,
+                  onTap: () => Navigator.pop(ctx, c),
+                ),
+              if (cards.isEmpty)
+                const Padding(
+                  padding: EdgeInsets.all(16),
+                  child: Text('この月の明細はまだありません',
+                      style: TextStyle(color: Colors.black54)),
+                ),
+              const SizedBox(height: 8),
+            ],
+          ),
+        ));
+    if (picked == null || !mounted) return;
+    setState(() => _filterCard = picked == all ? null : picked);
   }
 
   // 明細ごとにできる操作。対象外のもの（Amazon以外のカード付け替え、分割できない金額）は出さない。

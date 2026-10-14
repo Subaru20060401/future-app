@@ -1,3 +1,5 @@
+import 'package:flutter/foundation.dart' show ValueNotifier;
+
 import 'app_state.dart';
 import 'gmail_service.dart';
 
@@ -27,6 +29,32 @@ class GmailSyncResult {
   // 取りこぼしがあり、データを守るため反映を見送ったか
   bool get skipped => missed > 0;
 
+  // 問題なく最後まで確認できたか
+  bool get ok =>
+      error == null && !notSignedIn && !needsPermission && !restoringAuth && !skipped;
+
+  // 💡 画面に常に出しておく短い一言（詳細は detailLines で開いて見る）
+  String get shortMessage {
+    if (ok) return 'メールを確認しました';
+    if (restoringAuth) return 'Google連携を復帰しています…';
+    if (notSignedIn) return 'Googleに連携されていません';
+    if (needsPermission) return 'Google連携の期限が切れています';
+    if (skipped) return '一部のメールが取れず、反映を見送りました';
+    return 'メールを確認できませんでした';
+  }
+
+  // 💡 詳細で見せる内訳。
+  //   ⚠️ removed は「メールの取り込み直しで入れ替わって外れた自動明細」の数で、
+  //     自分で削除した明細の数ではない。混同しないよう言葉を分ける。
+  List<String> get detailLines => [
+        if (ok) ...[
+          '確認したメール: $fetched件',
+          '新しく入った明細: $added件',
+          '取り込み直しで外れた明細: $removed件（自分で削除したものは含みません）',
+        ] else
+          message,
+      ];
+
   String get message {
     if (restoringAuth) return 'Google連携を復帰しています…';
     if (notSignedIn) return 'Googleに連携されていません（設定→Google連携）';
@@ -40,6 +68,11 @@ class GmailSyncResult {
     return '$added件追加 / $removed件削除';
   }
 }
+
+// 💡 最後に確認した結果（起動時の自動更新と更新ボタンの両方で記録する）。
+//   画面は大きな通知で覆わず、ホームの上に一言で出す。保存はしない（開いている間だけ）。
+final ValueNotifier<({DateTime at, GmailSyncResult result})?> lastGmailSync =
+    ValueNotifier(null);
 
 MailKind _kindOf(ParsedPayment p) => p.kind;
 
@@ -67,7 +100,11 @@ Future<GmailSyncResult>? _inFlight;
 Future<GmailSyncResult> syncGmail(AppState appState, {bool full = false}) {
   final running = _inFlight;
   if (running != null) return running;
-  final f = _syncGmail(appState, full: full);
+  final f = _syncGmail(appState, full: full).then((r) {
+    // 連携の復帰中（ページ移動中）は結果ではないので残さない
+    if (!r.restoringAuth) lastGmailSync.value = (at: DateTime.now(), result: r);
+    return r;
+  });
   _inFlight = f;
   f.whenComplete(() {
     if (identical(_inFlight, f)) _inFlight = null;

@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 import '../app_state.dart';
 import '../gmail_service.dart';
 import '../gmail_sync.dart';
+import 'sync_status.dart';
 
 // 💡 どの画面にも置けるGmail取得ボタン（AppBarのアクション用）。
 //   取得中はスピナー、結果はSnackBarで通知。
@@ -30,12 +31,19 @@ class _GmailRefreshButtonState extends State<GmailRefreshButton> {
     }
     if (!mounted) return;
     setState(() => _loading = false);
+    // 💡 結果は短い一言だけ。浮かせて出すので、＋ボタンや下のタブを覆わない。
+    //   内訳（新しく入った件数・取り込み直しで外れた件数）は「詳細」から。
+    final s = lastGmailSync.value;
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
       ..showSnackBar(SnackBar(
-        content: Text(result.message),
-        backgroundColor: result.skipped ? Colors.orange[800] : null,
-        duration: Duration(seconds: result.skipped ? 6 : 4),
+        behavior: SnackBarBehavior.floating,
+        content: Text(result.shortMessage),
+        backgroundColor: result.ok ? null : Colors.orange[800],
+        duration: Duration(seconds: result.ok ? 3 : 6),
+        action: s == null
+            ? null
+            : SnackBarAction(label: '詳細', onPressed: () => showSyncDetail(context, s)),
       ));
   }
 

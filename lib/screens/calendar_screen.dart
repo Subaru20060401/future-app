@@ -256,6 +256,12 @@ class _CalendarScreenState extends State<CalendarScreen> {
             lastDay: DateTime.utc(2030, 12, 31),
             focusedDay: _focusedDay,
             calendarFormat: _calendarFormat,
+            // 💡 表示切替のボタンが英語（2 weeks など）だったので日本語にそろえる
+            availableCalendarFormats: const {
+              CalendarFormat.month: '月',
+              CalendarFormat.twoWeeks: '2週間',
+              CalendarFormat.week: '週',
+            },
             selectedDayPredicate: (day) => isSameDay(_selectedDay, day),
             onDaySelected: (selectedDay, focusedDay) {
               setState(() {
@@ -463,7 +469,28 @@ Expanded(
             }),
           ],
         )
-      : const Center(child: Text('予定はありません'));
+      // 💡 空のときは、次にできることを出す
+      : Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                _selectedDay == null
+                    ? '日付を選ぶと、その日の予定が出ます'
+                    : '${_selectedDay!.month}月${_selectedDay!.day}日の予定はありません',
+                style: const TextStyle(color: Colors.black54),
+              ),
+              if (_selectedDay != null) ...[
+                const SizedBox(height: 8),
+                OutlinedButton.icon(
+                  onPressed: () => showAddEntrySheet(context, appState, _selectedDay!),
+                  icon: const Icon(Icons.add, size: 18),
+                  label: const Text('この日に追加'),
+                ),
+              ],
+            ],
+          ),
+        );
   }(),
 ),
         ],
