@@ -194,6 +194,8 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
       // 💡 結果は通知で画面を覆わず、ホームの上の一行（SyncStatusBar）に出す。
       //   失敗・見送りのときは、そこに再試行のボタンが出る。
       await syncGmail(appState);
+      // 💡 給料日のカレンダー通知を、先の月まで用意しておく（日付が変わっていれば移す）
+      await appState.syncPaydaysToCalendar();
     });
   }
 

@@ -103,6 +103,7 @@ class GoogleCalendarSync implements CalendarSyncHook {
     bool allDay = false,
     String location = '',
     String description = '',
+    List<int>? reminderMinutes, // null＝カレンダーの既定どおり
   }) async {
     if (!await _ensure()) return existingId;
     final api = await GmailService.instance.calendarApi();
@@ -117,6 +118,16 @@ class GoogleCalendarSync implements CalendarSyncHook {
       // 終日予定の終了日は「翌日」を指す決まりになっている
       ..end = _at(allDay ? safeEnd.add(const Duration(days: 1)) : safeEnd,
           allDay: allDay);
+    if (reminderMinutes != null) {
+      body.reminders = gcal.EventReminders()
+        ..useDefault = false
+        ..overrides = [
+          for (final m in reminderMinutes)
+            gcal.EventReminder()
+              ..method = 'popup'
+              ..minutes = m,
+        ];
+    }
 
     try {
       if (existingId != null && existingId.isNotEmpty) {
@@ -201,6 +212,7 @@ class GoogleCalendarSync implements CalendarSyncHook {
     required String title,
     required DateTime date,
     required String description,
+    bool remind = false,
   }) async {
     return _createOrUpdate(
       existingId: existingCalId.isNotEmpty ? existingCalId : null,
@@ -209,6 +221,9 @@ class GoogleCalendarSync implements CalendarSyncHook {
       end: date,
       allDay: true,
       description: description,
+      // 💡 終日予定の通知は「その日の0時から何分前か」。0＝当日の0:00に通知。
+      //   （新しく作ったカレンダーには既定の通知が無いことが多く、付けないと鳴らない）
+      reminderMinutes: remind ? const [0] : null,
     );
   }
 

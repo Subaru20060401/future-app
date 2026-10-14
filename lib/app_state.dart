@@ -1146,11 +1146,13 @@ abstract class CalendarSyncHook {
   void upsertEvent(EventData event);
   void deleteEvent(String calendarEventId);
   // 給料日・引き落とし日などの特殊イベント同期。keyは内部管理用(カレンダーIDを返す)。
+  // remind=true なら、その日に通知が出るようにする（カレンダー側の既定任せにしない）。
   Future<String?> upsertSpecialEvent({
     required String existingCalId,
     required String title,
     required DateTime date,
     required String description,
+    bool remind = false,
   });
 }
 
@@ -1375,58 +1377,94 @@ class AppState extends ChangeNotifier {
         calendarAutoSync = false;
         saveData();
         notifyListeners();
+      } else {
+        await syncPaydaysToCalendar(); // 給料日も書き出す
       }
       return ok;
     }
     return true;
   }
 
-  // 給料日・引き落とし日をAppleカレンダーに同期（calendarAutoSyncがONの場合）
-  Future<void> syncSpecialEventsToCalendar() async {
+  // ───── 給料日をGoogleカレンダーへ（「💰 給料日」の通知） ─────
+  // ⚠️ 以前の syncSpecialEventsToCalendar はどこからも呼ばれておらず、
+  //   設定に「給料日を書き出し」とあるのに一度もイベントが作られていなかった。
+  //   さらにイベントIDを保存していなかったので、動いていたら起動のたびに重複していた。
+  //   （引き落としの部分は「利用日」まで引き落としとして書く作りだったので、使わずに外した）
+  // 💡 キー＝勤務先×労働月。そこに置いたイベントのIDと「置いた日付・内容」を覚える。
+  //   ・給料日を変えたら、まだ来ていない給料日のイベントは新しい日付へ移す
+  //   ・もう来た給料日（その日付で通知済み）は動かさない（同じ月の通知が二度出るため）
+  //   ・日付も内容も同じなら書き直さない（API節約）
+  final Map<String, String> specialCalendarSigs = {};
+  bool _paydaySyncRunning = false;
+  bool _paydaySyncAgain = false;
+
+  // 置いた日付・内容の記録（"2026-10-25|タイトル|説明"）から日付だけ取り出す
+  static DateTime? _sigDate(String? sig) =>
+      sig == null ? null : DateTime.tryParse(sig.split('|').first);
+
+  Future<void> syncPaydaysToCalendar({DateTime? now}) async {
     if (!calendarAutoSync || calendarSync == null) return;
-    final now = DateTime.now();
-    // 前後3か月の給料日
+    // ⚠️ 同時に2回走ると、どちらも「まだ無い」と判断して同じ給料日を2つ作る。
+    //   走っている間に頼まれたら、終わってからもう一度だけ回す。
+    if (_paydaySyncRunning) {
+      _paydaySyncAgain = true;
+      return;
+    }
+    _paydaySyncRunning = true;
+    try {
+      do {
+        _paydaySyncAgain = false;
+        await _syncPaydaysOnce(now ?? DateTime.now());
+      } while (_paydaySyncAgain);
+    } finally {
+      _paydaySyncRunning = false;
+    }
+  }
+
+  Future<void> _syncPaydaysOnce(DateTime now) async {
+    final today = DateTime(now.year, now.month, now.day);
+    var changed = false;
+    // 先月〜3か月先の労働月ぶん（給料日はそれぞれの入金月に来る）
     for (var dm = -1; dm <= 3; dm++) {
       final m = DateTime(now.year, now.month + dm);
       for (final entry in paydaysInMonth(m)) {
         final key = 'payday_${entry.workplace.id}_${DateFormat('yyyyMM').format(m)}';
         final existingId = specialCalendarIds[key] ?? '';
+        final placed = _sigDate(specialCalendarSigs[key]);
+        // ⚠️ もう来た給料日は動かさない（その日付で通知済み）
+        if (existingId.isNotEmpty && placed != null && placed.isBefore(today)) continue;
         final title = '💰 給料日（${entry.workplace.name}）';
         final desc = '${m.month}月分 ¥${entry.amount}';
+        final sig = '${DateFormat('yyyy-MM-dd').format(entry.date)}|$title|$desc';
+        if (existingId.isNotEmpty && specialCalendarSigs[key] == sig) continue;
         final calId = await calendarSync!.upsertSpecialEvent(
           existingCalId: existingId,
           title: title,
           date: entry.date,
           description: desc,
+          remind: true, // 給料日の当日に通知する
         );
-        if (calId != null) specialCalendarIds[key] = calId;
+        if (calId != null) {
+          specialCalendarIds[key] = calId;
+          specialCalendarSigs[key] = sig;
+          changed = true;
+        }
       }
     }
-    // 直近の引き落とし日（銀行確定・今後の予定）
-    final upcoming = payments.where((p) =>
-      p.paymentDate.isAfter(DateTime(now.year, now.month - 1))
-    );
-    final grouped = <String, List<Payment>>{};
-    for (final p in upcoming) {
-      final k = DateFormat('yyyyMMdd').format(p.paymentDate);
-      grouped.putIfAbsent(k, () => []).add(p);
+    if (changed) saveData();
+  }
+
+  // 💡 勤務先を消したら、まだ来ていない給料日のイベントも消す（通知が残らないように）
+  void _removePaydayEventsOf(String workplaceId, DateTime today) {
+    final prefix = 'payday_${workplaceId}_';
+    for (final key in specialCalendarIds.keys.where((k) => k.startsWith(prefix)).toList()) {
+      final placed = _sigDate(specialCalendarSigs[key]);
+      if (calendarAutoSync && (placed == null || !placed.isBefore(today))) {
+        calendarSync?.deleteEvent(specialCalendarIds[key]!);
+      }
+      specialCalendarIds.remove(key);
+      specialCalendarSigs.remove(key);
     }
-    for (final entry in grouped.entries) {
-      final date = DateTime.parse(entry.key.substring(0, 4) + '-' +
-          entry.key.substring(4, 6) + '-' + entry.key.substring(6, 8));
-      final total = entry.value.fold<int>(0, (s, p) => s + p.amount);
-      final cards = entry.value.map((p) => p.cardName).toSet().join('・');
-      final key = 'payment_${entry.key}';
-      final existingId = specialCalendarIds[key] ?? '';
-      final calId = await calendarSync!.upsertSpecialEvent(
-        existingCalId: existingId,
-        title: '💳 引き落とし（$cards）',
-        date: date,
-        description: '合計 ¥$total',
-      );
-      if (calId != null) specialCalendarIds[key] = calId;
-    }
-    saveData();
   }
 
   // ───── シフト ─────
@@ -1520,6 +1558,7 @@ class AppState extends ChangeNotifier {
     workplaces.add(w);
     saveData();
     notifyListeners();
+    syncPaydaysToCalendar(); // 給料日をカレンダーへ（自動連携ONのときだけ動く）
   }
 
   // 既存の勤務先を丸ごと差し替え（編集画面の「保存する」用）
@@ -1530,9 +1569,12 @@ class AppState extends ChangeNotifier {
     workplaces[i] = w;
     saveData();
     notifyListeners();
+    // 💡 給料日を変えたら、まだ来ていない給料日のカレンダー通知を新しい日へ移す
+    syncPaydaysToCalendar();
   }
 
   void removeWorkplace(String id) {
+    _removePaydayEventsOf(id, DateTime.now());
     workplaces.removeWhere((e) => e.id == id);
     // 削除した勤務先に紐づくデータも掃除（入金の選択肢や集計に残らないように）
     actualSalariesByWp.removeWhere((k, _) => k.endsWith('|$id'));
@@ -4480,6 +4522,10 @@ class AppState extends ChangeNotifier {
       'paymentNotes': paymentNotes,
       'amazonCardOverrides': amazonCardOverrides,
       'cardAliases': cardAliases,
+      // 💡 カレンダーのイベントIDは同じGoogleアカウントで共通。別の端末で同じ給料日を
+      //   二重に作らないよう、同期データにも入れる。
+      'specialCalendarIds': specialCalendarIds,
+      'specialCalendarSigs': specialCalendarSigs,
       'cardPaymentDays': cardPaymentDays,
       'cardClosingDays': cardClosingDays,
       'events': events.map((k, v) => MapEntry(k, v.map((e) => e.toJson()).toList())),
@@ -4821,6 +4867,14 @@ class AppState extends ChangeNotifier {
     (map['cardAliases'] as Map?)?.forEach((k, v) {
       if (v is String) cardAliases['$k'] = v;
     });
+    specialCalendarIds.clear();
+    (map['specialCalendarIds'] as Map?)?.forEach((k, v) {
+      if (v is String) specialCalendarIds['$k'] = v;
+    });
+    specialCalendarSigs.clear();
+    (map['specialCalendarSigs'] as Map?)?.forEach((k, v) {
+      if (v is String) specialCalendarSigs['$k'] = v;
+    });
     // 💡 マージだと、別端末で削除したカードが取り込みのたびに復活する。置き換える。
     final cpd = map['cardPaymentDays'] as Map?;
     if (cpd != null) {
@@ -4936,6 +4990,8 @@ class AppState extends ChangeNotifier {
     await prefs.setString('saved_payment_notes', jsonEncode(paymentNotes));
     await prefs.setString('saved_amazon_overrides', jsonEncode(amazonCardOverrides));
     await prefs.setString('saved_card_aliases', jsonEncode(cardAliases));
+    await prefs.setString('saved_special_calendar_ids', jsonEncode(specialCalendarIds));
+    await prefs.setString('saved_special_calendar_sigs', jsonEncode(specialCalendarSigs));
     await prefs.setString('saved_actual_salaries', jsonEncode(actualSalaries));
     await prefs.setString('saved_actual_salaries_by_wp', jsonEncode(actualSalariesByWp));
     await prefs.setString('saved_balance_updated_at', balanceUpdatedAt?.toIso8601String() ?? '');
@@ -5217,6 +5273,16 @@ class AppState extends ChangeNotifier {
     if (caStr != null) {
       (jsonDecode(caStr) as Map<String, dynamic>).forEach((k, v) {
         if (v is String) cardAliases[k] = v;
+      });
+    }
+    for (final (key, target) in [
+      ('saved_special_calendar_ids', specialCalendarIds),
+      ('saved_special_calendar_sigs', specialCalendarSigs),
+    ]) {
+      final s = prefs.getString(key);
+      if (s == null) continue;
+      (jsonDecode(s) as Map<String, dynamic>).forEach((k, v) {
+        if (v is String) target[k] = v;
       });
     }
     final aoStr = prefs.getString('saved_amazon_overrides');

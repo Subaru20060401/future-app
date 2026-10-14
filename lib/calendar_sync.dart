@@ -153,6 +153,7 @@ class AppleCalendarSync implements CalendarSyncHook {
     required String title,
     required DateTime date,
     required String description,
+    bool remind = false, // 端末カレンダー版（現在は未使用）は既定の通知に任せる
   }) async {
     return await _createOrUpdate(
       existingId: existingCalId.isNotEmpty ? existingCalId : null,
