@@ -7,6 +7,7 @@ import '../widgets/gmail_refresh_button.dart';
 import '../widgets/swipe_to_delete.dart';
 import 'trash_screen.dart';
 import '../widgets/app_sheet.dart';
+import '../widgets/payment_row.dart';
 
 class PaymentScreen extends StatefulWidget {
   const PaymentScreen({super.key});
@@ -18,8 +19,12 @@ class PaymentScreen extends StatefulWidget {
 // 支払い一覧の並べ替え
 enum _SortMode { dateAsc, dateDesc, amountAsc, amountDesc }
 
+// ⚠️ タブはここで1か所だけ定義する。以前は TabController の数(4)とタブ・中身の数(5)が
+//   別々に書かれていて食い違い、ATM のタブに正しく届かなかった。
+const List<String> _paymentTabs = ['カード', '分割', '定期', 'ローン', 'ATM'];
+
 class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProviderStateMixin {
-  late final TabController _tab = TabController(length: 4, vsync: this);
+  late final TabController _tab = TabController(length: _paymentTabs.length, vsync: this);
   String? _filterCard; // カード絞り込み（nullは全件）
   late DateTime _filterMonth = DateTime(DateTime.now().year, DateTime.now().month); // 初期=今月
   _SortMode _sortMode = _SortMode.dateAsc; // 並べ替え
@@ -72,13 +77,7 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
         bottom: TabBar(
           controller: _tab,
           isScrollable: true,
-          tabs: const [
-            Tab(text: 'カード'),
-            Tab(text: '分割'),
-            Tab(text: '定期'),
-            Tab(text: 'ローン'),
-            Tab(text: 'ATM'),
-          ],
+          tabs: [for (final t in _paymentTabs) Tab(text: t)],
         ),
       ),
       // 💡 単一Scaffold・単一FAB。各タブはリスト表示のみ（入れ子Scaffoldを廃止）
@@ -439,18 +438,6 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
 
   bool _sameMonth(DateTime d) => d.year == _filterMonth.year && d.month == _filterMonth.month;
 
-  // 利用通知は「利用日時」(時刻あり)、それ以外は「支払日」
-  String _dateLabel(Payment p) {
-    final d = p.paymentDate;
-    if (p.source == PaymentSource.usage) {
-      final hasTime = d.hour != 0 || d.minute != 0;
-      return hasTime
-          ? '利用日時: ${DateFormat('M/d HH:mm').format(d)}'
-          : '利用日: ${DateFormat('M/d').format(d)}';
-    }
-    return '支払日: ${DateFormat('M/d').format(d)}';
-  }
-
   // ───────────────────── カード請求 ─────────────────────
   Widget _cardList(AppState appState) {
     // 月で絞り込み（表示している日付＝利用日/支払日 の月で振り分け）
@@ -652,69 +639,16 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
                   children: list.asMap().entries.map((entry) {
                     final i = entry.key;
                     final p = entry.value;
-                    final style = cardStyleOf(p.cardName);
+                    final actions = _actionsFor(appState, p);
                     return SwipeToDelete(
                       // 重複IDが残っていても衝突しないよう index を併用
                       itemKey: ValueKey('pay_${i}_${p.id}'),
                       onDelete: () => appState.removePayment(p.id),
-                      child: Card(
-                        child: ListTile(
-                          leading: Icon(style.icon, color: style.color),
-                          title: Row(
-                            children: [
-                              Expanded(child: Text(p.cardName)),
-                              _sourceBadge(p.source),
-                            ],
-                          ),
-                          subtitle: Text(
-                            p.infoOnly
-                                ? '${_dateLabel(p)}\n他のカードで計上済みのため、記録のみ'
-                                : (p.note.isNotEmpty
-                                    ? '${_dateLabel(p)}\n${p.note}'
-                                    : '${_dateLabel(p)}\nタップして利用先を書く'),
-                            style: p.infoOnly
-                                ? const TextStyle(color: Colors.grey)
-                                : null,
-                          ),
-                          isThreeLine: true,
-                          onTap: () => _editNote(appState, p),
-                          trailing: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Text('¥${p.amount}',
-                                  style: TextStyle(
-                                      color: p.infoOnly
-                                          ? Colors.grey
-                                          : (p.paid ? Colors.grey : Colors.red),
-                                      decoration: (p.paid || p.infoOnly)
-                                          ? TextDecoration.lineThrough
-                                          : null)),
-                              // 💡 Amazonのメールには支払いカードが載らないので、
-                              //   ここで実際に使ったカードへ付け替えられるようにする。
-                              if (appState.isAmazonPayment(p))
-                                IconButton(
-                                  tooltip: p.infoOnly ? '記録のみ（計上していません）' : '使ったカードに移す',
-                                  icon: Icon(Icons.drive_file_move_outline,
-                                      color: p.infoOnly
-                                          ? Colors.grey
-                                          : Colors.indigo),
-                                  onPressed: () => _moveAmazon(appState, p),
-                                ),
-                              // 最低分割金額を満たすカードのみ「分割に変換」を表示
-                              if (canInstallment(p.cardName, p.amount))
-                                IconButton(
-                                  tooltip: '分割に変換',
-                                  icon: const Icon(Icons.call_split, color: Colors.deepOrange),
-                                  onPressed: () => _convertToInstallment(appState, p),
-                                ),
-                              IconButton(
-                                icon: Icon(p.paid ? Icons.check_circle : Icons.radio_button_unchecked,
-                                    color: p.paid ? Colors.green : Colors.grey),
-                                onPressed: () => appState.togglePaid(p.id),
-                              ),
-                            ],
-                          ),
-                        ),
+                      // 💡 本文と金額・操作を分けた行（狭い幅では金額を下段へ）
+                      child: PaymentRow(
+                        payment: p,
+                        actions: actions,
+                        onTap: () => _showPaymentDetail(appState, p, actions),
                       ),
                     );
                   }).toList(),
@@ -722,6 +656,126 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
         ),
       ],
     );
+  }
+
+  // 明細ごとにできる操作。対象外のもの（Amazon以外のカード付け替え、分割できない金額）は出さない。
+  PaymentActions _actionsFor(AppState appState, Payment p) => PaymentActions(
+        onEditNote: () => _editNote(appState, p),
+        onTogglePaid: () => appState.togglePaid(p.id),
+        onDelete: () => _confirmDelete(appState, p),
+        onMoveCard: appState.isAmazonPayment(p) ? () => _moveAmazon(appState, p) : null,
+        onInstallment: canInstallment(p.cardName, p.amount)
+            ? () => _convertToInstallment(appState, p)
+            : null,
+      );
+
+  Future<void> _confirmDelete(AppState appState, Payment p) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('この明細を削除'),
+        content: Text('${p.cardName}  ${formatYen(p.amount)}\n'
+            'ゴミ箱に移します（右上のゴミ箱から戻せます）。'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context, false), child: const Text('キャンセル')),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('削除', style: TextStyle(color: Colors.red)),
+          ),
+        ],
+      ),
+    );
+    if (ok == true) appState.removePayment(p.id);
+  }
+
+  // 💡 行をタップしたときの詳細。省略された名前・利用先の全文と、状態の意味、操作を出す。
+  //   （以前は行タップ＝利用先の編集だった。編集は詳細の中のボタンから）
+  void _showPaymentDetail(AppState appState, Payment p, PaymentActions actions) {
+    final status = paymentStatusLabel(p);
+    Widget row(String label, String value) => Padding(
+          padding: const EdgeInsets.symmetric(vertical: 4),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              SizedBox(
+                width: 72,
+                child: Text(label, style: const TextStyle(fontSize: 13, color: Colors.black54)),
+              ),
+              Expanded(child: Text(value, style: const TextStyle(fontSize: 14))),
+            ],
+          ),
+        );
+    void run(VoidCallback f) {
+      Navigator.pop(context);
+      f();
+    }
+
+    showAppSheet(context, (_) => Padding(
+          padding: const EdgeInsets.fromLTRB(20, 20, 20, 24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  const Expanded(
+                    child: Text('明細の詳細',
+                        style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold)),
+                  ),
+                  IconButton(
+                    tooltip: '閉じる',
+                    icon: const Icon(Icons.close),
+                    onPressed: () => Navigator.pop(context),
+                  ),
+                ],
+              ),
+              row('カード', p.cardName),
+              row('金額', formatYen(p.amount)),
+              row('種別', paymentSourceLabel(p.source)),
+              row(p.source == PaymentSource.usage ? '利用日' : '支払日',
+                  DateFormat('yyyy/M/d HH:mm').format(p.paymentDate)),
+              row('利用先', p.note.isEmpty ? '未入力' : p.note),
+              if (status != null) row('状態', status),
+              if (p.infoOnly)
+                const Padding(
+                  padding: EdgeInsets.only(top: 4),
+                  child: Text('他のカードで計上済みのため、合計にも予想残高にも入れていません。',
+                      style: TextStyle(fontSize: 12, color: Colors.black54)),
+                ),
+              if (p.paid && !p.infoOnly)
+                const Padding(
+                  padding: EdgeInsets.only(top: 4),
+                  child: Text('支払済みの目印です。「カード請求（未払い）」の集計から外れます。'
+                      '予想残高の計算は変わりません。',
+                      style: TextStyle(fontSize: 12, color: Colors.black54)),
+                ),
+              const Divider(height: 24),
+              Wrap(
+                spacing: 8,
+                runSpacing: 4,
+                children: [
+                  OutlinedButton(
+                      onPressed: () => run(actions.onEditNote), child: const Text('利用先を編集')),
+                  if (actions.onMoveCard != null)
+                    OutlinedButton(
+                        onPressed: () => run(actions.onMoveCard!),
+                        child: const Text('支払いカードを変更')),
+                  if (actions.onInstallment != null)
+                    OutlinedButton(
+                        onPressed: () => run(actions.onInstallment!),
+                        child: const Text('分割払いへ変更')),
+                  OutlinedButton(
+                      onPressed: () => run(actions.onTogglePaid),
+                      child: Text(p.paid ? '未払いに戻す' : '支払済みにする')),
+                  TextButton(
+                      onPressed: () => run(actions.onDelete),
+                      child: const Text('削除', style: TextStyle(color: Colors.red))),
+                ],
+              ),
+            ],
+          ),
+        ));
   }
 
   // 💡 Amazonの明細を、実際に使ったカードへ付け替える。
@@ -1321,31 +1375,3 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
 }
 
 // 支払いの出所バッジ（銀行確定/請求予定/利用/手動）
-Widget _sourceBadge(PaymentSource source) {
-  late final String label;
-  late final Color bg;
-  late final Color fg;
-  switch (source) {
-    case PaymentSource.bank:
-      label = '銀行確定';
-      bg = Colors.green.shade100;
-      fg = Colors.green.shade900;
-    case PaymentSource.billing:
-      label = '請求予定';
-      bg = Colors.red.shade100;
-      fg = Colors.red.shade900;
-    case PaymentSource.usage:
-      label = '利用';
-      bg = Colors.blue.shade100;
-      fg = Colors.blue.shade900;
-    case PaymentSource.manual:
-      label = '手動';
-      bg = Colors.grey.shade200;
-      fg = Colors.grey.shade800;
-  }
-  return Container(
-    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-    decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(6)),
-    child: Text(label, style: TextStyle(fontSize: 11, color: fg)),
-  );
-}
