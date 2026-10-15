@@ -801,6 +801,14 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
               row(p.source == PaymentSource.usage ? '利用日' : '支払日',
                   DateFormat('yyyy/M/d HH:mm').format(p.paymentDate)),
               row('利用先', p.note.isEmpty ? '未入力' : p.note),
+              // 💡 どの引き落としに数えているか（手入力の日付がずれていないか確かめられる）
+              if (p.source != PaymentSource.bank && !p.infoOnly)
+                row('引落予定', () {
+                  final d = appState.drawDateForUsage(p.cardName, p.paymentDate);
+                  return d == null
+                      ? '締め日・引落日が未登録のカード'
+                      : '${d.month}月${d.day}日（${appState.closingLabelOf(p.cardName)}）';
+                }()),
               if (status != null) row('状態', status),
               if (p.infoOnly)
                 const Padding(
@@ -942,10 +950,18 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
     showDialog(
       context: context,
       builder: (context) => StatefulBuilder(
-        builder: (context, setLocal) => AlertDialog(
-          title: const Text('カード請求を追加'),
-          content: Column(
+        // ⚠️ 以前は「カード請求を追加／請求額／支払日」で、引き落とし日を入れる画面に見えた。
+        //   ところが計算はこの日付を「利用日」として扱う（締め日で、どの月の引き落としに
+        //   入るかを決める）。引き落とし日（例: 11/10）を入れると翌月（12月）にずれていた。
+        //   利用日を入れてもらい、どの引き落としに入るかをその場で見せる。
+        builder: (context, setLocal) {
+          final drawDate = appState.drawDateForUsage(card, date);
+          return AlertDialog(
+          title: const Text('カードの利用を追加'),
+          content: SingleChildScrollView(
+            child: Column(
             mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               DropdownButton<String>(
                 value: card,
@@ -953,7 +969,7 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
                 items: cards.map((c) => DropdownMenuItem(value: c, child: Text(c))).toList(),
                 onChanged: (v) => setLocal(() => card = v!),
               ),
-              TextField(controller: amountCtrl, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: '請求額(円)')),
+              TextField(controller: amountCtrl, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: '利用額(円)')),
               TextField(
                 controller: noteCtrl,
                 textCapitalization: TextCapitalization.sentences,
@@ -964,14 +980,24 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
               ),
               ListTile(
                 contentPadding: EdgeInsets.zero,
-                title: const Text('支払日'),
+                title: const Text('利用日（カードを使った日）'),
                 trailing: Text(DateFormat('M/d').format(date)),
                 onTap: () async {
                   final d = await showDatePicker(context: context, initialDate: date, firstDate: DateTime(2020), lastDate: DateTime(2030));
                   if (d != null) setLocal(() => date = d);
                 },
               ),
+              Text(
+                drawDate == null
+                    ? 'このカードは締め日・引き落とし日が未登録です。設定の「カードの締め日・引き落とし日」で登録すると、正しい月の引き落としに入ります。'
+                    : '→ ${drawDate.month}月${drawDate.day}日の引き落としに入ります'
+                        '（${appState.closingLabelOf(card)}）',
+                style: TextStyle(
+                    fontSize: 12,
+                    color: drawDate == null ? Colors.orange[900] : Colors.black87),
+              ),
             ],
+          ),
           ),
           actions: [
             TextButton(onPressed: () => Navigator.pop(context), child: const Text('キャンセル')),
@@ -988,7 +1014,8 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
               child: const Text('保存'),
             ),
           ],
-        ),
+        );
+        },
       ),
     );
   }

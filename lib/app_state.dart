@@ -3975,6 +3975,24 @@ class AppState extends ChangeNotifier {
     return nextBusinessDay(DateTime(payMonth.year, payMonth.month, day));
   }
 
+  // 💡 この日に使ったら、どの引き落とし日に入るか（手入力の画面と明細の詳細で見せる）。
+  //   締め日・引落日が設定されていないカードは null（推測で日付を出さない）。
+  //   ⚠️ 計算（drawBreakdownOf / cardClosingPeriodOf）と同じ決まりにすること：
+  //     月末締め … 利用月の翌月
+  //     n日締め  … n日までの利用は翌月、n+1日以降は翌々月
+  DateTime? drawDateForUsage(String cardName, DateTime usageDate) {
+    if (!cardPaymentDays.containsKey(cardName)) return null;
+    final d = DateTime(usageDate.year, usageDate.month, usageDate.day);
+    var payMonth = DateTime(d.year, d.month + 1);
+    if (!isMonthEndClosing(cardName)) {
+      final c = closingDayOf(cardName);
+      final lastDay = DateTime(d.year, d.month + 1, 0).day;
+      final closing = c > lastDay ? lastDay : c;
+      if (d.day > closing) payMonth = DateTime(d.year, d.month + 2);
+    }
+    return drawDateOf(cardName, payMonth);
+  }
+
   // n月に口座から引き落とされる支出の内訳。＝ n-1月の「月ごとの支出詳細」から
   //   デビット/Vポイント/ATMを除き、編集日より後の引き落としだけを残す。
   List<({String label, int amount, int colorValue})> drawBreakdownOf(DateTime payMonth) {

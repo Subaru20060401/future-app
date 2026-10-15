@@ -217,6 +217,44 @@ void main() {
       expect(drawOf(app, '三菱UFJカード', DateTime(2026, 11)), 32000);
     });
 
+    // 💡 手入力の画面に「→ 11/10の引き落としに入ります」と出す日付が、
+    //   実際の計算（どの月の引き落としに数えるか）と食い違わないこと。
+    //   ⚠️ 以前の画面は「支払日」を入れさせていたが、計算はその日付を利用日として
+    //     扱うため、引き落とし日（11/10）を入れると翌月（12月）にずれていた。
+    for (final (card, closing, payDay) in [
+      ('三菱UFJカード', 15, 10),
+      ('楽天カード', 31, 27),
+    ]) {
+      test('$card（${closing == 31 ? '月末' : '$closing日'}締め・$payDay日払い）：表示する引落日と計算が一致する', () {
+        final app = AppState()..setCardPaymentDay(card, payDay);
+        if (closing != 31) app.setCardClosingDay(card, closing);
+        // 9/1〜10/31 の毎日について、1円ずつ使ったとして確かめる
+        for (var d = DateTime(2026, 9, 1); d.isBefore(DateTime(2026, 11, 1)); d = d.add(const Duration(days: 1))) {
+          final shown = app.drawDateForUsage(card, d)!;
+          final probe = AppState()..setCardPaymentDay(card, payDay);
+          if (closing != 31) probe.setCardClosingDay(card, closing);
+          probe.addPayment(cardName: card, amount: 1, date: d);
+          final payMonth = DateTime(shown.year, shown.month);
+          expect(drawOf(probe, card, payMonth), 1,
+              reason: '${d.month}/${d.day}の利用は ${shown.month}/${shown.day} の引き落としに数えられること');
+        }
+      });
+    }
+
+    test('三菱：9/20の利用は11/10、10/16の利用は12/10、引落日の11/10と入れると12/10', () {
+      final app = AppState()
+        ..setCardPaymentDay('三菱UFJカード', 10)
+        ..setCardClosingDay('三菱UFJカード', 15);
+      expect(app.drawDateForUsage('三菱UFJカード', DateTime(2026, 9, 20)), DateTime(2026, 11, 10));
+      expect(app.drawDateForUsage('三菱UFJカード', DateTime(2026, 10, 15)), DateTime(2026, 11, 10));
+      expect(app.drawDateForUsage('三菱UFJカード', DateTime(2026, 10, 16)), DateTime(2026, 12, 10));
+      expect(app.drawDateForUsage('三菱UFJカード', DateTime(2026, 11, 10)), DateTime(2026, 12, 10));
+    });
+
+    test('締め日・引落日が未登録のカードは日付を出さない（推測しない）', () {
+      expect(AppState().drawDateForUsage('知らないカード', DateTime(2026, 9, 20)), isNull);
+    });
+
     test('注記の「うち分割払い」と合計が食い違わない', () {
       final app = AppState()
         ..setCardPaymentDay('三菱UFJカード', 10)
