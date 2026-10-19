@@ -934,6 +934,23 @@ class SettingsScreen extends StatelessWidget {
               }
             },
           ),
+          // 💡 通知はカレンダーの通知として届く（アプリを閉じていても届く）
+          if (appState.calendarAutoSync) ...[
+            ListTile(
+              leading: const Icon(Icons.notifications_active_outlined,
+                  color: Colors.indigo),
+              title: const Text('シフトの通知'),
+              subtitle: Text(_shiftReminderLabel(appState.shiftReminder)),
+              onTap: () => _pickShiftReminder(context, appState),
+            ),
+            SwitchListTile(
+              secondary: const Icon(Icons.warning_amber, color: Colors.orange),
+              title: const Text('残高不足の通知'),
+              subtitle: const Text('引き落としで足りなくなる見込みの日の3日前と前日の9時に通知'),
+              value: appState.shortfallAlerts,
+              onChanged: (v) => appState.setShortfallAlerts(v),
+            ),
+          ],
           if (appState.calendarAutoSync)
             const Padding(
               padding: EdgeInsets.fromLTRB(16, 0, 16, 12),
@@ -1229,4 +1246,53 @@ class SettingsScreen extends StatelessWidget {
       ),
     );
   }
+}
+
+String _shiftReminderLabel(ShiftReminder m) {
+  switch (m) {
+    case ShiftReminder.calendarDefault:
+      return 'カレンダーの既定のまま';
+    case ShiftReminder.none:
+      return '通知しない';
+    case ShiftReminder.hourBefore:
+      return '開始の1時間前';
+    case ShiftReminder.eveningBefore:
+      return '前日の21時';
+    case ShiftReminder.both:
+      return '前日の21時と、開始の1時間前';
+  }
+}
+
+Future<void> _pickShiftReminder(BuildContext context, AppState appState) async {
+  final picked = await showAppSheet<ShiftReminder>(
+    context,
+    (ctx) => Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        const Padding(
+          padding: EdgeInsets.fromLTRB(16, 16, 16, 4),
+          child: Text('シフトの通知',
+              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+        ),
+        const Padding(
+          padding: EdgeInsets.fromLTRB(16, 0, 16, 8),
+          child: Text(
+            'Googleカレンダーの通知として届きます（アプリを閉じていても届きます）。'
+            'まだ始まっていないシフトにも反映します。',
+            style: TextStyle(fontSize: 12, color: Colors.black54),
+          ),
+        ),
+        for (final m in ShiftReminder.values)
+          ListTile(
+            title: Text(_shiftReminderLabel(m)),
+            trailing: m == appState.shiftReminder
+                ? const Icon(Icons.check, color: Colors.indigo)
+                : null,
+            onTap: () => Navigator.pop(ctx, m),
+          ),
+      ],
+    ),
+  );
+  if (picked == null || picked == appState.shiftReminder) return;
+  await appState.setShiftReminder(picked);
 }

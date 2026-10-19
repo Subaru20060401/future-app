@@ -18,6 +18,7 @@ class FakeCalendar implements CalendarSyncHook {
     required DateTime date,
     required String description,
     bool remind = false,
+    List<int>? reminderMinutes,
   }) async {
     upserts.add((existingCalId: existingCalId, title: title, date: date, remind: remind));
     await Future<void>.delayed(Duration.zero); // 通信の待ちに見立てる
@@ -30,6 +31,8 @@ class FakeCalendar implements CalendarSyncHook {
   Future<bool> enableAndSyncAll() async => true;
   @override
   void upsertShift(DateTime date, ShiftData shift) {}
+  @override
+  Future<void> syncShiftNow(DateTime date, ShiftData shift) async {}
   @override
   void upsertEvent(EventData event) {}
 }

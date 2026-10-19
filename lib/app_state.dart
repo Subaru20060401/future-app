@@ -1143,6 +1143,8 @@ class BalanceEntry {
 abstract class CalendarSyncHook {
   Future<bool> enableAndSyncAll();
   void upsertShift(DateTime date, ShiftData shift);
+  // 💡 待てる版（通知の設定を変えたときに、先のシフトを1件ずつ書き直す）
+  Future<void> syncShiftNow(DateTime date, ShiftData shift);
   void upsertEvent(EventData event);
   void deleteEvent(String calendarEventId);
   // 給料日・引き落とし日などの特殊イベント同期。keyは内部管理用(カレンダーIDを返す)。
@@ -1153,8 +1155,43 @@ abstract class CalendarSyncHook {
     required DateTime date,
     required String description,
     bool remind = false,
+    // 💡 通知の時刻を細かく決めたいとき（その日の0時から何分前か）。remind より優先
+    List<int>? reminderMinutes,
   });
 }
+
+// 💡 シフトの通知をいつ出すか（Googleカレンダーの通知として書き出す）
+enum ShiftReminder {
+  calendarDefault, // カレンダーの既定のまま（以前の動き）
+  none, // 通知しない
+  hourBefore, // 1時間前
+  eveningBefore, // 前日の21時
+  both, // 前日の21時と1時間前
+}
+
+// 💡 シフトの開始時刻から、カレンダーの通知（開始の何分前か）を決める。
+//   null＝カレンダーの既定に任せる、空＝通知しない。
+List<int>? shiftReminderMinutes(ShiftReminder mode, DateTime start) {
+  int evening() => start
+      .difference(DateTime(start.year, start.month, start.day - 1, 21))
+      .inMinutes;
+  switch (mode) {
+    case ShiftReminder.calendarDefault:
+      return null;
+    case ShiftReminder.none:
+      return const [];
+    case ShiftReminder.hourBefore:
+      return const [60];
+    case ShiftReminder.eveningBefore:
+      return [evening()];
+    case ShiftReminder.both:
+      return [evening(), 60];
+  }
+}
+
+// 💡 残高不足の通知の時刻（終日の予定なので「その日の0時から何分前か」）。
+//   3日前の9時と前日の9時。ずらす・入金するなどの手を打てる余裕を持たせる。
+const List<int> kShortfallReminderMinutes = [3 * 1440 - 9 * 60, 1440 - 9 * 60];
 
 // ════════════════════════ AppState ════════════════════════
 // 💡 ホームの「確認待ち」に並べる1件。
@@ -1379,6 +1416,7 @@ class AppState extends ChangeNotifier {
         notifyListeners();
       } else {
         await syncPaydaysToCalendar(); // 給料日も書き出す
+        await syncShortfallsToCalendar(); // 残高不足の見込みも
       }
       return ok;
     }
@@ -1465,6 +1503,114 @@ class AppState extends ChangeNotifier {
       specialCalendarIds.remove(key);
       specialCalendarSigs.remove(key);
     }
+  }
+
+  // ───── シフト前の通知 ─────
+  ShiftReminder shiftReminder = ShiftReminder.calendarDefault;
+
+  List<int>? shiftReminderFor(ShiftData s) => shiftReminderMinutes(shiftReminder, s.start);
+
+  // 💡 変えたら、まだ始まっていないシフトのカレンダー予定を書き直す（通知の時刻を揃える）。
+  //   ⚠️ 終わったシフトは触らない（通知済み・API節約）。1件ずつ待つ（まとめて投げると混み合う）。
+  Future<void> setShiftReminder(ShiftReminder mode) async {
+    shiftReminder = mode;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt('saved_shift_reminder', mode.index);
+    notifyListeners();
+    final sync = calendarSync;
+    if (!calendarAutoSync || sync == null) return;
+    final now = DateTime.now();
+    for (final entry in shifts.entries) {
+      final d = DateTime.tryParse(entry.key);
+      if (d == null) continue;
+      for (final shift in List<ShiftData>.of(entry.value)) {
+        if (shift.start.isAfter(now)) await sync.syncShiftNow(d, shift);
+      }
+    }
+  }
+
+  // ───── 残高不足の通知 ─────
+  // 💡 引き落としで残高が足りなくなる見込みの日を、カレンダーに通知付きで置く。
+  //   サーバーが無いので、アプリを閉じていても届くのはカレンダーの通知だけ。
+  //   ・見込みが無くなったら（入金・残高更新など）まだ来ていない予定は消す
+  //   ・不足額が変わったら書き直す。同じ内容なら書かない（API節約）
+  //   ・もう来た日は動かさない（通知済み）
+  //   ⚠️ タイトルに金額を入れない（ロック画面の通知に出るため）。金額は説明欄へ。
+  bool shortfallAlerts = true;
+  bool _shortfallSyncRunning = false;
+  bool _shortfallSyncAgain = false;
+
+  Future<void> setShortfallAlerts(bool on) async {
+    shortfallAlerts = on;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('saved_shortfall_alerts', on);
+    notifyListeners();
+    await syncShortfallsToCalendar();
+  }
+
+  Future<void> syncShortfallsToCalendar({DateTime? now}) async {
+    if (!calendarAutoSync || calendarSync == null) return;
+    // ⚠️ 同時に2回走ると同じ日の予定を2つ作る。走っている間は後でもう一度だけ回す。
+    if (_shortfallSyncRunning) {
+      _shortfallSyncAgain = true;
+      return;
+    }
+    _shortfallSyncRunning = true;
+    try {
+      do {
+        _shortfallSyncAgain = false;
+        await _syncShortfallsOnce(now ?? DateTime.now());
+      } while (_shortfallSyncAgain);
+    } finally {
+      _shortfallSyncRunning = false;
+    }
+  }
+
+  static const _shortfallPrefix = 'shortfall_';
+
+  Future<void> _syncShortfallsOnce(DateTime now) async {
+    final today = DateTime(now.year, now.month, now.day);
+    var changed = false;
+    final wanted = <String>{};
+    if (shortfallAlerts) {
+      for (final day in shortfallDaysAhead()) {
+        final key = '$_shortfallPrefix${DateFormat('yyyyMMdd').format(day.date)}';
+        wanted.add(key);
+        final existingId = specialCalendarIds[key] ?? '';
+        const title = '⚠️ 引き落としで残高が足りない見込み';
+        final desc = '${day.labels.join('・')}の引き落としで '
+            '¥${NumberFormat('#,###').format(-day.balance)} 足りない見込みです'
+            '（ポケットメイドの予想）。入金や支払いの見直しを。';
+        final sig = '${DateFormat('yyyy-MM-dd').format(day.date)}|$title|$desc';
+        if (existingId.isNotEmpty && specialCalendarSigs[key] == sig) continue;
+        final calId = await calendarSync!.upsertSpecialEvent(
+          existingCalId: existingId,
+          title: title,
+          date: day.date,
+          description: desc,
+          reminderMinutes: kShortfallReminderMinutes,
+        );
+        if (calId != null) {
+          specialCalendarIds[key] = calId;
+          specialCalendarSigs[key] = sig;
+          changed = true;
+        }
+      }
+    }
+    // 見込みが無くなった日を片付ける
+    for (final key in specialCalendarIds.keys
+        .where((k) => k.startsWith(_shortfallPrefix) && !wanted.contains(k))
+        .toList()) {
+      final placed = _sigDate(specialCalendarSigs[key]);
+      // ⚠️ もう来た日は通知済み。予定は記録として残し、管理からだけ外す
+      if (placed == null || !placed.isBefore(today)) {
+        calendarSync!.deleteEvent(specialCalendarIds[key]!);
+      }
+      specialCalendarIds.remove(key);
+      specialCalendarSigs.remove(key);
+      changed = true;
+    }
+    if (changed) saveData();
   }
 
   // ───── シフト ─────
@@ -5269,6 +5415,13 @@ class AppState extends ChangeNotifier {
       ..clear()
       ..addAll(prefs.getStringList('saved_deleted_dup_keys') ?? const []);
     calendarAutoSync = prefs.getBool('saved_calendar_autosync') ?? false;
+    final reminderIdx = prefs.getInt('saved_shift_reminder');
+    shiftReminder = reminderIdx != null &&
+            reminderIdx >= 0 &&
+            reminderIdx < ShiftReminder.values.length
+        ? ShiftReminder.values[reminderIdx]
+        : ShiftReminder.calendarDefault;
+    shortfallAlerts = prefs.getBool('saved_shortfall_alerts') ?? true;
     autoBackupEnabled = prefs.getBool('saved_auto_backup_enabled') ?? true;
     showMonthAfterNext = prefs.getBool('saved_show_month_after_next') ?? true;
     showWalletCash = prefs.getBool('saved_show_wallet_cash') ?? true;

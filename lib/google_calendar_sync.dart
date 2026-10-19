@@ -165,6 +165,8 @@ class GoogleCalendarSync implements CalendarSyncHook {
       start: s.start,
       end: s.end,
       description: '時給¥${s.hourlyWage} / 休憩${s.breakMinutes}分 / 給与¥${s.earnings}',
+      // 💡 設定の「シフトの通知」（前日の夜・1時間前など）
+      reminderMinutes: appState.shiftReminderFor(s),
     );
     if (id != null && id != s.calendarEventId) {
       s.calendarEventId = id;
@@ -196,6 +198,9 @@ class GoogleCalendarSync implements CalendarSyncHook {
   }
 
   @override
+  Future<void> syncShiftNow(DateTime date, ShiftData shift) => _syncShift(date, shift);
+
+  @override
   void upsertEvent(EventData event) {
     _syncEvent(event);
   }
@@ -219,6 +224,7 @@ class GoogleCalendarSync implements CalendarSyncHook {
     required DateTime date,
     required String description,
     bool remind = false,
+    List<int>? reminderMinutes,
   }) async {
     return _createOrUpdate(
       existingId: existingCalId.isNotEmpty ? existingCalId : null,
@@ -229,7 +235,7 @@ class GoogleCalendarSync implements CalendarSyncHook {
       description: description,
       // 💡 終日予定の通知は「その日の0時から何分前か」。0＝当日の0:00に通知。
       //   （新しく作ったカレンダーには既定の通知が無いことが多く、付けないと鳴らない）
-      reminderMinutes: remind ? const [0] : null,
+      reminderMinutes: reminderMinutes ?? (remind ? const [0] : null),
     );
   }
 

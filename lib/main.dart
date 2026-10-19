@@ -196,10 +196,27 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
       await syncGmail(appState);
       // 💡 給料日のカレンダー通知を、先の月まで用意しておく（日付が変わっていれば移す）
       await appState.syncPaydaysToCalendar();
+      // 💡 引き落としで足りなくなる見込みの日を、カレンダーの通知として置く
+      await appState.syncShortfallsToCalendar();
+      _startShortfallWatch(appState);
     });
   }
 
   Timer? _drivePush;
+  Timer? _shortfallSync;
+
+  // 💡 残高・明細・シフトが変わると不足の見込みも変わる。少し待ってまとめて書き直す。
+  //   （内容が同じならカレンダーには書かないので、APIはほとんど使わない）
+  void _startShortfallWatch(AppState appState) {
+    appState.addListener(() {
+      if (!appState.calendarAutoSync) return;
+      _shortfallSync?.cancel();
+      _shortfallSync = Timer(
+        const Duration(seconds: 20),
+        appState.syncShortfallsToCalendar,
+      );
+    });
+  }
 
   // 💡 データが変わったら少し待ってからドライブへ保存する。
   //   1操作ごとに上げるとAPIを叩きすぎるので、最後の変更から15秒まとめて待つ。
@@ -221,6 +238,7 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
   @override
   void dispose() {
     _drivePush?.cancel();
+    _shortfallSync?.cancel();
     super.dispose();
   }
 
