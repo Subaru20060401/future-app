@@ -26,6 +26,8 @@ import 'budget_screen.dart';
 import '../widgets/app_sheet.dart';
 import '../card_styles.dart';
 import '../google_calendar_sync.dart';
+import '../gemini_client.dart';
+import 'shift_image_import_screen.dart';
 
 class SettingsScreen extends StatelessWidget {
   const SettingsScreen({super.key});
@@ -829,157 +831,7 @@ class SettingsScreen extends StatelessWidget {
       ),
       body: ListView(
         children: [
-          ListTile(
-            leading: const Icon(Icons.work, color: Colors.blue),
-            title: const Text('勤務先の管理'),
-            subtitle: const Text('バイト先・時給・交通費・各種手当の登録'),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () => Navigator.push(
-              context,
-              MaterialPageRoute(builder: (_) => const WorkplaceListScreen()),
-            ),
-          ),
-          ListTile(
-            leading: const Icon(Icons.credit_card, color: Colors.red),
-            title: const Text('カードの締め日・引き落とし日'),
-            subtitle: const Text('カレンダー表示と、引き落としのお知らせに使います'),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () => _showCardPaymentDaySettings(context, appState),
-          ),
-          ListTile(
-            leading: const Icon(Icons.savings, color: Colors.teal),
-            title: const Text('予算の設定'),
-            subtitle: const Text('カテゴリ別の月予算と超過チェック'),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () => Navigator.push(
-              context,
-              MaterialPageRoute(builder: (_) => const BudgetScreen()),
-            ),
-          ),
-          ListTile(
-            leading: const Icon(Icons.backup, color: Colors.blueGrey),
-            title: const Text('データのバックアップ'),
-            subtitle: const Text('エクスポート（JSON/CSV）・インポート'),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () => _showBackup(context, appState),
-          ),
-          if (!kIsWeb)
-          SwitchListTile(
-            secondary: const Icon(Icons.cloud_done, color: Colors.teal),
-            title: const Text('自動バックアップ'),
-            subtitle: Text(appState.lastAutoBackupAt != null
-                ? '最終: ${_fmtDt(appState.lastAutoBackupAt!)}'
-                : '1日1回、アプリ内に自動保存'),
-            value: appState.autoBackupEnabled,
-            onChanged: (v) => appState.setAutoBackupEnabled(v),
-          ),
-          if (!kIsWeb)
-          ListTile(
-            leading: const Icon(Icons.restore, color: Colors.orange),
-            title: const Text('バックアップから復元'),
-            subtitle: const Text('自動保存されたバックアップ一覧'),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () => _showRestoreBackup(context, appState),
-          ),
-          const Divider(),
-          ListTile(
-            leading: const Icon(Icons.palette, color: Colors.deepPurple),
-            title: const Text('アプリの背景色'),
-            subtitle: Text('現在: ${backgroundThemeByKey(appState.backgroundTheme).label}'),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () => _showBackgroundPicker(context, appState),
-          ),
-          SwitchListTile(
-            secondary: const Icon(Icons.calendar_month, color: Colors.pink),
-            title: const Text('翌々月の予想残高を表示'),
-            subtitle: const Text('残高画面に翌々月末の予想も表示する'),
-            value: appState.showMonthAfterNext,
-            onChanged: (v) => appState.setShowMonthAfterNext(v),
-          ),
-          SwitchListTile(
-            secondary: const Icon(Icons.wallet, color: Colors.brown),
-            title: const Text('財布の現金を使う'),
-            subtitle: const Text('残高画面に「財布の現金」を表示して予想残高に加算'),
-            value: appState.showWalletCash,
-            onChanged: (v) => appState.setShowWalletCash(v),
-          ),
-          // 💡 Googleカレンダーへ書き出す。iPhone/Macの純正カレンダーには、
-          //   端末側でGoogleアカウントを追加すれば自動的に届く。
-          SwitchListTile(
-            secondary: const Icon(Icons.event_available, color: Colors.red),
-            title: const Text('Googleカレンダーに自動連携'),
-            subtitle: const Text(
-                'シフト・予定・給料日・引き落とし日を「ポケットメイド」カレンダーへ書き出し'),
-            value: appState.calendarAutoSync,
-            onChanged: (v) async {
-              if (v && !await ensureGoogleConnected(context)) return;
-              if (!context.mounted) return;
-              if (v) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('カレンダーへ同期中...')),
-                );
-              }
-              final ok = await appState.setCalendarAutoSync(v);
-              if (context.mounted && v) {
-                final sync = appState.calendarSync;
-                final why = sync is GoogleCalendarSync ? sync.lastError : null;
-                ScaffoldMessenger.of(context)
-                  ..hideCurrentSnackBar()
-                  ..showSnackBar(SnackBar(
-                    content: Text(ok
-                        ? 'Googleカレンダーに連携しました'
-                        : (why ?? 'カレンダーに連携できませんでした')),
-                    duration: Duration(seconds: ok ? 4 : 8),
-                  ));
-              }
-            },
-          ),
-          // 💡 通知はカレンダーの通知として届く（アプリを閉じていても届く）
-          if (appState.calendarAutoSync) ...[
-            ListTile(
-              leading: const Icon(Icons.notifications_active_outlined,
-                  color: Colors.indigo),
-              title: const Text('シフトの通知'),
-              subtitle: Text(_shiftReminderLabel(appState.shiftReminder)),
-              onTap: () => _pickShiftReminder(context, appState),
-            ),
-            SwitchListTile(
-              secondary: const Icon(Icons.warning_amber, color: Colors.orange),
-              title: const Text('残高不足の通知'),
-              subtitle: const Text('引き落としで足りなくなる見込みの日の3日前と前日の9時に通知'),
-              value: appState.shortfallAlerts,
-              onChanged: (v) => appState.setShortfallAlerts(v),
-            ),
-          ],
-          if (appState.calendarAutoSync)
-            const Padding(
-              padding: EdgeInsets.fromLTRB(16, 0, 16, 12),
-              child: Text(
-                'iPhoneやMacの純正カレンダーにも出したいときは、端末の設定で'
-                'Googleアカウントを追加してください（アプリ側の設定は不要です）。',
-                style: TextStyle(fontSize: 11, color: Colors.black54),
-              ),
-            ),
-          const Divider(),
-          const Padding(
-            padding: EdgeInsets.fromLTRB(16, 12, 16, 4),
-            child: Text('セキュリティ',
-                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
-          ),
-          const PasscodeSettings(),
-          const Divider(),
-          const Padding(
-            padding: EdgeInsets.fromLTRB(16, 12, 16, 4),
-            child: Text('Google連携',
-                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
-          ),
-          const Padding(
-            padding: EdgeInsets.fromLTRB(16, 0, 16, 8),
-            child: Text(
-              'メールの取り込みとドライブ同期は、同じGoogleアカウントを使います。',
-              style: TextStyle(fontSize: 12, color: Colors.black54),
-            ),
-          ),
+          _SectionHeader('Google連携と同期', note: 'メールの取り込みとドライブ同期は、同じGoogleアカウントを使います。'),
           // 連携はここ1か所（Gmail取込とドライブ同期で共用）
           const GoogleAccountTile(),
           SwitchListTile(
@@ -1070,12 +922,6 @@ class SettingsScreen extends StatelessWidget {
               },
             ),
           ],
-          const Divider(),
-          const ListTile(
-            leading: Icon(Icons.account_balance, color: Colors.green),
-            title: Text('三井住友銀行 連携設定'),
-            subtitle: Text('未連携'),
-          ),
           ListTile(
             leading: const Icon(Icons.sync, color: Colors.red),
             title: const Text('カード利用メールを今すぐ取得'),
@@ -1098,41 +944,6 @@ class SettingsScreen extends StatelessWidget {
             },
           ),
           ListTile(
-            dense: true,
-            leading: const Icon(Icons.cleaning_services, color: Colors.grey),
-            title: const Text('メールの解析キャッシュを消す'),
-            subtitle: const Text('取り込み内容がおかしいときに。次回の更新が遅くなります'),
-            onTap: () async {
-              await GmailService.instance.clearCache();
-              if (context.mounted) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('キャッシュを消しました')),
-                );
-              }
-            },
-          ),
-          ListTile(
-            leading: const Icon(Icons.history, color: Colors.indigo),
-            title: const Text('過去2年分をすべて取り込み直す'),
-            subtitle: const Text('時間がかかります（漏れた過去分もまとめて取得）'),
-            onTap: () async {
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('全期間を取得中... 少し時間がかかります')),
-              );
-              var result = await syncGmail(appState, full: true);
-              // 許可が無ければこの場で求めてから再試行（ポップアップは操作中のみ開ける）
-              if (result.needsPermission &&
-                  await GmailService.instance.requestGmailAccess()) {
-                result = await syncGmail(appState, full: true);
-              }
-              if (context.mounted) {
-                ScaffoldMessenger.of(context)
-                  ..hideCurrentSnackBar()
-                  ..showSnackBar(SnackBar(content: Text(result.message)));
-              }
-            },
-          ),
-          ListTile(
             leading: const Icon(Icons.mail, color: Colors.red),
             title: const Text('メールの取得結果を見る'),
             subtitle: const Text('取り込んだ明細の確認・手動取得'),
@@ -1141,6 +952,25 @@ class SettingsScreen extends StatelessWidget {
               context,
               MaterialPageRoute(builder: (_) => const GmailScreen()),
             ),
+          ),
+          const Divider(),
+          _SectionHeader('支払い・収入の設定'),
+          ListTile(
+            leading: const Icon(Icons.work, color: Colors.blue),
+            title: const Text('勤務先の管理'),
+            subtitle: const Text('バイト先・時給・交通費・各種手当の登録'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const WorkplaceListScreen()),
+            ),
+          ),
+          ListTile(
+            leading: const Icon(Icons.credit_card, color: Colors.red),
+            title: const Text('カードの締め日・引き落とし日'),
+            subtitle: const Text('カレンダー表示と、引き落としのお知らせに使います'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => _showCardPaymentDaySettings(context, appState),
           ),
           ListTile(
             leading: const Icon(Icons.percent, color: Colors.deepOrange),
@@ -1152,85 +982,265 @@ class SettingsScreen extends StatelessWidget {
               MaterialPageRoute(builder: (_) => const CardSettingsScreen()),
             ),
           ),
-          const Divider(),
           ListTile(
-            leading: const Icon(Icons.notifications_active, color: Colors.orange),
-            title: const Text('メイドの通知を許可'),
-            subtitle: const Text('支払い・Todoのリマインダーを受け取る'),
+            leading: const Icon(Icons.savings, color: Colors.teal),
+            title: const Text('予算の設定'),
+            subtitle: const Text('カテゴリ別の月予算と超過チェック'),
             trailing: const Icon(Icons.chevron_right),
-            onTap: () async {
-              final granted = await NotificationService.instance.requestPermission();
-              if (granted) {
-                await NotificationService.instance.rescheduleAll(appState);
-              }
-              if (context.mounted) {
+            onTap: () => Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const BudgetScreen()),
+            ),
+          ),
+          ListTile(
+            leading: const Icon(Icons.document_scanner_outlined, color: Colors.indigo),
+            title: const Text('シフト画像の読み取り（Gemini）'),
+            subtitle: Text(GeminiClient.instance.hasKey
+                ? 'APIキー設定済み・モデル: ${GeminiClient.instance.model}'
+                : 'APIキーとモデルの設定'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => showGeminiSettingsSheet(context),
+          ),
+          const Divider(),
+          _SectionHeader('表示・通知'),
+          ListTile(
+            leading: const Icon(Icons.palette, color: Colors.deepPurple),
+            title: const Text('アプリの背景色'),
+            subtitle: Text('現在: ${backgroundThemeByKey(appState.backgroundTheme).label}'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => _showBackgroundPicker(context, appState),
+          ),
+          SwitchListTile(
+            secondary: const Icon(Icons.calendar_month, color: Colors.pink),
+            title: const Text('翌々月の予想残高を表示'),
+            subtitle: const Text('残高画面に翌々月末の予想も表示する'),
+            value: appState.showMonthAfterNext,
+            onChanged: (v) => appState.setShowMonthAfterNext(v),
+          ),
+          SwitchListTile(
+            secondary: const Icon(Icons.wallet, color: Colors.brown),
+            title: const Text('財布の現金を使う'),
+            subtitle: const Text('残高画面に「財布の現金」を表示して予想残高に加算'),
+            value: appState.showWalletCash,
+            onChanged: (v) => appState.setShowWalletCash(v),
+          ),
+          // 💡 Googleカレンダーへ書き出す。iPhone/Macの純正カレンダーには、
+          //   端末側でGoogleアカウントを追加すれば自動的に届く。
+          SwitchListTile(
+            secondary: const Icon(Icons.event_available, color: Colors.red),
+            title: const Text('Googleカレンダーに自動連携'),
+            subtitle: const Text(
+                'シフト・予定・給料日・引き落とし日を「ポケットメイド」カレンダーへ書き出し'),
+            value: appState.calendarAutoSync,
+            onChanged: (v) async {
+              if (v && !await ensureGoogleConnected(context)) return;
+              if (!context.mounted) return;
+              if (v) {
                 ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(content: Text(granted ? '通知を許可しました 🔔' : '通知が許可されませんでした')),
+                  const SnackBar(content: Text('カレンダーへ同期中...')),
                 );
               }
-            },
-          ),
-          ListTile(
-            leading: const Icon(Icons.warning_amber, color: Colors.red),
-            title: const Text('残高不足チェック'),
-            subtitle: const Text('今月末がマイナスなら通知でお知らせ'),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () async {
-              final balance = appState.thisMonthBalance;
-              if (balance < 0) {
-                await NotificationService.instance.notifyShortage(balance);
-                if (context.mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('残高不足の通知を送りました ⚠')),
-                  );
-                }
-              } else {
-                if (context.mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(content: Text('今月末の予想残高は ¥$balance です 👍')),
-                  );
-                }
+              final ok = await appState.setCalendarAutoSync(v);
+              if (context.mounted && v) {
+                final sync = appState.calendarSync;
+                final why = sync is GoogleCalendarSync ? sync.lastError : null;
+                ScaffoldMessenger.of(context)
+                  ..hideCurrentSnackBar()
+                  ..showSnackBar(SnackBar(
+                    content: Text(ok
+                        ? 'Googleカレンダーに連携しました'
+                        : (why ?? 'カレンダーに連携できませんでした')),
+                    duration: Duration(seconds: ok ? 4 : 8),
+                  ));
               }
             },
+          ),
+          // 💡 通知はカレンダーの通知として届く（アプリを閉じていても届く）
+          if (appState.calendarAutoSync) ...[
+            ListTile(
+              leading: const Icon(Icons.notifications_active_outlined,
+                  color: Colors.indigo),
+              title: const Text('シフトの通知'),
+              subtitle: Text(_shiftReminderLabel(appState.shiftReminder)),
+              onTap: () => _pickShiftReminder(context, appState),
+            ),
+            SwitchListTile(
+              secondary: const Icon(Icons.warning_amber, color: Colors.orange),
+              title: const Text('残高不足の通知'),
+              subtitle: const Text('引き落としで足りなくなる見込みの日の3日前と前日の9時に通知'),
+              value: appState.shortfallAlerts,
+              onChanged: (v) => appState.setShortfallAlerts(v),
+            ),
+          ],
+          if (appState.calendarAutoSync)
+            const Padding(
+              padding: EdgeInsets.fromLTRB(16, 0, 16, 12),
+              child: Text(
+                'iPhoneやMacの純正カレンダーにも出したいときは、端末の設定で'
+                'Googleアカウントを追加してください（アプリ側の設定は不要です）。',
+                style: TextStyle(fontSize: 11, color: Colors.black54),
+              ),
+            ),
+          // 💡 端末アプリ版だけ。Web版の通知はGoogleカレンダーの通知で届く（上の項目）。
+          if (!kIsWeb) ...[
+            ListTile(
+              leading: const Icon(Icons.notifications_active, color: Colors.orange),
+              title: const Text('メイドの通知を許可'),
+              subtitle: const Text('支払い・Todoのリマインダーを受け取る'),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () async {
+                final granted = await NotificationService.instance.requestPermission();
+                if (granted) {
+                  await NotificationService.instance.rescheduleAll(appState);
+                }
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text(granted ? '通知を許可しました 🔔' : '通知が許可されませんでした')),
+                  );
+                }
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.warning_amber, color: Colors.red),
+              title: const Text('残高不足チェック'),
+              subtitle: const Text('今月末がマイナスなら通知でお知らせ'),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () async {
+                final balance = appState.thisMonthBalance;
+                if (balance < 0) {
+                  await NotificationService.instance.notifyShortage(balance);
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('残高不足の通知を送りました ⚠')),
+                    );
+                  }
+                } else {
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text('今月末の予想残高は ¥$balance です 👍')),
+                    );
+                  }
+                }
+              },
+            ),
+          ],
+          const Divider(),
+          _SectionHeader('セキュリティ'),
+          const PasscodeSettings(),
+          const Divider(),
+          _SectionHeader('データ管理'),
+          ListTile(
+            leading: const Icon(Icons.backup, color: Colors.blueGrey),
+            title: const Text('データのバックアップ'),
+            subtitle: const Text('エクスポート（JSON/CSV）・インポート'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => _showBackup(context, appState),
+          ),
+          if (!kIsWeb)
+          SwitchListTile(
+            secondary: const Icon(Icons.cloud_done, color: Colors.teal),
+            title: const Text('自動バックアップ'),
+            subtitle: Text(appState.lastAutoBackupAt != null
+                ? '最終: ${_fmtDt(appState.lastAutoBackupAt!)}'
+                : '1日1回、アプリ内に自動保存'),
+            value: appState.autoBackupEnabled,
+            onChanged: (v) => appState.setAutoBackupEnabled(v),
+          ),
+          if (!kIsWeb)
+          ListTile(
+            leading: const Icon(Icons.restore, color: Colors.orange),
+            title: const Text('バックアップから復元'),
+            subtitle: const Text('自動保存されたバックアップ一覧'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => _showRestoreBackup(context, appState),
           ),
           const Divider(),
-          ListTile(
-            leading: const Icon(Icons.bug_report, color: Colors.indigo),
-            title: const Text('🔧 楽天メールの中身を確認'),
-            subtitle: const Text('最新の楽天メール本文を表示'),
-            onTap: () => _showDebug(context, '楽天メール 生テキスト',
-                () => GmailService.instance.debugRawBody('from:rakuten-card.co.jp カード利用のお知らせ')),
-          ),
-          ListTile(
-            leading: const Icon(Icons.bug_report, color: Colors.indigo),
-            title: const Text('🔧 Amazonの取得状況を確認'),
-            subtitle: const Text('発送・注文メール件数と抽出結果を表示'),
-            onTap: () => _showDebug(context, 'Amazon 取得状況',
-                () => GmailService.instance.debugAmazonSummary()),
-          ),
-          ListTile(
-            leading: const Icon(Icons.bug_report, color: Colors.indigo),
-            title: const Text('🔧 アプリ内のAmazon登録状況'),
-            subtitle: const Text('取り込み後にアプリへ残っているAmazon明細'),
-            onTap: () {
-              final amzn = appState.payments.where((p) => p.cardName == 'Amazonマスター').toList()
-                ..sort((a, b) => b.paymentDate.compareTo(a.paymentDate));
-              final sb = StringBuffer()
-                ..writeln('全支払い: ${appState.payments.length}件')
-                ..writeln('Amazonマスター: ${amzn.length}件')
-                ..writeln('────────────');
-              for (final p in amzn.take(60)) {
-                sb.writeln('${p.paymentDate.toString().substring(0, 10)}  ¥${p.amount}  ${p.note}');
-              }
-              _showDebug(context, 'アプリ内Amazon', () async => sb.toString());
-            },
-          ),
-          ListTile(
-            leading: const Icon(Icons.bug_report, color: Colors.indigo),
-            title: const Text('🔧 Amazon発送メールの中身を確認'),
-            subtitle: const Text('最新の発送メール本文を表示'),
-            onTap: () => _showDebug(context, 'Amazon発送 生テキスト',
-                () => GmailService.instance.debugRawBody('from:shipment-tracking@amazon.co.jp')),
+          // 💡 普段は使わない項目（取り込み直し・解析の確認）。長い一覧に混ぜると
+          //   普段の設定が探しにくいので、開いたときだけ出す。
+          ExpansionTile(
+            leading: const Icon(Icons.build_outlined, color: Colors.grey),
+            title: const Text('詳細設定'),
+            subtitle: const Text('取り込み直し・解析の確認など（普段は不要）'),
+            children: [
+              ListTile(
+                dense: true,
+                leading: const Icon(Icons.cleaning_services, color: Colors.grey),
+                title: const Text('メールの解析キャッシュを消す'),
+                subtitle: const Text('取り込み内容がおかしいときに。次回の更新が遅くなります'),
+                onTap: () async {
+                  await GmailService.instance.clearCache();
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('キャッシュを消しました')),
+                    );
+                  }
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.history, color: Colors.indigo),
+                title: const Text('過去2年分をすべて取り込み直す'),
+                subtitle: const Text('時間がかかります（漏れた過去分もまとめて取得）'),
+                onTap: () async {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('全期間を取得中... 少し時間がかかります')),
+                  );
+                  var result = await syncGmail(appState, full: true);
+                  // 許可が無ければこの場で求めてから再試行（ポップアップは操作中のみ開ける）
+                  if (result.needsPermission &&
+                      await GmailService.instance.requestGmailAccess()) {
+                    result = await syncGmail(appState, full: true);
+                  }
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context)
+                      ..hideCurrentSnackBar()
+                      ..showSnackBar(SnackBar(content: Text(result.message)));
+                  }
+                },
+              ),
+              const ListTile(
+                leading: Icon(Icons.account_balance, color: Colors.green),
+                title: Text('三井住友銀行 連携設定'),
+                subtitle: Text('未連携'),
+              ),
+              ListTile(
+                leading: const Icon(Icons.bug_report, color: Colors.indigo),
+                title: const Text('🔧 楽天メールの中身を確認'),
+                subtitle: const Text('最新の楽天メール本文を表示'),
+                onTap: () => _showDebug(context, '楽天メール 生テキスト',
+                    () => GmailService.instance.debugRawBody('from:rakuten-card.co.jp カード利用のお知らせ')),
+              ),
+              ListTile(
+                leading: const Icon(Icons.bug_report, color: Colors.indigo),
+                title: const Text('🔧 Amazonの取得状況を確認'),
+                subtitle: const Text('発送・注文メール件数と抽出結果を表示'),
+                onTap: () => _showDebug(context, 'Amazon 取得状況',
+                    () => GmailService.instance.debugAmazonSummary()),
+              ),
+              ListTile(
+                leading: const Icon(Icons.bug_report, color: Colors.indigo),
+                title: const Text('🔧 アプリ内のAmazon登録状況'),
+                subtitle: const Text('取り込み後にアプリへ残っているAmazon明細'),
+                onTap: () {
+                  final amzn = appState.payments.where((p) => p.cardName == 'Amazonマスター').toList()
+                    ..sort((a, b) => b.paymentDate.compareTo(a.paymentDate));
+                  final sb = StringBuffer()
+                    ..writeln('全支払い: ${appState.payments.length}件')
+                    ..writeln('Amazonマスター: ${amzn.length}件')
+                    ..writeln('────────────');
+                  for (final p in amzn.take(60)) {
+                    sb.writeln('${p.paymentDate.toString().substring(0, 10)}  ¥${p.amount}  ${p.note}');
+                  }
+                  _showDebug(context, 'アプリ内Amazon', () async => sb.toString());
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.bug_report, color: Colors.indigo),
+                title: const Text('🔧 Amazon発送メールの中身を確認'),
+                subtitle: const Text('最新の発送メール本文を表示'),
+                onTap: () => _showDebug(context, 'Amazon発送 生テキスト',
+                    () => GmailService.instance.debugRawBody('from:shipment-tracking@amazon.co.jp')),
+              ),
+            ],
           ),
           const Divider(),
           // 💡 「直したのに反映されない」がキャッシュのせいか判断できるように、
@@ -1295,4 +1305,31 @@ Future<void> _pickShiftReminder(BuildContext context, AppState appState) async {
   );
   if (picked == null || picked == appState.shiftReminder) return;
   await appState.setShiftReminder(picked);
+}
+
+// 💡 設定の区切りの見出し（用途別に分けて、普段の設定を探しやすくする）
+class _SectionHeader extends StatelessWidget {
+  const _SectionHeader(this.title, {this.note});
+  final String title;
+  final String? note;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(title,
+              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+          if (note != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Text(note!,
+                  style: const TextStyle(fontSize: 12, color: Colors.black54)),
+            ),
+        ],
+      ),
+    );
+  }
 }
