@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 
 import '../app_state.dart';
 import '../screens/event_edit_screen.dart';
+import '../screens/shift_image_import_screen.dart';
 import 'app_sheet.dart';
 
 void showAddEntrySheet(BuildContext hostContext, AppState appState, DateTime selectedDay) {
@@ -33,6 +34,21 @@ void showAddEntrySheet(BuildContext hostContext, AppState appState, DateTime sel
               onTap: () {
                 Navigator.pop(context);
                 showRecurringShiftDialog(hostContext, appState, selectedDay);
+              },
+            ),
+            // 💡 シフト表の写真から、1か月分をまとめて登録する（Geminiで読み取り）
+            ListTile(
+              leading: const Icon(Icons.document_scanner_outlined, color: Colors.indigo),
+              title: const Text('画像からシフトを追加'),
+              subtitle: const Text('シフト表の写真を読み取って、確認してから登録'),
+              onTap: () {
+                Navigator.pop(context);
+                Navigator.push(
+                  hostContext,
+                  MaterialPageRoute(
+                    builder: (_) => ShiftImageImportScreen(initialMonth: selectedDay),
+                  ),
+                );
               },
             ),
             ListTile(

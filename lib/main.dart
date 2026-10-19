@@ -20,11 +20,14 @@ import 'screens/todo_screen.dart';
 import 'screens/payment_screen.dart';
 import 'screens/settings_screen.dart';
 import 'widgets/app_gate.dart';
+import 'gemini_client.dart';
 import 'widgets/drive_sync_dialog.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await initializeDateFormatting('ja_JP', null);
+  // 💡 保存してあるGeminiのキー・モデルを先に読む（設定画面の表示に使う）
+  await GeminiClient.instance.load();
   // 💡 通知とカレンダー連携は端末アプリ専用。Webでは使えないので繋がない。
   if (!kIsWeb) {
     await NotificationService.instance.init();

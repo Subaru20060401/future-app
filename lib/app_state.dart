@@ -1621,6 +1621,62 @@ class AppState extends ChangeNotifier {
     if (calendarAutoSync) calendarSync?.upsertShift(date, shift);
   }
 
+  // 💡 画像から読み取ったシフトをまとめて登録する（確認画面で選んだものだけ）。
+  //   給与は勤務先の設定でスナップショットする（AIには計算させない）。
+  //   保存と画面の更新は最後に1回。戻り値は「元に戻す」に使う。
+  List<({String dateKey, ShiftData shift})> addShiftsBatch(
+    Workplace w,
+    Iterable<({DateTime date, DateTime start, DateTime end, int breakMinutes})> items,
+  ) {
+    final added = <({String dateKey, ShiftData shift})>[];
+    for (final it in items) {
+      final shift = buildShiftFromWorkplace(w, it.date, it.start, it.end,
+          breakMinutes: it.breakMinutes);
+      final key = _formatDate(it.date);
+      shifts.putIfAbsent(key, () => []).add(shift);
+      added.add((dateKey: key, shift: shift));
+    }
+    if (added.isEmpty) return added;
+    saveData();
+    notifyListeners();
+    if (calendarAutoSync) {
+      for (final a in added) {
+        calendarSync?.upsertShift(DateTime.parse(a.dateKey), a.shift);
+      }
+    }
+    return added;
+  }
+
+  // そのシフト（同じもの）がまだ登録されているか
+  bool hasShift(ShiftData s) => shifts.values.any((l) => l.any((x) => identical(x, s)));
+
+  // 💡 まとめて登録したものだけを取り消す。
+  //   ⚠️ 位置（index）ではなく、そのシフト自体で探す（元からあったシフトを巻き込まない）。
+  int undoShiftsBatch(List<({String dateKey, ShiftData shift})> added) {
+    var removed = 0;
+    final calIds = <String>[];
+    for (final a in added) {
+      final list = shifts[a.dateKey];
+      if (list == null) continue;
+      final i = list.indexWhere((x) => identical(x, a.shift));
+      if (i < 0) continue;
+      final calId = list[i].calendarEventId;
+      if (calId != null) calIds.add(calId);
+      list.removeAt(i);
+      if (list.isEmpty) shifts.remove(a.dateKey);
+      removed++;
+    }
+    if (removed == 0) return 0;
+    saveData();
+    notifyListeners();
+    if (calendarAutoSync) {
+      for (final id in calIds) {
+        calendarSync?.deleteEvent(id);
+      }
+    }
+    return removed;
+  }
+
   void removeShift(String dateKey, int index) {
     final list = shifts[dateKey];
     final calId = (list != null && index < list.length) ? list[index].calendarEventId : null;

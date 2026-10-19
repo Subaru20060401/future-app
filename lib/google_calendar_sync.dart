@@ -169,6 +169,12 @@ class GoogleCalendarSync implements CalendarSyncHook {
       reminderMinutes: appState.shiftReminderFor(s),
     );
     if (id != null && id != s.calendarEventId) {
+      // ⚠️ 書き出している間に取り消された（まとめて登録→すぐ「元に戻す」）なら、
+      //   作った予定を消す。IDが付く前に消されると予定だけが残ってしまうため。
+      if (!appState.hasShift(s)) {
+        deleteEvent(id);
+        return;
+      }
       s.calendarEventId = id;
       appState.saveData();
     }
