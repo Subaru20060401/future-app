@@ -74,6 +74,12 @@ class GoogleCalendarSync implements CalendarSyncHook {
 
   String _describe(Object e) {
     final s = e.toString();
+    // 💡 トークン拒否（401）。捨てておき、次の書き出しで取り直させる。
+    //   ⚠️ ここでは取り直さない（ページ移動が起きうるため、同期の流れに任せる）。
+    if (isRejectedTokenError(e)) {
+      GmailService.instance.invalidateRejectedToken();
+      return 'Googleとの連携を更新してください（設定→Google連携で「連携し直す」）';
+    }
     if (s.contains('has not been used') || s.contains('is disabled')) {
       return 'カレンダーの利用が有効になっていません。'
           'Google CloudでGoogle Calendar APIを有効にしてください。';

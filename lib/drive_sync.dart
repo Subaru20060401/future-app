@@ -49,7 +49,7 @@ class DriveSyncResult {
       case DriveSyncState.restoringAuth:
         return 'Google連携を復帰しています…';
       case DriveSyncState.notSignedIn:
-        return 'Googleの有効期限が切れています。設定→Google連携で「連携し直す」を押してください';
+        return 'Googleとの連携を更新してください（設定→Google連携で「連携し直す」）';
       case DriveSyncState.noRemote:
         return 'ドライブにまだバックアップがありません';
       case DriveSyncState.upToDate:
@@ -206,7 +206,7 @@ class DriveSync {
       if (access == GoogleAccessState.needsInteraction) {
         return const DriveSyncResult(DriveSyncState.notSignedIn);
       }
-      final remote = await fetch();
+      final remote = await GmailService.instance.withFreshToken(fetch);
       if (remote == null) return const DriveSyncResult(DriveSyncState.noRemote);
 
       return DriveSyncResult(
@@ -219,8 +219,23 @@ class DriveSync {
         remote: remote,
       );
     } catch (e) {
-      return DriveSyncResult(DriveSyncState.error, error: e.toString());
+      return _failure(e);
     }
+  }
+
+  // 💡 失敗の振り分け。トークン拒否はエラー文ではなく「連携の更新」を案内する。
+  //   ⚠️ 取り直したトークンまで拒否されたら、捨ててここで止める（繰り返さない）。
+  Future<DriveSyncResult> _failure(Object e) async {
+    if (e is GoogleAuthRejected) {
+      return DriveSyncResult(e.state == GoogleAccessState.redirecting
+          ? DriveSyncState.restoringAuth
+          : DriveSyncState.notSignedIn);
+    }
+    if (isRejectedTokenError(e)) {
+      await GmailService.instance.invalidateRejectedToken();
+      return const DriveSyncResult(DriveSyncState.notSignedIn);
+    }
+    return DriveSyncResult(DriveSyncState.error, error: e.toString());
   }
 
   // 💡 何が起きているのかを端末の画面で確認するための説明文。
@@ -269,11 +284,13 @@ class DriveSync {
   // こちらの内容でドライブを更新する
   Future<DriveSyncResult> pushNow(AppState app) async {
     try {
-      final at = await upload(app.exportJson(), device: app.deviceLabel);
+      final at = await GmailService.instance.withFreshToken(
+        () => upload(app.exportJson(), device: app.deviceLabel),
+      );
       app.markDriveSynced(localAt: at, remoteAt: at);
       return const DriveSyncResult(DriveSyncState.upToDate);
     } catch (e) {
-      return DriveSyncResult(DriveSyncState.error, error: e.toString());
+      return _failure(e);
     }
   }
 
@@ -283,13 +300,14 @@ class DriveSync {
     DriveSnapshot? snapshot,
   }) async {
     try {
-      final remote = snapshot ?? await fetch();
+      final remote =
+          snapshot ?? await GmailService.instance.withFreshToken(fetch);
       if (remote == null) return const DriveSyncResult(DriveSyncState.noRemote);
       app.importJson(remote.json);
       app.markDriveSynced(localAt: DateTime.now(), remoteAt: remote.updatedAt);
       return DriveSyncResult(DriveSyncState.upToDate, remote: remote);
     } catch (e) {
-      return DriveSyncResult(DriveSyncState.error, error: e.toString());
+      return _failure(e);
     }
   }
 }

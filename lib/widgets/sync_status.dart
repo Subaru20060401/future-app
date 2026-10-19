@@ -20,8 +20,19 @@ Future<void> showSyncDetail(BuildContext context, ({DateTime at, GmailSyncResult
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text('最終更新 ${DateFormat('M/d HH:mm').format(s.at)}',
+          Text('今回の確認 ${DateFormat('M/d HH:mm').format(s.at)}',
               style: const TextStyle(fontSize: 12, color: Colors.black54)),
+          // 💡 失敗していても、いつまでのメールが反映済みかを分かるようにする
+          if (!s.result.ok)
+            Text(
+              lastGmailSuccessAt == null
+                  ? '最後に成功: この画面を開いてからはまだありません'
+                  : '最後に成功 ${DateFormat('M/d HH:mm').format(lastGmailSuccessAt!)}',
+              style: const TextStyle(fontSize: 12, color: Colors.black54),
+            ),
+          if (!s.result.ok)
+            const Text('保存済みの明細と残高はそのままです',
+                style: TextStyle(fontSize: 12, color: Colors.black54)),
           const SizedBox(height: 8),
           for (final line in s.result.detailLines)
             Padding(
@@ -101,7 +112,12 @@ class _SyncStatusBarState extends State<SyncStatusBar> {
                   TextButton(
                     style: TextButton.styleFrom(visualDensity: VisualDensity.compact),
                     onPressed: _retrying ? null : _retry,
-                    child: Text(_retrying ? '確認中…' : '再試行',
+                    child: Text(
+                        _retrying
+                            ? '確認中…'
+                            : s.result.needsPermission
+                                ? '連携し直す'
+                                : '再試行',
                         style: const TextStyle(fontSize: 12)),
                   ),
               ],

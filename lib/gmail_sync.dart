@@ -38,7 +38,7 @@ class GmailSyncResult {
     if (ok) return 'メールを確認しました';
     if (restoringAuth) return 'Google連携を復帰しています…';
     if (notSignedIn) return 'Googleに連携されていません';
-    if (needsPermission) return 'Google連携の期限が切れています';
+    if (needsPermission) return 'Googleとの連携を更新してください';
     if (skipped) return '一部のメールが取れず、反映を見送りました';
     return 'メールを確認できませんでした';
   }
@@ -74,6 +74,9 @@ class GmailSyncResult {
 final ValueNotifier<({DateTime at, GmailSyncResult result})?> lastGmailSync =
     ValueNotifier(null);
 
+// 💡 最後に成功した時刻。失敗が出ていても「いつまでのデータか」が分かるようにする。
+DateTime? lastGmailSuccessAt;
+
 MailKind _kindOf(ParsedPayment p) => p.kind;
 
 PaymentSource _toSource(MailKind kind) {
@@ -102,7 +105,9 @@ Future<GmailSyncResult> syncGmail(AppState appState, {bool full = false}) {
   if (running != null) return running;
   final f = _syncGmail(appState, full: full).then((r) {
     // 連携の復帰中（ページ移動中）は結果ではないので残さない
-    if (!r.restoringAuth) lastGmailSync.value = (at: DateTime.now(), result: r);
+    final at = DateTime.now();
+    if (r.ok) lastGmailSuccessAt = at;
+    if (!r.restoringAuth) lastGmailSync.value = (at: at, result: r);
     return r;
   });
   _inFlight = f;
@@ -132,7 +137,10 @@ Future<GmailSyncResult> _syncGmail(
   // 通常更新は先月1日から（＝直近1〜2ヶ月）。full のときだけ全期間。
   final since = full ? null : DateTime(now.year, now.month - 1, 1);
   try {
-    final list = await gmail.fetchCardPayments(since: since);
+    // 💡 Googleがトークンを拒否（401）したら、捨てて取り直して1回だけやり直す
+    final list = await gmail.withFreshToken(
+      () => gmail.fetchCardPayments(since: since),
+    );
     // 💡 取りこぼしがあるまま反映すると、その明細が消えて残高がブレる。
     //   （reconcile は取得結果を正本として自動明細を作り直すため）
     //   1件でも取れなかったら今回は反映しない＝データを壊さない。
@@ -182,7 +190,19 @@ Future<GmailSyncResult> _syncGmail(
       removed: r.removed,
       fetched: list.length,
     );
+  } on GoogleAuthRejected catch (e) {
+    // 取り直しがページ移動になった＝失敗ではない。本人の操作が要るなら連携し直しを案内。
+    if (e.state == GoogleAccessState.redirecting) {
+      return GmailSyncResult(restoringAuth: true);
+    }
+    return GmailSyncResult(needsPermission: true);
   } catch (e) {
+    // ⚠️ 取り直したトークンまで拒否された。次の起動で同じトークンを使わないよう捨て、
+    //   ここで止める（自動で何度もやり直さない）。保存済みの明細には触れない。
+    if (isRejectedTokenError(e)) {
+      await gmail.invalidateRejectedToken();
+      return GmailSyncResult(needsPermission: true);
+    }
     return GmailSyncResult(error: e.toString());
   }
 }

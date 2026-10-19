@@ -291,6 +291,8 @@ class GmailService {
       final client = await _googleSignIn.authenticatedClient();
       final token = client?.credentials.accessToken;
       if (token == null) return;
+      // ⚠️ Googleに拒否されたトークンを保存し直さない（期限まで失敗が続く）
+      if (_rejectedTokens.contains(token.data)) return;
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString(_kToken, token.data);
       await prefs.setString(_kTokenExpiry, token.expiry.toIso8601String());
@@ -395,6 +397,56 @@ class GmailService {
     } catch (_) {}
   }
 
+  // 💡 Googleに拒否された（401 / invalid_token）トークン。開いている間だけ覚える。
+  //   ⚠️ 期限だけ見ていると、拒否されたトークンを期限まで「使える」と判断し続ける。
+  final Set<String> _rejectedTokens = {};
+
+  Future<String?> _savedToken() async {
+    try {
+      return (await SharedPreferences.getInstance()).getString(_kToken);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  // 💡 APIが401を返したときに呼ぶ。保存トークンとプラグインの記憶を捨て、
+  //   次の ensureAccess() で取り直させる。⚠️ 明細などのデータには一切触れない。
+  //   used＝失敗した呼び出しが使っていたトークン。
+  //   ⚠️ Gmail と Drive が同時に401を受けると、先に取り直した「新しいトークン」を
+  //     後から来た方が捨ててしまう。保存トークンが既に入れ替わっていたら何もしない。
+  Future<void> invalidateRejectedToken({String? used}) async {
+    final saved = await _savedToken();
+    if (used != null && saved != null && saved != used) return;
+    final rejected = used ?? saved;
+    if (rejected != null) _rejectedTokens.add(rejected);
+    try {
+      final client = await _googleSignIn.authenticatedClient();
+      final token = client?.credentials.accessToken.data;
+      if (token != null && (used == null || token == used)) {
+        _rejectedTokens.add(token);
+        await _googleSignIn.currentUser?.clearAuthCache();
+      }
+    } catch (_) {}
+    await _clearToken();
+    _scopeGranted = false;
+    _scopeCheckedAt = null;
+    lastAuthError = 'Googleがトークンを受け付けませんでした（401）。取り直します。';
+  }
+
+  // 💡 API呼び出しを、トークン拒否のときだけ「捨てて取り直して1回やり直す」で包む。
+  //   取り直しがページ移動／本人の操作待ちになったら GoogleAuthRejected を投げる。
+  Future<T> withFreshToken<T>(Future<T> Function() run) async {
+    // 💡 呼び出し前に使うトークンを覚える（失敗時に「そのトークン」だけを捨てるため）
+    await _authClient();
+    final used = await _savedToken();
+    return withTokenRecovery<T>(
+      run: run,
+      invalidate: () => invalidateRejectedToken(used: used),
+      recover: ensureAccess,
+      onUnrecovered: (state) => throw GoogleAuthRejected(state),
+    );
+  }
+
   // 保存したトークンがまだ使えるか（残り2分を切っていたら使わない）
   Future<gauth.AccessCredentials?> _cachedCredentials() async {
     try {
@@ -402,6 +454,7 @@ class GmailService {
       final data = prefs.getString(_kToken);
       final expiryStr = prefs.getString(_kTokenExpiry);
       if (data == null || expiryStr == null) return null;
+      if (_rejectedTokens.contains(data)) return null;
       final expiry = DateTime.tryParse(expiryStr)?.toUtc();
       if (expiry == null) return null;
       if (expiry.isBefore(
@@ -428,7 +481,9 @@ class GmailService {
     if (isPopupUnfriendly) return null;
     try {
       final client = await _googleSignIn.authenticatedClient();
-      if (client != null) {
+      // ⚠️ プラグインが覚えている拒否済みのトークンは「使えない」として扱う
+      if (client != null &&
+          !_rejectedTokens.contains(client.credentials.accessToken.data)) {
         await _cacheToken();
         return client;
       }
