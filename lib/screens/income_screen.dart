@@ -496,7 +496,7 @@ class IncomeScreen extends StatelessWidget {
           children: [
             Text('$labelの予想', style: const TextStyle(fontSize: 12, color: Colors.black54)),
             const SizedBox(height: 2),
-            Text('¥ $value',
+            Text('¥ ${yenNum(value)}',
                 style: TextStyle(
                     fontSize: 18,
                     fontWeight: FontWeight.bold,
@@ -539,7 +539,7 @@ class IncomeScreen extends StatelessWidget {
                   ],
                 ),
                 const SizedBox(height: 4),
-                Text('¥ ${low.balance}',
+                Text('¥ ${yenNum(low.balance)}',
                     style: TextStyle(
                         fontSize: 20,
                         fontWeight: FontWeight.bold,
@@ -1128,7 +1128,7 @@ class IncomeScreen extends StatelessWidget {
                     crossAxisAlignment: CrossAxisAlignment.end,
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      Text('¥ ${appState.effectiveBalance}', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                      Text('¥ ${yenNum(appState.effectiveBalance)}', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
                       if (appState.debitsAfterSnapshot() > 0)
                         Text('編集時 ¥${yenNum(appState.currentBalance)}',
                             style: const TextStyle(fontSize: 11, color: Colors.grey)),
@@ -1201,7 +1201,7 @@ class IncomeScreen extends StatelessWidget {
               trailing: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Text('¥ ${appState.walletCash}', style: const TextStyle(fontSize: 16)),
+                  Text('¥ ${yenNum(appState.walletCash)}', style: const TextStyle(fontSize: 16)),
                   IconButton(icon: const Icon(Icons.edit), onPressed: () => _showEditDialog(context, '財布の現金', appState.walletCash, appState.updateWalletCash)),
                 ],
               ),
@@ -1210,12 +1210,12 @@ class IncomeScreen extends StatelessWidget {
               leading: const Icon(Icons.work, color: Colors.green),
               title: const Text('給料入金（今月）'),
               subtitle: const Text('給料日に入金される見込み'),
-              trailing: Text('+ ¥ $expectedIncome', style: const TextStyle(fontSize: 16, color: Colors.green, fontWeight: FontWeight.bold)),
+              trailing: Text('+ ¥ ${yenNum(expectedIncome)}', style: const TextStyle(fontSize: 16, color: Colors.green, fontWeight: FontWeight.bold)),
             ),
             ListTile(
               leading: const Icon(Icons.credit_card, color: Colors.red),
               title: const Text('カード請求(未払い)'),
-              trailing: Text('- ¥ $cardExpenses', style: const TextStyle(fontSize: 16, color: Colors.red)),
+              trailing: Text('- ¥ ${yenNum(cardExpenses)}', style: const TextStyle(fontSize: 16, color: Colors.red)),
             ),
             // 💡 カード別の内訳
             if (cardBreakdown.isNotEmpty)
@@ -1231,7 +1231,7 @@ class IncomeScreen extends StatelessWidget {
                           Container(width: 10, height: 10, decoration: BoxDecoration(color: style.color, shape: BoxShape.circle)),
                           const SizedBox(width: 8),
                           Expanded(child: Text(e.key, style: const TextStyle(fontSize: 13, color: Colors.black54))),
-                          Text('¥ ${e.value}', style: const TextStyle(fontSize: 13, color: Colors.black54)),
+                          Text('¥ ${yenNum(e.value)}', style: const TextStyle(fontSize: 13, color: Colors.black54)),
                         ],
                       ),
                     );
@@ -1241,17 +1241,17 @@ class IncomeScreen extends StatelessWidget {
             ListTile(
               leading: const Icon(Icons.subscriptions, color: Colors.purple),
               title: const Text('定期支払い'),
-              trailing: Text('- ¥ $subscriptions', style: const TextStyle(fontSize: 16, color: Colors.red)),
+              trailing: Text('- ¥ ${yenNum(subscriptions)}', style: const TextStyle(fontSize: 16, color: Colors.red)),
             ),
             ListTile(
               leading: const Icon(Icons.calendar_view_month, color: Colors.deepOrange),
               title: const Text('分割払い(今月)'),
-              trailing: Text('- ¥ $installments', style: const TextStyle(fontSize: 16, color: Colors.red)),
+              trailing: Text('- ¥ ${yenNum(installments)}', style: const TextStyle(fontSize: 16, color: Colors.red)),
             ),
             ListTile(
               leading: const Icon(Icons.atm, color: Colors.brown),
               title: const Text('ATM引き出し'),
-              trailing: Text('- ¥ $withdrawals', style: const TextStyle(fontSize: 16, color: Colors.red)),
+              trailing: Text('- ¥ ${yenNum(withdrawals)}', style: const TextStyle(fontSize: 16, color: Colors.red)),
             ),
 
             // 💡 年間サマリー（過去2年分・年収/カード支出）

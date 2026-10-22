@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../app_state.dart';
+import '../money_format.dart';
 
 // 給料情報（1区間）の詳細編集。参考画像3準拠。
 // 期間（締日基準・読み取り）／時給／交通費／休日・深夜・残業手当（なし or 倍率）。
@@ -185,14 +186,14 @@ class _WagePeriodEditScreenState extends State<WagePeriodEditScreen> {
               children: [
                 ListTile(
                   title: const Text('交通費'),
-                  trailing: Text(_transportPerDay > 0 ? '一日 $_transportPerDay 円' : 'なし'),
+                  trailing: Text(_transportPerDay > 0 ? '一日 ${yenNum(_transportPerDay)} 円' : 'なし'),
                   onTap: () => _editAmount('交通費（一日）', _transportPerDay,
                       (v) => setState(() => _transportPerDay = v)),
                 ),
                 const Divider(height: 1),
                 ListTile(
                   title: const Text('交通費の月上限'),
-                  trailing: Text(_transportMonthlyCap > 0 ? '月 $_transportMonthlyCap 円' : 'なし'),
+                  trailing: Text(_transportMonthlyCap > 0 ? '月 ${yenNum(_transportMonthlyCap)} 円' : 'なし'),
                   onTap: () => _editAmount('交通費の月上限', _transportMonthlyCap,
                       (v) => setState(() => _transportMonthlyCap = v)),
                 ),

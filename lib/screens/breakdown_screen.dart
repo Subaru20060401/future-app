@@ -90,7 +90,7 @@ class _BreakdownScreenState extends State<BreakdownScreen> {
               children: [
                 Text(widget.totalLabel,
                     style: const TextStyle(fontSize: 13, color: Colors.grey)),
-                Text('¥ $total',
+                Text('¥ ${yenNum(total)}',
                     style: TextStyle(
                         fontSize: 30,
                         fontWeight: FontWeight.bold,
