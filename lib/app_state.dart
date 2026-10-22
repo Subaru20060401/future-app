@@ -643,6 +643,32 @@ class Installment {
   // 手数料込みの総支払額
   int get totalWithInterest => monthlyAmount * installmentCount;
 
+  // 💡 その月が何回目か（1始まり）。期間外・開始日の無い旧データは0。
+  //   1回目＝利用開始月。そこから installmentCount か月ぶん。
+  //   ⚠️ 以前は同じ式が AppState に5か所あった。ここ1か所で決める。
+  int countIn(DateTime month) {
+    final start = startDate;
+    if (start == null) return 0;
+    final diff = (month.year - start.year) * 12 + (month.month - start.month);
+    if (diff < 0 || diff >= installmentCount) return 0;
+    return diff + 1;
+  }
+
+  // 💡 その月に計上する額。開始日の無い旧データは、残りがあれば「今月」だけ計上する。
+  int amountIn(DateTime month, {required DateTime now}) {
+    if (startDate == null) {
+      final thisMonth = month.year == now.year && month.month == now.month;
+      return remainingMonths > 0 && thisMonth ? monthlyAmount : 0;
+    }
+    return countIn(month) > 0 ? monthlyAmount : 0;
+  }
+
+  // 明細に出す「何回目か」
+  String countLabelIn(DateTime month) {
+    final n = countIn(month);
+    return n > 0 ? '$n/$installmentCount回目' : '残り$remainingMonths回（開始日なし）';
+  }
+
   Map<String, dynamic> toJson() => {
         'id': id,
         'name': name,
@@ -3453,17 +3479,7 @@ class AppState extends ChangeNotifier {
     int total = 0;
     final now = DateTime.now();
     for (final i in installments) {
-      final start = i.startDate;
-      if (start == null) {
-        // 期間不明な旧データはアクティブなら当月のみ計上
-        if (i.remainingMonths > 0 && month.year == now.year && month.month == now.month) {
-          total += i.monthlyAmount;
-        }
-        continue;
-      }
-      // 1回目＝利用開始月。そこから installmentCount か月ぶんアクティブ。
-      final diff = (month.year - start.year) * 12 + (month.month - start.month);
-      if (diff >= 0 && diff < i.installmentCount) total += i.monthlyAmount;
+      total += i.amountIn(month, now: now);
     }
     return total;
   }
@@ -3477,17 +3493,8 @@ class AppState extends ChangeNotifier {
     for (final i in installments) {
       final card = i.cardName.trim();
       if (card.isEmpty) continue; // カード未設定は割り当てられない
-      final start = i.startDate;
-      if (start == null) {
-        if (i.remainingMonths > 0 && month.year == now.year && month.month == now.month) {
-          out[card] = (out[card] ?? 0) + i.monthlyAmount;
-        }
-        continue;
-      }
-      final diff = (month.year - start.year) * 12 + (month.month - start.month);
-      if (diff >= 0 && diff < i.installmentCount) {
-        out[card] = (out[card] ?? 0) + i.monthlyAmount;
-      }
+      final amount = i.amountIn(month, now: now);
+      if (amount > 0) out[card] = (out[card] ?? 0) + amount;
     }
     return out;
   }
@@ -3525,15 +3532,7 @@ class AppState extends ChangeNotifier {
     final now = DateTime.now();
     for (final i in installments) {
       if (i.cardName.trim().isNotEmpty) continue;
-      final start = i.startDate;
-      if (start == null) {
-        if (i.remainingMonths > 0 && month.year == now.year && month.month == now.month) {
-          total += i.monthlyAmount;
-        }
-        continue;
-      }
-      final diff = (month.year - start.year) * 12 + (month.month - start.month);
-      if (diff >= 0 && diff < i.installmentCount) total += i.monthlyAmount;
+      total += i.amountIn(month, now: now);
     }
     return total;
   }
@@ -3626,12 +3625,13 @@ class AppState extends ChangeNotifier {
         out.add((title: s.title, subtitle: '毎月${s.payDay}日', amount: s.amount));
       }
     } else if (label == '分割払い') {
+      // ⚠️ 合計（installmentTotalOf）と同じ判定で並べる。以前は開始日の無い旧データを
+      //   合計には入れて内訳からは外していたので、内訳を足しても合計に届かなかった。
+      final now = DateTime.now();
       for (final i in installments) {
-        final start = i.startDate;
-        if (start == null) continue;
-        final diff = (month.year - start.year) * 12 + (month.month - start.month);
-        if (diff >= 0 && diff < i.installmentCount) {
-          out.add((title: i.name, subtitle: '${diff + 1}/${i.installmentCount}回目', amount: i.monthlyAmount));
+        final amount = i.amountIn(month, now: now);
+        if (amount > 0) {
+          out.add((title: i.name, subtitle: i.countLabelIn(month), amount: amount));
         }
       }
     } else if (loans.any((l) => l.isFromAccount && l.name == label)) {
@@ -3680,15 +3680,15 @@ class AppState extends ChangeNotifier {
       // 💡 このカードで組んだ分割払いの当月ぶん。カードの請求に含めて落ちるので、
       //   合計にも足してあり、明細にも出す（銀行確定済みなら確定額に含まれるので出さない）。
       if (!cardHasBank) {
+        // ⚠️ 合計（installmentTotalByCardOf）と同じ判定で並べる（開始日の無い旧データも出す）
+        final now = DateTime.now();
         for (final inst in installments.where((e) => e.cardName == label)) {
-          final start = inst.startDate;
-          if (start == null) continue;
-          final diff = (month.year - start.year) * 12 + (month.month - start.month);
-          if (diff >= 0 && diff < inst.installmentCount) {
+          final amount = inst.amountIn(month, now: now);
+          if (amount > 0) {
             out.add((
               title: '分割: ${inst.name}',
-              subtitle: '分割 ${diff + 1}/${inst.installmentCount}回目',
-              amount: inst.monthlyAmount,
+              subtitle: '分割 ${inst.countLabelIn(month)}',
+              amount: amount,
             ));
           }
         }
