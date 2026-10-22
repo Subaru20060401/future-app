@@ -1038,9 +1038,6 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
         builder: (context, setLocal) {
           final count = int.tryParse(countCtrl.text) ?? 0;
           final valid = count >= 2;
-          final free = isInstallmentInterestFree(p.cardName, count);
-          final rate = appState.effectiveRateFor(p.cardName, count);
-          final monthly = valid ? computeInstallmentMonthly(p.amount, count, rate) : 0;
           return AlertDialog(
             title: const Text('分割に変換'),
             content: Column(
@@ -1060,12 +1057,11 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
                 const SizedBox(height: 8),
                 if (!valid)
                   const Text('2回以上を入力してください', style: TextStyle(color: Colors.red, fontSize: 12))
-                else ...[
-                  Text(free ? '金利: 無料（${p.cardName}の2・3回）' : '金利(年率): ${rate.toStringAsFixed(1)}%',
-                      style: TextStyle(fontSize: 12, color: free ? Colors.green : Colors.grey)),
-                  const SizedBox(height: 4),
-                  Text('月額 ¥${yenNum(monthly)} × $count回', style: const TextStyle(fontWeight: FontWeight.bold)),
-                ],
+                else
+                  _InstallmentPlanPreview(
+                      plan: appState.installmentPlanOf(p.cardName, p.amount, count),
+                      cardName: p.cardName,
+                      count: count),
               ],
             ),
             actions: [
@@ -1132,9 +1128,6 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
         builder: (context, setLocal) {
           final count = int.tryParse(countCtrl.text) ?? 0;
           final valid = count >= 2 && card != null;
-          final free = isInstallmentInterestFree(inst.cardName, count);
-          final rate = appState.effectiveRateFor(inst.cardName, count);
-          final monthly = valid ? computeInstallmentMonthly(inst.totalAmount, count, rate) : 0;
           return AlertDialog(
             title: const Text('分割払いを編集'),
             content: Column(
@@ -1169,12 +1162,12 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
                 const SizedBox(height: 8),
                 if (!valid)
                   const Text('2回以上を入力してください', style: TextStyle(color: Colors.red, fontSize: 12))
-                else ...[
-                  Text(free ? '金利: 無料（2・3回）' : '金利(年率): ${rate.toStringAsFixed(1)}%',
-                      style: TextStyle(fontSize: 12, color: free ? Colors.green : Colors.grey)),
-                  const SizedBox(height: 4),
-                  Text('月額 ¥${yenNum(monthly)} × $count回', style: const TextStyle(fontWeight: FontWeight.bold)),
-                ],
+                else
+                  // 💡 選び直したカード（card）で見込みを出す。保存も同じカードで計算する
+                  _InstallmentPlanPreview(
+                      plan: appState.installmentPlanOf(card!, inst.totalAmount, count),
+                      cardName: card!,
+                      count: count),
               ],
             ),
             actions: [
@@ -1476,3 +1469,25 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
 }
 
 // 支払いの出所バッジ（銀行確定/請求予定/利用/手動）
+
+// 💡 分割の見込み（金利と月額）。「分割に変換」と「分割払いを編集」で共通。
+class _InstallmentPlanPreview extends StatelessWidget {
+  const _InstallmentPlanPreview({required this.plan, required this.cardName, required this.count});
+  final ({double rate, bool free, int monthly}) plan;
+  final String cardName;
+  final int count;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(plan.free ? '金利: 無料（$cardNameの2・3回）' : '金利(年率): ${plan.rate.toStringAsFixed(1)}%',
+            style: TextStyle(fontSize: 12, color: plan.free ? Colors.green : Colors.grey)),
+        const SizedBox(height: 4),
+        Text('月額 ¥${yenNum(plan.monthly)} × $count回',
+            style: const TextStyle(fontWeight: FontWeight.bold)),
+      ],
+    );
+  }
+}

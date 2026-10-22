@@ -2360,6 +2360,20 @@ class AppState extends ChangeNotifier {
   double effectiveRateFor(String cardName, int count) =>
       isInstallmentInterestFree(cardName, count) ? 0.0 : interestRateOf(cardName);
 
+  // 💡 そのカード・回数で分割したときの条件（金利・手数料無料か・月額）。
+  //   画面に出す見込みと、保存（変換・編集）の両方がこれを使う。
+  //   ⚠️ 以前は「分割払いを編集」の見込みが元のカードの金利で計算していて、
+  //     カードを変えると保存後の月額（新しいカードの金利）と食い違っていた。
+  ({double rate, bool free, int monthly}) installmentPlanOf(
+      String cardName, int principal, int count) {
+    final rate = effectiveRateFor(cardName, count);
+    return (
+      rate: rate,
+      free: isInstallmentInterestFree(cardName, count),
+      monthly: computeInstallmentMonthly(principal, count, rate),
+    );
+  }
+
   // 💡 経過した引落回数から「残り回数」を動的に算出。
   //   利用日(startDate)から引落日ルールで各回の引落日を出し、今日までに過ぎた回数を引く。
   int remainingMonthsOf(Installment i) {
@@ -2381,9 +2395,9 @@ class AppState extends ChangeNotifier {
     if (cardName != null) inst.cardName = cardName;
     inst.installmentCount = count;
     inst.remainingMonths = count;
-    inst.interestRate = effectiveRateFor(inst.cardName, count);
-    inst.monthlyAmount =
-        computeInstallmentMonthly(inst.totalAmount, count, inst.interestRate);
+    final plan = installmentPlanOf(inst.cardName, inst.totalAmount, count);
+    inst.interestRate = plan.rate;
+    inst.monthlyAmount = plan.monthly;
     saveData();
     notifyListeners();
   }
