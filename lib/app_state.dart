@@ -752,8 +752,6 @@ class Loan {
   // 返済の総額（手数料込み。初回だけ違う場合も正しく足す）
   int get totalRepayment =>
       firstAmount + monthlyAmount * (totalCount > 0 ? totalCount - 1 : 0);
-  // 最終的に払う総額
-  int get totalCost => downPayment + totalRepayment;
 
   bool get hasDownPayment => downPayment > 0 && downPaymentDate != null;
   bool get isDownPaymentFromAccount => downPaymentMethod.isEmpty;
@@ -2048,12 +2046,6 @@ class AppState extends ChangeNotifier {
       return true;
     });
     keys.addAll(moved);
-  }
-
-  void unmergeCardName(String from) {
-    cardAliases.remove(from);
-    saveData();
-    notifyListeners();
   }
 
   static const String kAmazonSourcePrefix = 'amazon#';
@@ -3360,18 +3352,6 @@ class AppState extends ChangeNotifier {
     return any ? total : null;
   }
 
-  // 旧API: 月合計をまとめて設定（後方互換）
-  void setActualSalary(DateTime month, int? amount) {
-    final key = _ymKey(month);
-    if (amount == null || amount <= 0) {
-      actualSalaries.remove(key);
-    } else {
-      actualSalaries[key] = amount;
-    }
-    saveData();
-    notifyListeners();
-  }
-
   // #3 勤務先別の実給料を設定
   int? actualSalaryOfWorkplace(DateTime month, String wpKey) =>
       actualSalariesByWp[_wpSalKey(month, wpKey)];
@@ -4049,10 +4029,36 @@ class AppState extends ChangeNotifier {
   }
 
   // 支払い済みにする（残高からは既に引かれているので、予想では二重に引かない）
+  // 💡 予定日より前に払ったとき用。予定日を過ぎていれば、残高を書き直した時点で
+  //   二重計上ゲート（_forecastInclude）が外すので、ここを使わなくても二重にはならない。
   void markPlannedExpensePaid(String id, DateTime date) {
     paidPlannedExpenseKeys.add(_plannedExpenseKey(id, date));
     saveData();
     notifyListeners();
+  }
+
+  // 払い済みを取り消す（押し間違えたとき）
+  void unmarkPlannedExpensePaid(String id, DateTime date) {
+    paidPlannedExpenseKeys.remove(_plannedExpenseKey(id, date));
+    saveData();
+    notifyListeners();
+  }
+
+  bool isPlannedExpensePaid(String id, DateTime date) =>
+      paidPlannedExpenseKeys.contains(_plannedExpenseKey(id, date));
+
+  // 💡 次に来る、まだ払っていない回の予定日（今日以降。1年先まで探す）。
+  //   毎月の予定支出は、今月分を払い済みにすると来月分になる。
+  DateTime? nextUnpaidPlannedExpenseDate(PlannedExpense e, {DateTime? now}) {
+    final n = now ?? DateTime.now();
+    final today = DateTime(n.year, n.month, n.day);
+    for (var dm = 0; dm <= 12; dm++) {
+      final d = e.dateIn(DateTime(n.year, n.month + dm));
+      if (d == null || d.isBefore(today)) continue;
+      if (isPlannedExpensePaid(e.id, d)) continue;
+      return d;
+    }
+    return null;
   }
 
   // その月に出ていく予定の出費（まだ払っていないもの）

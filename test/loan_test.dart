@@ -138,7 +138,6 @@ void main() {
       );
       expect(l.totalPrice, 1300000); // 頭金 30万 ＋ 借入 100万
       expect(l.monthlyAmount, 16667); // 無利息なら 100万 ÷ 60回
-      expect(l.totalCost, 300000 + 16667 * 60);
       expect(l.hasDownPayment, isTrue);
     });
 

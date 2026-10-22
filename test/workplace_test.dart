@@ -204,15 +204,14 @@ void main() {
       expect(app.workHoursOf(DateTime(2026, 6)), 12.0);
     });
 
-    test('実給料は手入力で保存・0でクリア', () async {
+    test('旧方式（月合計）で保存された実給料も読める', () async {
       SharedPreferences.setMockInitialValues({});
       final app = AppState();
       await app.loadData();
       expect(app.actualSalaryOf(DateTime(2026, 6)), isNull);
-      app.setActualSalary(DateTime(2026, 6), 123456);
+      // 💡 入力する画面はもう無いが、昔のデータには残っている
+      app.actualSalaries['2026-06'] = 123456;
       expect(app.actualSalaryOf(DateTime(2026, 6)), 123456);
-      app.setActualSalary(DateTime(2026, 6), 0); // クリア
-      expect(app.actualSalaryOf(DateTime(2026, 6)), isNull);
     });
   });
 
@@ -622,7 +621,7 @@ void main() {
       final app = AppState();
       await app.loadData();
       app.addWorkplace(Workplace(id: 'w1', name: 'A', paydayMonthOffset: 1));
-      app.setActualSalary(DateTime(2026, 5), 88000);
+      app.actualSalaries['2026-05'] = 88000; // 旧方式で保存された実給料
       expect(app.incomeArrivingIn(DateTime(2026, 6)), 88000);
     });
 

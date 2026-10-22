@@ -72,13 +72,5 @@ void main() {
       expect(LockService.minLength, 4);
       expect(LockService.maxLength, 20);
     });
-
-    test('lockNow で即ロックできる', () async {
-      await LockService.instance.setPasscode('1234');
-      LockService.instance.lockNow();
-      expect(LockService.instance.isLocked, isTrue);
-      LockService.instance.unlock();
-      expect(LockService.instance.isLocked, isFalse);
-    });
   });
 }

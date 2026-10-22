@@ -57,26 +57,53 @@ Future<void> showPlannedExpenseSheet(
                     ),
                   )
                 else
-                  ...all.map((e) => ListTile(
+                  ...all.map((e) {
+                    // 💡 次に来る、まだ払っていない回。一度きりで払い済みなら null
+                    final next = appState.nextUnpaidPlannedExpenseDate(e);
+                    final paidOnce = !e.monthly && appState.isPlannedExpensePaid(e.id, e.date);
+                    return ListTile(
                         contentPadding: EdgeInsets.zero,
                         leading: Icon(
                           e.monthly ? Icons.repeat : Icons.event,
-                          color: Colors.deepOrange,
+                          color: paidOnce ? Colors.grey : Colors.deepOrange,
                         ),
                         title: Text(e.title),
                         subtitle: Text(
-                          e.monthly
-                              ? '毎月${e.date.day}日'
-                              : DateFormat('yyyy年M月d日').format(e.date),
+                          paidOnce
+                              ? '払い済み（予想から外しています）'
+                              : e.monthly
+                                  ? '毎月${e.date.day}日'
+                                      '${next != null ? '・次回 ${DateFormat('M/d').format(next)}' : ''}'
+                                  : DateFormat('yyyy年M月d日').format(e.date),
                           style: const TextStyle(fontSize: 12),
                         ),
                         trailing: Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
                             Text('¥${yenNum(e.amount)}',
-                                style: const TextStyle(
+                                style: TextStyle(
                                     fontWeight: FontWeight.bold,
-                                    color: Colors.deepOrange)),
+                                    color: paidOnce ? Colors.grey : Colors.deepOrange)),
+                            if (paidOnce)
+                              IconButton(
+                                tooltip: '払い済みを取り消す',
+                                icon: const Icon(Icons.undo, color: Colors.grey),
+                                onPressed: () {
+                                  appState.unmarkPlannedExpensePaid(e.id, e.date);
+                                  setLocal(() {});
+                                },
+                              )
+                            else if (next != null)
+                              IconButton(
+                                tooltip: '払い済みにする',
+                                icon: const Icon(Icons.check_circle_outline,
+                                    color: Colors.green),
+                                onPressed: () async {
+                                  if (await _confirmPaid(ctx, e, next) != true) return;
+                                  appState.markPlannedExpensePaid(e.id, next);
+                                  setLocal(() {});
+                                },
+                              ),
                             IconButton(
                               icon: const Icon(Icons.delete_outline,
                                   color: Colors.grey),
@@ -91,12 +118,34 @@ Future<void> showPlannedExpenseSheet(
                           await _edit(ctx, appState, e);
                           setLocal(() {});
                         },
-                      )),
+                      );
+                  }),
               ],
             ),
           );
         },
       ));
+}
+
+// 💡 予定日より前に払ったとき用。払ったお金は今の口座残高に入っている前提なので、
+//   予想からこの回を外す（外さないと、残高と予想の両方で二重に引かれる）。
+Future<bool?> _confirmPaid(BuildContext context, PlannedExpense e, DateTime date) {
+  return showDialog<bool>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: const Text('払い済みにする'),
+      content: Text(
+        '「${e.title}」（${DateFormat('M/d').format(date)}・¥${yenNum(e.amount)}）を予想から外します。\n\n'
+        '払ったぶんが今の口座残高に入っている（残高を書き直した）ときに使ってください。'
+        'まだ残高に入れていないなら、先に残高を書き直してください。',
+        style: const TextStyle(fontSize: 13),
+      ),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('やめる')),
+        ElevatedButton(onPressed: () => Navigator.pop(context, true), child: const Text('払い済みにする')),
+      ],
+    ),
+  );
 }
 
 Future<void> _edit(

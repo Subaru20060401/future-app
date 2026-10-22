@@ -183,6 +183,13 @@ String describeGeminiError(int status, String body) {
   if (status == 400 && lower.contains('api key not valid')) {
     return 'APIキーが正しくありません。Google AI Studioで発行したキーを入れ直してください';
   }
+  // ⚠️ 402 は「キーのプロジェクトが有料扱いで、前払い残高が0円」。待っても直らず、
+  //   自動で無料枠にも戻らない。どちらにするかは本人が決める（docs/handoff.md）。
+  if (status == 402) {
+    return 'Geminiの前払い残高が0円のため止まっています（402）。'
+        'Google AI Studio で残高を入れるか、Google Cloud でこのプロジェクトの課金を外して無料枠に戻してください。'
+        '（無料枠では、送った画像がGoogleのサービス改善に使われることがあります）';
+  }
   if (status == 401 || status == 403) {
     return 'APIキーが使えません（$status）。キーが有効か、Gemini APIが使える設定かを確認してください';
   }

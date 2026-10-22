@@ -98,13 +98,6 @@ void main() {
       expect(restored.cardAliases['ミツビシUFJニコス'], '三菱UFJカード');
       expect(restored.resolveCardName('ミツビシUFJニコス'), '三菱UFJカード');
     });
-
-    test('まとめを解除できる', () {
-      final app = withCard();
-      app.mergeCardName('ミツビシUFJニコス', '三菱UFJカード');
-      app.unmergeCardName('ミツビシUFJニコス');
-      expect(app.resolveCardName('ミツビシUFJニコス'), 'ミツビシUFJニコス');
-    });
   });
 
   // 💡 表記違いで2枚とも「登録済み」になってしまった場合（例: 三菱UFJ と MUFGカード）。

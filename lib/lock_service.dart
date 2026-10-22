@@ -93,10 +93,6 @@ class LockService {
     if (at == null || DateTime.now().difference(at) > _kGrace) _locked = true;
   }
 
-  void lockNow() {
-    if (isEnabled) _locked = true;
-  }
-
   Future<void> setBiometricEnabled(bool on) async {
     _biometric = on;
     final prefs = await SharedPreferences.getInstance();
