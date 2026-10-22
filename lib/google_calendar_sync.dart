@@ -10,6 +10,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'app_state.dart';
 import 'gmail_service.dart';
+import 'money_format.dart';
 
 class GoogleCalendarSync implements CalendarSyncHook {
   GoogleCalendarSync(this.appState);
@@ -164,7 +165,7 @@ class GoogleCalendarSync implements CalendarSyncHook {
       title: '${s.workplace}（バイト）',
       start: s.start,
       end: s.end,
-      description: '時給¥${s.hourlyWage} / 休憩${s.breakMinutes}分 / 給与¥${s.earnings}',
+      description: '時給¥${yenNum(s.hourlyWage)} / 休憩${s.breakMinutes}分 / 給与¥${yenNum(s.earnings)}',
       // 💡 設定の「シフトの通知」（前日の夜・1時間前など）
       reminderMinutes: appState.shiftReminderFor(s),
     );

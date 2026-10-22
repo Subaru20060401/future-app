@@ -133,8 +133,6 @@ void markDuplicates(
   required String workplaceName,
   String? workplaceId,
 }) {
-  String key(DateTime d) =>
-      '${d.year.toString().padLeft(4, '0')}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
   bool sameWp(ShiftData s) =>
       (workplaceId != null && s.workplaceId == workplaceId) || s.workplace == workplaceName;
   final seen = <String>{};
@@ -142,7 +140,7 @@ void markDuplicates(
     c.duplicate = false;
     c.overlapWith = null;
     final sig = '${c.start.toIso8601String()}|${c.end.toIso8601String()}';
-    final dayShifts = existing[key(c.date)] ?? const <ShiftData>[];
+    final dayShifts = existing[dateKey(c.date)] ?? const <ShiftData>[];
     final exact = dayShifts.any((s) =>
         sameWp(s) && s.start == c.start && s.end == c.end);
     if (exact || !seen.add(sig)) {

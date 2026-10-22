@@ -9,6 +9,7 @@ import 'package:path_provider/path_provider.dart';
 import 'card_styles.dart';
 import 'japanese_holidays.dart';
 import 'workplace_styles.dart';
+import 'money_format.dart';
 
 // ───────────────────────── 列挙型 ─────────────────────────
 enum Priority { high, middle, low }
@@ -1164,7 +1165,7 @@ class BalanceEntry {
       );
 }
 
-// 💡 Appleカレンダー連携のフック。実装は lib/calendar_sync.dart（device_calendar）。
+// 💡 カレンダー連携のフック。実装は lib/google_calendar_sync.dart（Googleカレンダー）。
 //   AppState はプラットフォーム依存を持たないよう、この抽象だけ参照する（テストでは null）。
 abstract class CalendarSyncHook {
   Future<bool> enableAndSyncAll();
@@ -1218,6 +1219,10 @@ List<int>? shiftReminderMinutes(ShiftReminder mode, DateTime start) {
 // 💡 残高不足の通知の時刻（終日の予定なので「その日の0時から何分前か」）。
 //   3日前の9時と前日の9時。ずらす・入金するなどの手を打てる余裕を持たせる。
 const List<int> kShortfallReminderMinutes = [3 * 1440 - 9 * 60, 1440 - 9 * 60];
+
+// 💡 シフト・予定・やることを日ごとに入れる箱のキー（"2026-10-22"）。
+//   画面ごとに作ると書式がずれたときに別の日の箱を見てしまうので、ここ1か所で作る。
+String dateKey(DateTime d) => DateFormat('yyyy-MM-dd').format(d);
 
 // ════════════════════════ AppState ════════════════════════
 // 💡 ホームの「確認待ち」に並べる1件。
@@ -1422,7 +1427,7 @@ class AppState extends ChangeNotifier {
   final Completer<void> _loaded = Completer<void>();
   Future<void> get ready => _loaded.future;
 
-  String _formatDate(DateTime date) => DateFormat('yyyy-MM-dd').format(date);
+  String _formatDate(DateTime date) => dateKey(date);
 
   // 💡 一括追加でも衝突しないユニークID（マイクロ秒＋連番）
   int _idCounter = 0;
@@ -1498,8 +1503,8 @@ class AppState extends ChangeNotifier {
         // ⚠️ もう来た給料日は動かさない（その日付で通知済み）
         if (existingId.isNotEmpty && placed != null && placed.isBefore(today)) continue;
         final title = '💰 給料日（${entry.workplace.name}）';
-        final desc = '${m.month}月分 ¥${entry.amount}';
-        final sig = '${DateFormat('yyyy-MM-dd').format(entry.date)}|$title|$desc';
+        final desc = '${m.month}月分 ¥${yenNum(entry.amount)}';
+        final sig = '${dateKey(entry.date)}|$title|$desc';
         if (existingId.isNotEmpty && specialCalendarSigs[key] == sig) continue;
         final calId = await calendarSync!.upsertSpecialEvent(
           existingCalId: existingId,
@@ -1605,9 +1610,9 @@ class AppState extends ChangeNotifier {
         final existingId = specialCalendarIds[key] ?? '';
         const title = '⚠️ 引き落としで残高が足りない見込み';
         final desc = '${day.labels.join('・')}の引き落としで '
-            '¥${NumberFormat('#,###').format(-day.balance)} 足りない見込みです'
+            '¥${yenNum(-day.balance)} 足りない見込みです'
             '（ポケットメイドの予想）。入金や支払いの見直しを。';
-        final sig = '${DateFormat('yyyy-MM-dd').format(day.date)}|$title|$desc';
+        final sig = '${dateKey(day.date)}|$title|$desc';
         if (existingId.isNotEmpty && specialCalendarSigs[key] == sig) continue;
         final calId = await calendarSync!.upsertSpecialEvent(
           existingCalId: existingId,
@@ -1859,12 +1864,6 @@ class AppState extends ChangeNotifier {
 
   // ───── 予定 ─────
   String newEventId() => 'ev-${_id()}';
-
-  void addEvent(DateTime date, EventData event) {
-    events.putIfAbsent(_formatDate(date), () => []).add(event);
-    saveData();
-    notifyListeners();
-  }
 
   // 予定の追加/更新（idで照合）。開始日が変わってもバケットを移動する。
   void upsertEvent(EventData event) {
@@ -3048,7 +3047,7 @@ class AppState extends ChangeNotifier {
     final out = <({DateTime start, DateTime? end, String title, bool isShift, bool allDay})>[];
     for (var i = 0; i < days; i++) {
       final day = today.add(Duration(days: i));
-      final key = DateFormat('yyyy-MM-dd').format(day);
+      final key = dateKey(day);
       for (final s in shifts[key] ?? const <ShiftData>[]) {
         if (s.end.isBefore(now)) continue;
         out.add((start: s.start, end: s.end, title: s.workplace, isShift: true, allDay: false));
@@ -3499,8 +3498,6 @@ class AppState extends ChangeNotifier {
     return out;
   }
 
-  // 💡 その月にカードへ合算した分割払いの合計（「※うち分割払い」の参考表示用）。
-  //   銀行確定済みの月は確定額に既に含まれているので0。
   // 💡 そのカードの請求に合算されるぶん（分割払い・カード払いのローン・頭金）。
   //   月末締めのカードは expenseBreakdownOf の中で足されているので、
   //   こちらは締め期間で集計するカード（締め日が月末以外）のために使う。
@@ -3906,10 +3903,6 @@ class AppState extends ChangeNotifier {
   int get subscriptionTotal =>
       subscriptions.fold(0, (sum, s) => sum + s.amount);
 
-  // 口座から引かれる定期支払いの合計（カード払いを除く＝口座振替＋手動）
-  int get subscriptionFromAccountTotal =>
-      subscriptions.where((s) => !s.isCardPayment).fold(0, (sum, s) => sum + s.amount);
-
   // 💡 指定月の支出に載せる定期支払いの合計。
   //   カード払いの定期は、その月が銀行確定していればカードの引き落とし額に既に含まれるので除く
   //   （分割払いと同じ二重計上対策）。口座振替の定期は常に計上する。
@@ -3937,11 +3930,6 @@ class AppState extends ChangeNotifier {
     }
     return out;
   }
-
-  // 口座から直接引かれるローンの合計（参考表示用）
-  int loanTotalFromAccountOf(DateTime month) => loans
-      .where((l) => l.isFromAccount && l.isActiveIn(month))
-      .fold(0, (s, l) => s + l.amountIn(month));
 
   void addLoan({
     required String name,
@@ -4628,32 +4616,6 @@ class AppState extends ChangeNotifier {
     return total;
   }
 
-  // 指定月の引き落とし日セット（ドット表示用）
-  Set<int> paymentDaysInMonth(DateTime month) {
-    final days = <int>{};
-    // 銀行確定のbank支払い日
-    for (final p in payments) {
-      if (p.source == PaymentSource.bank &&
-          p.paymentDate.year == month.year &&
-          p.paymentDate.month == month.month) {
-        days.add(p.paymentDate.day);
-      }
-    }
-    // 設定済みカードの引き落とし予定日。引き落とし日は毎月同じなので、
-    //   まだ利用データが無い翌月以降も日付だけは表示する（土日祝は翌営業日）。
-    for (final e in cardPaymentDays.entries) {
-      days.add(cardDrawDateOf(e.key, month).day);
-    }
-    return days;
-  }
-
-  // 指定月の給料日（Set<int> day）。
-  Set<int> paydayDaysInMonth(DateTime month) {
-    return paydaysNear(month).where((e) =>
-      e.date.year == month.year && e.date.month == month.month
-    ).map((e) => e.date.day).toSet();
-  }
-
   // 今月末残高の内訳（タップ詳細用）。現在の残高→デビット調整(#5#6)→給料入金→引き落とし。
   // 💡 内訳に「PayPayからの入金（10/15頃）」を足す。同じ日が2件あれば合算する。
   void _addTransferLines(Map<String, int> out, DateTime month) {
@@ -4882,14 +4844,14 @@ class AppState extends ChangeNotifier {
         overtimeMultiplier: fit.overtimeMultiplier,
         holidayMultiplier: fit.holidayMultiplier,
       );
-      final dateKey = DateFormat('yyyy-MM-dd').format(r.start);
-      final k = keyOf(dateKey, s);
+      final key = dateKey(r.start);
+      final k = keyOf(key, s);
       if (existing.contains(k)) {
         skipped++;
         continue;
       }
       existing.add(k);
-      shifts.putIfAbsent(dateKey, () => []).add(s);
+      shifts.putIfAbsent(key, () => []).add(s);
       imported++;
       if (r.earnings > 0 && s.earnings != r.earnings) mismatched++;
     }

@@ -3,6 +3,7 @@ import 'package:intl/intl.dart';
 import '../app_state.dart';
 import 'app_sheet.dart';
 import 'deposit_dialog.dart';
+import '../money_format.dart';
 
 // 💡 予定入金（仕送り・返金・臨時収入など）の管理シート。
 //   給料はシフトから自動計算するので、それ以外の入ってくるお金をここに登録する。
@@ -58,7 +59,7 @@ Future<void> showPlannedIncomeSheet(BuildContext context, AppState appState) asy
                         trailing: Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            Text('+¥${e.income.amount}',
+                            Text('+¥${yenNum(e.income.amount)}',
                                 style: const TextStyle(
                                     color: Colors.green,
                                     fontWeight: FontWeight.bold)),
@@ -116,7 +117,7 @@ Future<void> showPlannedIncomeSheet(BuildContext context, AppState appState) asy
                                 trailing: Row(
                                   mainAxisSize: MainAxisSize.min,
                                   children: [
-                                    Text('+¥${p.amount}',
+                                    Text('+¥${yenNum(p.amount)}',
                                         style: const TextStyle(
                                             fontWeight: FontWeight.bold)),
                                     IconButton(

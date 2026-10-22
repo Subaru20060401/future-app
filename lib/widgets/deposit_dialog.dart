@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import '../app_state.dart';
 import 'app_sheet.dart';
+import '../money_format.dart';
 
 // 💡 入金を反映する前に、日付の過ぎた未処理の引き落としを先に確認してもらう。
 // ⚠️ 入金を反映すると残高の基準日が今日に進み、それより前の引き落としは
@@ -33,7 +34,7 @@ Future<bool> confirmDrawsBeforeDeposit(BuildContext context, AppState appState) 
                   Text('${d.date.month}/${d.date.day}  ',
                       style: const TextStyle(fontSize: 13, color: Colors.black54)),
                   Expanded(child: Text(d.label, style: const TextStyle(fontSize: 13))),
-                  Text('¥${d.amount}',
+                  Text('¥${yenNum(d.amount)}',
                       style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold)),
                 ],
               ),
@@ -169,7 +170,7 @@ Future<void> showDepositDialog(
                     if (transfer != null)
                       ChoiceChip(
                         avatar: const Icon(Icons.account_balance_wallet, size: 14),
-                        label: Text('PayPayの出金 ¥${transfer.amount}',
+                        label: Text('PayPayの出金 ¥${yenNum(transfer.amount)}',
                             style: const TextStyle(fontSize: 12)),
                         selected: useTransfer,
                         onSelected: (_) => setLocal(() {
@@ -266,7 +267,7 @@ Future<void> showDepositDialog(
                   transferId: useTransfer ? transfer?.id : null);
               Navigator.pop(context);
               ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(content: Text('¥$amount を口座残高に追加しました')),
+                SnackBar(content: Text('¥${yenNum(amount)} を口座残高に追加しました')),
               );
             },
             child: const Text('残高に追加'),
@@ -357,7 +358,7 @@ Future<void> showManualDepositDialog(BuildContext context, AppState appState) as
               appState.addDeposit(amount, workplaceId: selectedWpId);
               Navigator.pop(context);
               ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(content: Text('¥$amount を口座残高に追加しました')),
+                SnackBar(content: Text('¥${yenNum(amount)} を口座残高に追加しました')),
               );
             },
             child: const Text('入金する'),
@@ -428,7 +429,7 @@ Future<void> showDrawDialog(
                   const Spacer(),
                   Text(
                     // 💡 引くときはデビットも畳み込むので、実効残高から引いた額が結果になる
-                    '¥${appState.effectiveBalance - (int.tryParse(amountCtrl.text) ?? draw.amount)}',
+                    '¥${yenNum(appState.effectiveBalance - (int.tryParse(amountCtrl.text) ?? draw.amount))}',
                     style: const TextStyle(fontWeight: FontWeight.bold),
                   ),
                 ],
@@ -457,7 +458,7 @@ Future<void> showDrawDialog(
             appState.applyDraw(draw.id, amount, label: draw.label);
             Navigator.pop(context);
             ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(content: Text('¥$amount を口座残高から引きました')),
+              SnackBar(content: Text('¥${yenNum(amount)} を口座残高から引きました')),
             );
           },
           child: const Text('口座から引く'),
@@ -484,7 +485,7 @@ Future<void> showDrawSheet(BuildContext context, AppState appState) async {
               const Text('口座から引き落とし',
                   style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold)),
               const SizedBox(height: 2),
-              Text('現在の残高 ¥${appState.effectiveBalance}',
+              Text('現在の残高 ¥${yenNum(appState.effectiveBalance)}',
                   style: const TextStyle(fontSize: 12, color: Colors.grey)),
               const SizedBox(height: 12),
               if (pending.isEmpty)
@@ -511,7 +512,7 @@ Future<void> showDrawSheet(BuildContext context, AppState appState) async {
                                 trailing: Row(
                                   mainAxisSize: MainAxisSize.min,
                                   children: [
-                                    Text('-¥${d.amount}',
+                                    Text('-¥${yenNum(d.amount)}',
                                         style: const TextStyle(
                                             color: Colors.red, fontWeight: FontWeight.bold)),
                                     const SizedBox(width: 8),
@@ -548,7 +549,7 @@ Future<void> showDrawSheet(BuildContext context, AppState appState) async {
                         style: ElevatedButton.styleFrom(
                             backgroundColor: Colors.red, foregroundColor: Colors.white),
                         icon: const Icon(Icons.done_all, size: 18),
-                        label: Text('すべて引く（-¥${pending.fold<int>(0, (s, d) => s + d.amount)}）'),
+                        label: Text('すべて引く（-¥${yenNum(pending.fold<int>(0, (s, d) => s + d.amount))}）'),
                         onPressed: () {
                           for (final d in List.of(pending)) {
                             appState.applyDraw(d.id, d.amount, label: d.label);
@@ -627,7 +628,7 @@ class _ManualSubtractRowState extends State<_ManualSubtractRow> {
             widget.appState.subtractFromBalance(amount);
             _ctrl.clear();
             ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(content: Text('¥$amount を口座残高から引きました')),
+              SnackBar(content: Text('¥${yenNum(amount)} を口座残高から引きました')),
             );
           },
           child: const Text('引く'),

@@ -1,12 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:table_calendar/table_calendar.dart';
 import 'package:provider/provider.dart';
-import 'package:intl/intl.dart'; // 💡 追加
 import '../app_state.dart';
+import '../widgets/legend_dot.dart';
 import '../widgets/swipe_to_delete.dart';
 import 'event_edit_screen.dart';
 import '../widgets/app_sheet.dart';
 import '../widgets/add_entry_sheets.dart';
+import '../money_format.dart';
 
 class CalendarScreen extends StatefulWidget {
   const CalendarScreen({super.key});
@@ -36,7 +37,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
               subtitle: Text('締日: ${e.workplace.isEndOfMonthClosing ? '月末' : '${e.workplace.closingDay}日'} / 給料日: ${e.workplace.paydayDay}日'),
             ),
             const Divider(),
-            _detailRow('入金予定額', '¥${e.amount}', Colors.green),
+            _detailRow('入金予定額', '¥${yenNum(e.amount)}', Colors.green),
             _detailRow('給料日', '${e.date.year}年${e.date.month}月${e.date.day}日', Colors.black87),
           ],
         ),
@@ -87,7 +88,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
                 children: [
                   Expanded(child: Text('💳 ${summary.cardName}',
                       style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold))),
-                  Text('-¥${summary.amount}',
+                  Text('-¥${yenNum(summary.amount)}',
                       style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.red)),
                 ],
               ),
@@ -107,7 +108,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
                           style: const TextStyle(fontSize: 13)),
                       subtitle: Text('${p.paymentDate.month}/${p.paymentDate.day}',
                           style: const TextStyle(fontSize: 11, color: Colors.black45)),
-                      trailing: Text('-¥${p.amount}',
+                      trailing: Text('-¥${yenNum(p.amount)}',
                           style: const TextStyle(color: Colors.red, fontSize: 13, fontWeight: FontWeight.bold)),
                     );
                   },
@@ -242,7 +243,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
     final appState = context.watch<AppState>();
     
     // 💡 選択された日付を "yyyy-MM-dd" の文字列にして金庫から引き出す
-    final selectedKey = _selectedDay != null ? DateFormat('yyyy-MM-dd').format(_selectedDay!) : '';
+    final selectedKey = _selectedDay != null ? dateKey(_selectedDay!) : '';
     final dayShifts = appState.shifts[selectedKey] ?? [];
     final dayEvents = appState.events[selectedKey] ?? [];
 
@@ -271,7 +272,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
             },
             // 💡 種類ごとに色を変えたポチ（ドット）を表示するため eventLoader は件数だけ返す
             eventLoader: (day) {
-              final key = DateFormat('yyyy-MM-dd').format(day);
+              final key = dateKey(day);
               final hasShift = appState.shifts.containsKey(key) && appState.shifts[key]!.isNotEmpty;
               final hasEvent = appState.events.containsKey(key) && appState.events[key]!.isNotEmpty;
               final hasPayday = appState.paydaysOnDay(day).isNotEmpty;
@@ -280,7 +281,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
             },
             calendarBuilders: CalendarBuilders(
               markerBuilder: (context, day, events) {
-                final key = DateFormat('yyyy-MM-dd').format(day);
+                final key = dateKey(day);
                 final hasShift = appState.shifts.containsKey(key) && appState.shifts[key]!.isNotEmpty;
                 final hasEvent = appState.events.containsKey(key) && appState.events[key]!.isNotEmpty;
                 final hasPayday = appState.paydaysOnDay(day).isNotEmpty;
@@ -322,10 +323,10 @@ class _CalendarScreenState extends State<CalendarScreen> {
               runSpacing: 2,
               alignment: WrapAlignment.center,
               children: const [
-                _LegendDot(color: Colors.blueAccent, label: 'シフト'),
-                _LegendDot(color: Color(0xFF2E9E5B), label: '給料日'),
-                _LegendDot(color: Colors.redAccent, label: '引き落とし'),
-                _LegendDot(color: Colors.orange, label: '予定'),
+                LegendDot(color: Colors.blueAccent, label: 'シフト', compact: true),
+                LegendDot(color: Color(0xFF2E9E5B), label: '給料日', compact: true),
+                LegendDot(color: Colors.redAccent, label: '引き落とし', compact: true),
+                LegendDot(color: Colors.orange, label: '予定', compact: true),
               ],
             ),
           ),
@@ -355,7 +356,7 @@ Expanded(
                   ),
                   title: Text(e.workplace.name),
                   subtitle: const Text('給料日'),
-                  trailing: Text('¥${e.amount}',
+                  trailing: Text('¥${yenNum(e.amount)}',
                       style: const TextStyle(color: Colors.green, fontWeight: FontWeight.bold)),
                   onTap: () => _showPaydayDetail(context, e, appState),
                 ),
@@ -373,7 +374,7 @@ Expanded(
                           color: Colors.green, size: 18),
                       title: Text(p.title),
                       subtitle: Text(p.monthly ? '毎月${p.date.day}日' : '入金予定'),
-                      trailing: Text('+¥${p.amount}',
+                      trailing: Text('+¥${yenNum(p.amount)}',
                           style: const TextStyle(
                               color: Colors.green, fontWeight: FontWeight.bold)),
                     ),
@@ -394,7 +395,7 @@ Expanded(
                           ? '請求予定'
                           : '引き落とし日（金額はまだ未確定）'),
                   trailing: p.amount > 0
-                      ? Text('-¥${p.amount}',
+                      ? Text('-¥${yenNum(p.amount)}',
                           style: const TextStyle(
                               color: Colors.red, fontWeight: FontWeight.bold))
                       : const Text('—',
@@ -425,7 +426,7 @@ Expanded(
                     title: Text(s.workplace),
                     subtitle: Text(
                         '${TimeOfDay.fromDateTime(s.start).format(context)}〜${TimeOfDay.fromDateTime(s.end).format(context)}  (${s.workHours.toStringAsFixed(1)}h / 休憩${s.breakMinutes}分)'),
-                    trailing: Text('¥${s.earnings}'),
+                    trailing: Text('¥${yenNum(s.earnings)}'),
                     onTap: () => _editShift(selectedKey, idx, s, appState),
                   ),
                 ),
@@ -503,24 +504,6 @@ Expanded(
         backgroundColor: Colors.pink,
         child: const Icon(Icons.add, color: Colors.white),
       ),
-    );
-  }
-}
-// カレンダー下部のドット凡例
-class _LegendDot extends StatelessWidget {
-  final Color color;
-  final String label;
-  const _LegendDot({required this.color, required this.label});
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Container(width: 8, height: 8, decoration: BoxDecoration(color: color, shape: BoxShape.circle)),
-        const SizedBox(width: 4),
-        Text(label, style: const TextStyle(fontSize: 11, color: Colors.black54)),
-      ],
     );
   }
 }

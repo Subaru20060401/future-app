@@ -8,6 +8,7 @@ import '../widgets/swipe_to_delete.dart';
 import 'trash_screen.dart';
 import '../widgets/app_sheet.dart';
 import '../widgets/payment_row.dart';
+import '../money_format.dart';
 
 class PaymentScreen extends StatefulWidget {
   const PaymentScreen({super.key});
@@ -149,13 +150,13 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
                 mainAxisAlignment: MainAxisAlignment.center,
                 crossAxisAlignment: CrossAxisAlignment.end,
                 children: [
-                  Text('¥${l.amountIn(DateTime(now.year, now.month))}',
+                  Text('¥${yenNum(l.amountIn(DateTime(now.year, now.month)))}',
                       style: const TextStyle(
                           fontWeight: FontWeight.bold, color: Colors.indigo)),
-                  Text('残債 ¥${l.remainingAmountAt(now)}',
+                  Text('残債 ¥${yenNum(l.remainingAmountAt(now))}',
                       style: const TextStyle(fontSize: 11, color: Colors.grey)),
                   if (l.hasDownPayment)
-                    Text('頭金 ¥${l.downPayment}',
+                    Text('頭金 ¥${yenNum(l.downPayment)}',
                         style: const TextStyle(fontSize: 11, color: Colors.indigo)),
                 ],
               ),
@@ -361,20 +362,20 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
                   ),
                   const SizedBox(height: 10),
                   if (first > 0)
-                    Text('初回 ¥$first ＋ 2回目以降 ¥$monthly × ${count - 1}回',
+                    Text('初回 ¥${yenNum(first)} ＋ 2回目以降 ¥${yenNum(monthly)} × ${count - 1}回',
                         style: const TextStyle(fontWeight: FontWeight.bold))
                   else
-                    Text('毎月 ¥$monthly × $count回',
+                    Text('毎月 ¥${yenNum(monthly)} × $count回',
                         style: const TextStyle(fontWeight: FontWeight.bold)),
                   if (count > 0)
                     Text(
-                      '支払総額 ¥${preview.totalRepayment}',
+                      '支払総額 ¥${yenNum(preview.totalRepayment)}',
                       style: const TextStyle(fontSize: 12, color: Colors.grey),
                     ),
                   if ((int.tryParse(downCtrl.text) ?? 0) > 0)
                     Text(
-                      '総額 ¥${preview.totalPrice}'
-                      '（頭金 ¥${preview.downPayment} ＋ 借入 ¥$principal）',
+                      '総額 ¥${yenNum(preview.totalPrice)}'
+                      '（頭金 ¥${yenNum(preview.downPayment)} ＋ 借入 ¥${yenNum(principal)}）',
                       style: const TextStyle(fontSize: 12, color: Colors.grey),
                     ),
                   if (count > 0)
@@ -877,7 +878,7 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
                   const Text('どのカードで払いましたか？',
                       style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
                   const SizedBox(height: 4),
-                  Text('${DateFormat('M/d').format(p.paymentDate)}・¥${p.amount}',
+                  Text('${DateFormat('M/d').format(p.paymentDate)}・¥${yenNum(p.amount)}',
                       style: const TextStyle(fontSize: 12, color: Colors.grey)),
                   const SizedBox(height: 4),
                   const Text(
@@ -919,7 +920,7 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
-        title: Text('${p.cardName} ¥${p.amount}'),
+        title: Text('${p.cardName} ¥${yenNum(p.amount)}'),
         content: TextField(
           controller: ctrl,
           autofocus: true,
@@ -1046,8 +1047,8 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text('${p.cardName}  ¥${p.amount}'),
-                Text('分割可能: ¥${minInstallmentAmount(p.cardName)}以上',
+                Text('${p.cardName}  ¥${yenNum(p.amount)}'),
+                Text('分割可能: ¥${yenNum(minInstallmentAmount(p.cardName))}以上',
                     style: const TextStyle(fontSize: 12, color: Colors.grey)),
                 const SizedBox(height: 8),
                 TextField(
@@ -1063,7 +1064,7 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
                   Text(free ? '金利: 無料（${p.cardName}の2・3回）' : '金利(年率): ${rate.toStringAsFixed(1)}%',
                       style: TextStyle(fontSize: 12, color: free ? Colors.green : Colors.grey)),
                   const SizedBox(height: 4),
-                  Text('月額 ¥$monthly × $count回', style: const TextStyle(fontWeight: FontWeight.bold)),
+                  Text('月額 ¥${yenNum(monthly)} × $count回', style: const TextStyle(fontWeight: FontWeight.bold)),
                 ],
               ],
             ),
@@ -1104,10 +1105,10 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
                   color: done ? Colors.green : (style?.color ?? Colors.deepOrange)),
               title: Text(i.name),
               subtitle: Text(
-                  '総額¥${i.totalAmount} / ${i.installmentCount}回 / ${done ? '完済' : '残$remaining回'}'
-                  '${i.interestRate > 0 ? '\n金利${i.interestRate.toStringAsFixed(1)}% (手数料¥$fee)' : ''}'),
+                  '総額¥${yenNum(i.totalAmount)} / ${i.installmentCount}回 / ${done ? '完済' : '残$remaining回'}'
+                  '${i.interestRate > 0 ? '\n金利${i.interestRate.toStringAsFixed(1)}% (手数料¥${yenNum(fee)})' : ''}'),
               isThreeLine: i.interestRate > 0,
-              trailing: Text(done ? '完済' : '月¥${i.monthlyAmount}',
+              trailing: Text(done ? '完済' : '月¥${yenNum(i.monthlyAmount)}',
                   style: TextStyle(
                       fontWeight: FontWeight.bold, color: done ? Colors.green : null)),
               onTap: () => _editInstallment(appState, i),
@@ -1140,7 +1141,7 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text('${inst.name}  元金¥${inst.totalAmount}'),
+                Text('${inst.name}  元金¥${yenNum(inst.totalAmount)}'),
                 const SizedBox(height: 8),
                 // 💡 分割はカードの請求に含めて落ちるので、カードが決まっていないと
                 //   引き落とし日も金額も割り当てられない。
@@ -1172,7 +1173,7 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
                   Text(free ? '金利: 無料（2・3回）' : '金利(年率): ${rate.toStringAsFixed(1)}%',
                       style: TextStyle(fontSize: 12, color: free ? Colors.green : Colors.grey)),
                   const SizedBox(height: 4),
-                  Text('月額 ¥$monthly × $count回', style: const TextStyle(fontWeight: FontWeight.bold)),
+                  Text('月額 ¥${yenNum(monthly)} × $count回', style: const TextStyle(fontWeight: FontWeight.bold)),
                 ],
               ],
             ),
@@ -1269,7 +1270,7 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
                     leading: const Icon(Icons.subscriptions, color: Colors.purple),
                     title: Text(s.title),
                     subtitle: Text('毎月${s.payDay}日 ・ ${s.methodLabel}'),
-                    trailing: Text('¥${s.amount}', style: const TextStyle(fontWeight: FontWeight.bold)),
+                    trailing: Text('¥${yenNum(s.amount)}', style: const TextStyle(fontWeight: FontWeight.bold)),
                     onTap: () => _editSubscriptionMethod(appState, s),
                   ),
                 ),
@@ -1424,7 +1425,7 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
                 child: Card(
                   child: ListTile(
                     leading: const Icon(Icons.atm, color: Colors.brown),
-                    title: Text('¥${w.amount}'),
+                    title: Text('¥${yenNum(w.amount)}'),
                     subtitle: Text('${DateFormat('M/d').format(w.date)}${w.memo.isNotEmpty ? ' / ${w.memo}' : ''}'),
                   ),
                 ),

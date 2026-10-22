@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:provider/provider.dart';
 import '../app_state.dart';
+import '../money_format.dart';
 
 // 収入・支出の月次推移（折れ線）と前月比。
 class TrendScreen extends StatelessWidget {
@@ -19,10 +20,10 @@ class TrendScreen extends StatelessWidget {
     // 前月比（最新と1つ前）
     String diffLabel(int cur, int prev) {
       final d = cur - prev;
-      if (prev == 0) return d == 0 ? '±0' : '+¥$d';
+      if (prev == 0) return d == 0 ? '±0' : '+¥${yenNum(d)}';
       final pct = (d / prev * 100).round();
       final sign = d >= 0 ? '+' : '';
-      return '$sign¥$d（$sign$pct%）';
+      return '$sign¥${yenNum(d)}（$sign$pct%）';
     }
 
     final hasPrev = data.length >= 2;
@@ -109,9 +110,9 @@ class TrendScreen extends StatelessWidget {
                     mainAxisAlignment: MainAxisAlignment.center,
                     crossAxisAlignment: CrossAxisAlignment.end,
                     children: [
-                      Text('収入 ¥${e.income}',
+                      Text('収入 ¥${yenNum(e.income)}',
                           style: const TextStyle(color: Colors.green, fontSize: 13)),
-                      Text('支出 ¥${e.expense}',
+                      Text('支出 ¥${yenNum(e.expense)}',
                           style: const TextStyle(color: Colors.red, fontSize: 13)),
                     ],
                   ),
@@ -149,7 +150,7 @@ class TrendScreen extends StatelessWidget {
           children: [
             Text(title, style: const TextStyle(fontSize: 12, color: Colors.grey)),
             const SizedBox(height: 4),
-            Text('¥$value', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: color)),
+            Text('¥${yenNum(value)}', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: color)),
             const SizedBox(height: 2),
             Text(diff,
                 style: TextStyle(

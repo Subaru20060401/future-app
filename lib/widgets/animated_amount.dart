@@ -9,6 +9,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import '../money_format.dart';
 
 class AnimatedAmount extends StatefulWidget {
   const AnimatedAmount({
@@ -87,7 +88,7 @@ class _AnimatedAmountState extends State<AnimatedAmount>
     );
     return Semantics(
       // 読み上げは最終の金額を一度だけ
-      label: '${widget.prefix}${widget.value}',
+      label: '${widget.prefix}${yenNum(widget.value)}',
       excludeSemantics: true,
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -95,12 +96,12 @@ class _AnimatedAmountState extends State<AnimatedAmount>
         children: [
           AnimatedBuilder(
             animation: _c,
-            builder: (context, _) => Text('${widget.prefix}$_displayed', style: style),
+            builder: (context, _) => Text('${widget.prefix}${yenNum(_displayed)}', style: style),
           ),
           if (widget.showDelta && delta != 0)
             Text(
               // 💡 理由までは分からないので「今回の更新」とだけ言う（カード利用分などと断定しない）
-              '今回の更新 ${delta > 0 ? '+' : '−'}¥${delta.abs()}',
+              '今回の更新 ${delta > 0 ? '+' : '−'}¥${yenNum(delta.abs())}',
               style: TextStyle(
                 fontSize: 11,
                 fontWeight: FontWeight.bold,

@@ -11,6 +11,7 @@ import 'package:googleapis/calendar/v3.dart' as gcal;
 import 'package:googleapis/drive/v3.dart' as drive;
 import 'package:googleapis/gmail/v1.dart' as gmail;
 import 'package:shared_preferences/shared_preferences.dart';
+import 'money_format.dart';
 
 // 💡 メールの種別: 利用通知 / カード請求予定 / 銀行引落確定
 enum MailKind { usage, billing, bank }
@@ -807,7 +808,7 @@ class GmailService implements GmailSyncSource {
       ..writeln('抽出された支払い: ${parsed.length}件')
       ..writeln('────────────');
     for (final p in parsed.take(60)) {
-      sb.writeln('${p.date.toString().substring(0, 10)}  ¥${p.amount}  ${p.sourceId}');
+      sb.writeln('${p.date.toString().substring(0, 10)}  ¥${yenNum(p.amount)}  ${p.sourceId}');
     }
     return sb.toString();
   }

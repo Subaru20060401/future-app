@@ -3,6 +3,7 @@ import 'package:fl_chart/fl_chart.dart';
 import 'package:provider/provider.dart';
 import '../app_state.dart';
 import '../widgets/app_sheet.dart';
+import '../money_format.dart';
 
 typedef BreakdownItem = ({String label, int amount, int colorValue});
 typedef DetailRow = ({String title, String subtitle, int amount});
@@ -142,7 +143,7 @@ class _BreakdownScreenState extends State<BreakdownScreen> {
                       Text(widget.centerLabel,
                           style: const TextStyle(fontSize: 12, color: Colors.grey)),
                       const SizedBox(height: 2),
-                      Text('¥${widget.yearValueBuilder(appState, _month.year)}',
+                      Text('¥${yenNum(widget.yearValueBuilder(appState, _month.year))}',
                           style: TextStyle(
                               fontSize: 18,
                               fontWeight: FontWeight.bold,
@@ -191,7 +192,7 @@ class _BreakdownScreenState extends State<BreakdownScreen> {
                           );
                         }),
                       ),
-                      Text('¥${e.amount}',
+                      Text('¥${yenNum(e.amount)}',
                           style: const TextStyle(fontWeight: FontWeight.bold)),
                       const SizedBox(width: 8),
                       SizedBox(
@@ -233,7 +234,7 @@ class _BreakdownScreenState extends State<BreakdownScreen> {
                   Text('${e.label}（${_month.month}月）',
                       style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
                   const Spacer(),
-                  Text('¥${e.amount}',
+                  Text('¥${yenNum(e.amount)}',
                       style: TextStyle(
                           fontSize: 16, fontWeight: FontWeight.bold, color: widget.accent)),
                 ],
@@ -256,7 +257,7 @@ class _BreakdownScreenState extends State<BreakdownScreen> {
                             style: TextStyle(
                                 fontSize: 12, color: Colors.deepOrange[700])),
                       ),
-                      Text('¥$part',
+                      Text('¥${yenNum(part)}',
                           style: TextStyle(
                               fontSize: 12,
                               fontWeight: FontWeight.bold,
@@ -281,7 +282,7 @@ class _BreakdownScreenState extends State<BreakdownScreen> {
                           dense: true,
                           title: Text(r.title),
                           subtitle: r.subtitle.isNotEmpty ? Text(r.subtitle) : null,
-                          trailing: Text('¥${r.amount}',
+                          trailing: Text('¥${yenNum(r.amount)}',
                               style: const TextStyle(fontWeight: FontWeight.bold)),
                         );
                       },

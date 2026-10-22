@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../app_state.dart';
 import '../card_styles.dart';
+import '../money_format.dart';
 
 // カテゴリ別の月予算を設定し、今月の実績と比較する画面。
 class BudgetScreen extends StatelessWidget {
@@ -84,11 +85,11 @@ class BudgetScreen extends StatelessWidget {
                                   ),
                                 ),
                                 const SizedBox(height: 4),
-                                Text('¥$spent / ¥$budget${over ? '  ⚠ 超過' : ''}',
+                                Text('¥${yenNum(spent)} / ¥${yenNum(budget)}${over ? '  ⚠ 超過' : ''}',
                                     style: TextStyle(fontSize: 12, color: color)),
                               ],
                             )
-                          : Text('実績 ¥$spent ・予算未設定',
+                          : Text('実績 ¥${yenNum(spent)} ・予算未設定',
                               style: const TextStyle(fontSize: 12, color: Colors.grey)),
                       trailing: const Icon(Icons.edit, size: 18),
                     ),

@@ -28,6 +28,7 @@ import '../card_styles.dart';
 import '../google_calendar_sync.dart';
 import '../gemini_client.dart';
 import 'shift_image_import_screen.dart';
+import '../money_format.dart';
 
 class SettingsScreen extends StatelessWidget {
   const SettingsScreen({super.key});
@@ -1118,7 +1119,7 @@ class SettingsScreen extends StatelessWidget {
                 } else {
                   if (context.mounted) {
                     ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(content: Text('今月末の予想残高は ¥$balance です 👍')),
+                      SnackBar(content: Text('今月末の予想残高は ¥${yenNum(balance)} です 👍')),
                     );
                   }
                 }
@@ -1229,7 +1230,7 @@ class SettingsScreen extends StatelessWidget {
                     ..writeln('Amazonマスター: ${amzn.length}件')
                     ..writeln('────────────');
                   for (final p in amzn.take(60)) {
-                    sb.writeln('${p.paymentDate.toString().substring(0, 10)}  ¥${p.amount}  ${p.note}');
+                    sb.writeln('${p.paymentDate.toString().substring(0, 10)}  ¥${yenNum(p.amount)}  ${p.note}');
                   }
                   _showDebug(context, 'アプリ内Amazon', () async => sb.toString());
                 },

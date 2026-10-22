@@ -3,6 +3,7 @@ import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 import '../app_state.dart';
 import '../card_styles.dart';
+import '../money_format.dart';
 
 // 削除した支払いのゴミ箱。復元・完全削除ができる（PCのゴミ箱と同じ）。
 class TrashScreen extends StatelessWidget {
@@ -63,7 +64,7 @@ class TrashScreen extends StatelessWidget {
                           trailing: Row(
                             mainAxisSize: MainAxisSize.min,
                             children: [
-                              Text('¥${p.amount}', style: const TextStyle(color: Colors.grey)),
+                              Text('¥${yenNum(p.amount)}', style: const TextStyle(color: Colors.grey)),
                               IconButton(
                                 tooltip: '復元',
                                 icon: const Icon(Icons.restore, color: Colors.green),

@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:my_counter_app/app_state.dart';
+import 'package:my_counter_app/money_format.dart';
 import 'package:my_counter_app/screens/payment_screen.dart';
 
 void main() {
@@ -47,8 +48,8 @@ void main() {
     final l = Loan(
         id: '', name: '', principal: 100, totalCount: 3,
         startMonth: DateTime(2026, 1), interestRate: 3, firstPaymentAmount: 2);
-    expect(find.text('初回 ¥2 ＋ 2回目以降 ¥${l.monthlyAmount} × 2回'), findsOneWidget);
-    expect(find.text('支払総額 ¥${l.totalRepayment}'), findsOneWidget);
+    expect(find.text('初回 ¥2 ＋ 2回目以降 ¥${yenNum(l.monthlyAmount)} × 2回'), findsOneWidget);
+    expect(find.text('支払総額 ¥${yenNum(l.totalRepayment)}'), findsOneWidget);
 
     await t.tap(find.widgetWithText(ElevatedButton, '保存'));
     await t.pumpAndSettle();
@@ -66,12 +67,12 @@ void main() {
     final l = Loan(
         id: '', name: '', principal: 1000000, totalCount: 36,
         startMonth: DateTime(2026, 1), interestRate: 2.9);
-    expect(find.text('毎月 ¥${l.monthlyAmount} × 36回'), findsOneWidget);
-    expect(find.text('支払総額 ¥${l.totalRepayment}'), findsOneWidget);
+    expect(find.text('毎月 ¥${yenNum(l.monthlyAmount)} × 36回'), findsOneWidget);
+    expect(find.text('支払総額 ¥${yenNum(l.totalRepayment)}'), findsOneWidget);
 
     await fill(t, '2回目以降の返済額を指定（任意）', '30000');
-    expect(find.text('毎月 ¥30000 × 36回'), findsOneWidget);
-    expect(find.text('支払総額 ¥1080000'), findsOneWidget);
+    expect(find.text('毎月 ¥30,000 × 36回'), findsOneWidget);
+    expect(find.text('支払総額 ¥1,080,000'), findsOneWidget);
     await t.tap(find.widgetWithText(ElevatedButton, '保存'));
     await t.pumpAndSettle();
     expect(app.loans.single.totalRepayment, 1080000);

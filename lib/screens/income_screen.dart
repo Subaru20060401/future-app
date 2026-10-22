@@ -16,6 +16,7 @@ import 'balance_history_screen.dart';
 import 'breakdown_screen.dart';
 import 'trend_screen.dart';
 import '../widgets/app_sheet.dart';
+import '../money_format.dart';
 
 class IncomeScreen extends StatelessWidget {
   const IncomeScreen({super.key});
@@ -130,7 +131,7 @@ class IncomeScreen extends StatelessWidget {
               children: [
                 const Icon(Icons.savings, color: Colors.pink, size: 20),
                 const SizedBox(width: 6),
-                Text('${f.date.year}年${f.date.month}月までに ¥${f.goal}',
+                Text('${f.date.year}年${f.date.month}月までに ¥${yenNum(f.goal)}',
                     style: const TextStyle(fontWeight: FontWeight.bold)),
                 const Spacer(),
                 IconButton(
@@ -153,14 +154,14 @@ class IncomeScreen extends StatelessWidget {
             const SizedBox(height: 8),
             Text(
               ok
-                  ? '✅ このペース（月 ¥${f.pace}）なら達成見込み（予測 ¥${f.projected}）'
-                  : '⚠ このペース（月 ¥${f.pace}）では不足（予測 ¥${f.projected}）',
+                  ? '✅ このペース（月 ¥${yenNum(f.pace)}）なら達成見込み（予測 ¥${yenNum(f.projected)}）'
+                  : '⚠ このペース（月 ¥${yenNum(f.pace)}）では不足（予測 ¥${yenNum(f.projected)}）',
               style: TextStyle(fontSize: 13, color: color),
             ),
             if (f.monthsLeft > 0)
               Padding(
                 padding: const EdgeInsets.only(top: 2),
-                child: Text('残り${f.monthsLeft}か月・必要月額 ¥${f.requiredMonthly}',
+                child: Text('残り${f.monthsLeft}か月・必要月額 ¥${yenNum(f.requiredMonthly)}',
                     style: const TextStyle(fontSize: 12, color: Colors.grey)),
               ),
           ],
@@ -189,7 +190,7 @@ class IncomeScreen extends StatelessWidget {
               ],
             ),
             const SizedBox(height: 6),
-            Text('月 ¥$monthly ・ 年 ¥$yearly',
+            Text('月 ¥${yenNum(monthly)} ・ 年 ¥${yenNum(yearly)}',
                 style: const TextStyle(
                     fontSize: 16, fontWeight: FontWeight.bold, color: Colors.purple)),
             const SizedBox(height: 6),
@@ -198,7 +199,7 @@ class IncomeScreen extends StatelessWidget {
                   child: Row(
                     children: [
                       Expanded(child: Text(s.title, style: const TextStyle(fontSize: 13))),
-                      Text('¥${s.amount}/月（年¥${s.amount * 12}）',
+                      Text('¥${yenNum(s.amount)}/月（年¥${yenNum(s.amount * 12)}）',
                           style: const TextStyle(fontSize: 12, color: Colors.black54)),
                     ],
                   ),
@@ -246,10 +247,10 @@ class IncomeScreen extends StatelessWidget {
                 Column(
                   crossAxisAlignment: CrossAxisAlignment.end,
                   children: [
-                    Text('見込み ¥${appState.estimatedSalaryOfYear(year)}',
+                    Text('見込み ¥${yenNum(appState.estimatedSalaryOfYear(year))}',
                         style: TextStyle(fontWeight: FontWeight.bold, color: color, fontSize: 13)),
                     if (appState.hasActualSalaryInYear(year))
-                      Text('実 ¥${appState.actualSalaryOfYear(year)}',
+                      Text('実 ¥${yenNum(appState.actualSalaryOfYear(year))}',
                           style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.blue, fontSize: 13)),
                   ],
                 ),
@@ -269,7 +270,7 @@ class IncomeScreen extends StatelessWidget {
             Text(
               wall == null
                   ? 'すべての壁（〜150万）を超えています'
-                  : '次の壁: ${wall.label} まで あと ¥${st.remaining}'
+                  : '次の壁: ${wall.label} まで あと ¥${yenNum(st.remaining)}'
                       '${near ? ' ⚠ もうすぐ到達！' : ''}',
               style: TextStyle(fontSize: 13, color: color),
             ),
@@ -306,9 +307,9 @@ class IncomeScreen extends StatelessWidget {
           children: [
             headerRow('総労働時間', '${totalHours.toStringAsFixed(1)} h', Colors.black87),
             const Divider(height: 8),
-            headerRow('給料見込み（合計）', '¥$totalEstimated', Colors.green),
+            headerRow('給料見込み（合計）', '¥${yenNum(totalEstimated)}', Colors.green),
             const Divider(height: 8),
-            headerRow('実給料（合計）', anyActual ? '¥$totalActual' : '未入力',
+            headerRow('実給料（合計）', anyActual ? '¥${yenNum(totalActual)}' : '未入力',
                 anyActual ? Colors.blue : Colors.grey),
             const Divider(height: 12),
             const Padding(
@@ -338,13 +339,13 @@ class IncomeScreen extends StatelessWidget {
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               Text(w.name, style: const TextStyle(fontSize: 13)),
-                              Text('勤務 ${w.hours.toStringAsFixed(1)}h ・ 見込み ¥${w.estimated}',
+                              Text('勤務 ${w.hours.toStringAsFixed(1)}h ・ 見込み ¥${yenNum(w.estimated)}',
                                   style: const TextStyle(fontSize: 11, color: Colors.grey)),
                             ],
                           ),
                         ),
                         Text(
-                          w.actual != null ? '実 ¥${w.actual}' : '実給料 未入力',
+                          w.actual != null ? '実 ¥${yenNum(w.actual!)}' : '実給料 未入力',
                           style: TextStyle(
                               fontSize: 13,
                               fontWeight: FontWeight.bold,
@@ -385,7 +386,7 @@ class IncomeScreen extends StatelessWidget {
         child: Row(
           children: [
             Expanded(child: Text(label, style: const TextStyle(fontSize: 14))),
-            Text('$sign¥$value', style: TextStyle(fontWeight: FontWeight.bold, color: color, fontSize: 14)),
+            Text('$sign¥${yenNum(value)}', style: TextStyle(fontWeight: FontWeight.bold, color: color, fontSize: 14)),
           ],
         ),
       );
@@ -414,7 +415,7 @@ class IncomeScreen extends StatelessWidget {
                         style: TextStyle(fontSize: 11, color: Colors.deepOrange[700]),
                       ),
                     ),
-                    Text('¥${appState.installmentPartOfDraw(month)}',
+                    Text('¥${yenNum(appState.installmentPartOfDraw(month))}',
                         style: TextStyle(
                             fontSize: 12,
                             fontWeight: FontWeight.bold,
@@ -426,7 +427,7 @@ class IncomeScreen extends StatelessWidget {
             Row(
               children: [
                 const Expanded(child: Text('= 予想残高', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15))),
-                Text('¥$total',
+                Text('¥${yenNum(total)}',
                     style: TextStyle(
                         fontSize: 20,
                         fontWeight: FontWeight.bold,
@@ -594,7 +595,7 @@ class IncomeScreen extends StatelessWidget {
                           style: const TextStyle(fontSize: 13, color: Colors.red),
                         ),
                       ),
-                      Text('¥${e.balance}',
+                      Text('¥${yenNum(e.balance)}',
                           style: const TextStyle(
                               fontSize: 13, fontWeight: FontWeight.bold, color: Colors.red)),
                     ],
@@ -637,7 +638,7 @@ class IncomeScreen extends StatelessWidget {
                   style: const TextStyle(fontSize: 12, color: Colors.black45)),
             ),
             Expanded(child: Text(label, style: const TextStyle(fontSize: 14))),
-            Text('$sign¥$value',
+            Text('$sign¥${yenNum(value)}',
                 style: TextStyle(
                     fontWeight: bold ? FontWeight.bold : FontWeight.w600,
                     color: color,
@@ -678,7 +679,7 @@ class IncomeScreen extends StatelessWidget {
                       style: const TextStyle(
                           fontWeight: FontWeight.bold, fontSize: 15)),
                 ),
-                Text('¥${low.balance}',
+                Text('¥${yenNum(low.balance)}',
                     style: TextStyle(
                         fontSize: 20,
                         fontWeight: FontWeight.bold,
@@ -942,7 +943,7 @@ class IncomeScreen extends StatelessWidget {
                       ),
                       const SizedBox(height: 4),
                       ...appState.overBudgetThisMonth.map((e) => Text(
-                          '${e.label}: ¥${e.spent} / ¥${e.budget}（+¥${e.spent - e.budget}）',
+                          '${e.label}: ¥${yenNum(e.spent)} / ¥${yenNum(e.budget)}（+¥${yenNum(e.spent - e.budget)}）',
                           style: const TextStyle(fontSize: 13, color: Colors.red))),
                     ],
                   ),
@@ -1026,7 +1027,7 @@ class IncomeScreen extends StatelessWidget {
                     const Text('⚠ 残高不足の恐れ',
                         style: TextStyle(fontWeight: FontWeight.bold, color: Colors.red)),
                     const SizedBox(height: 4),
-                    Text('今月末残高がマイナスになる見込みです (¥$thisMonth)',
+                    Text('今月末残高がマイナスになる見込みです (¥${yenNum(thisMonth)})',
                         style: const TextStyle(color: Colors.red)),
                   ],
                 ),
@@ -1102,7 +1103,7 @@ class IncomeScreen extends StatelessWidget {
                       children: [
                         Container(width: 10, height: 10, decoration: BoxDecoration(color: s.color, shape: BoxShape.circle)),
                         const SizedBox(width: 4),
-                        Text('${s.label} ¥${s.value}', style: const TextStyle(fontSize: 11)),
+                        Text('${s.label} ¥${yenNum(s.value)}', style: const TextStyle(fontSize: 11)),
                       ],
                     );
                   }).toList(),
@@ -1117,7 +1118,7 @@ class IncomeScreen extends StatelessWidget {
               leading: const Icon(Icons.account_balance_wallet, color: Colors.blue),
               title: const Text('現在の残高'),
               subtitle: appState.debitsAfterSnapshot() > 0
-                  ? Text('編集後のデビット利用 -¥${appState.debitsAfterSnapshot()} を反映',
+                  ? Text('編集後のデビット利用 -¥${yenNum(appState.debitsAfterSnapshot())} を反映',
                       style: const TextStyle(fontSize: 11, color: Colors.orange))
                   : null,
               trailing: Row(
@@ -1129,7 +1130,7 @@ class IncomeScreen extends StatelessWidget {
                     children: [
                       Text('¥ ${appState.effectiveBalance}', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
                       if (appState.debitsAfterSnapshot() > 0)
-                        Text('編集時 ¥${appState.currentBalance}',
+                        Text('編集時 ¥${yenNum(appState.currentBalance)}',
                             style: const TextStyle(fontSize: 11, color: Colors.grey)),
                     ],
                   ),
@@ -1269,18 +1270,18 @@ class IncomeScreen extends StatelessWidget {
                 return Card(
                   child: ListTile(
                     title: Text('$year年'),
-                    subtitle: Text('カード支出 ¥$spending'),
+                    subtitle: Text('カード支出 ¥${yenNum(spending)}'),
                     trailing: Column(
                       mainAxisAlignment: MainAxisAlignment.center,
                       crossAxisAlignment: CrossAxisAlignment.end,
                       children: [
                         const Text('年収（見込み）', style: TextStyle(fontSize: 10, color: Colors.grey)),
-                        Text('¥$estimated',
+                        Text('¥${yenNum(estimated)}',
                             style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.green)),
                         if (hasActual) ...[
                           const SizedBox(height: 2),
                           const Text('年収（実）', style: TextStyle(fontSize: 10, color: Colors.grey)),
-                          Text('¥$actual',
+                          Text('¥${yenNum(actual)}',
                               style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: Colors.blue)),
                         ],
                       ],

@@ -231,7 +231,7 @@ class _TodoScreenState extends State<TodoScreen> {
                     hasTime: hasTime,
                   ));
                 } else {
-                  final oldKey = DateFormat('yyyy-MM-dd').format(existing.deadline);
+                  final oldKey = dateKey(existing.deadline);
                   existing
                     ..title = titleCtrl.text
                     ..description = descCtrl.text
@@ -302,7 +302,7 @@ class _TodoScreenState extends State<TodoScreen> {
                     itemCount: todos.length,
                     itemBuilder: (context, i) {
                       final t = todos[i];
-                      final key = DateFormat('yyyy-MM-dd').format(t.deadline);
+                      final key = dateKey(t.deadline);
                       final dateText = t.hasTime
                           ? DateFormat('M/d HH:mm').format(t.deadline)
                           : DateFormat('M/d').format(t.deadline);

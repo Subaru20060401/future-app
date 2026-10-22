@@ -2,7 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:provider/provider.dart';
 import '../app_state.dart';
+import '../widgets/legend_dot.dart';
 import '../card_styles.dart';
+import '../money_format.dart';
 
 // 💡 月々の収入(給与)と支出を棒グラフで振り返る。横スクロールで過去に遡れる。
 class HistoryScreen extends StatelessWidget {
@@ -64,11 +66,11 @@ class HistoryScreen extends StatelessWidget {
               spacing: 12,
               runSpacing: 4,
               children: [
-                const _LegendDot(color: Colors.green, label: '収入(給与)'),
-                ...cardsInRange.map((c) => _LegendDot(color: cardColorOf(c), label: c)),
-                const _LegendDot(color: Colors.purple, label: '定期'),
-                const _LegendDot(color: Colors.deepOrange, label: '分割'),
-                const _LegendDot(color: Colors.brown, label: 'ATM'),
+                const LegendDot(color: Colors.green, label: '収入(給与)'),
+                ...cardsInRange.map((c) => LegendDot(color: cardColorOf(c), label: c)),
+                const LegendDot(color: Colors.purple, label: '定期'),
+                const LegendDot(color: Colors.deepOrange, label: '分割'),
+                const LegendDot(color: Colors.brown, label: 'ATM'),
               ],
             ),
           ),
@@ -86,7 +88,7 @@ class HistoryScreen extends StatelessWidget {
                       touchTooltipData: BarTouchTooltipData(
                         getTooltipItem: (group, a, rod, b) {
                           return BarTooltipItem(
-                            '¥${rod.toY.toInt()}',
+                            '¥${yenNum(rod.toY.toInt())}',
                             const TextStyle(color: Colors.white, fontSize: 11),
                           );
                         },
@@ -144,9 +146,9 @@ class HistoryScreen extends StatelessWidget {
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
                         Text('$y年', style: const TextStyle(fontWeight: FontWeight.bold)),
-                        Text('年収 ¥${appState.salaryOfYear(y)}',
+                        Text('年収 ¥${yenNum(appState.salaryOfYear(y))}',
                             style: const TextStyle(color: Colors.green)),
-                        Text('支出 ¥${appState.cardSpendingOfYear(y)}',
+                        Text('支出 ¥${yenNum(appState.cardSpendingOfYear(y))}',
                             style: const TextStyle(color: Colors.red)),
                       ],
                     ),
@@ -160,20 +162,3 @@ class HistoryScreen extends StatelessWidget {
   }
 }
 
-class _LegendDot extends StatelessWidget {
-  final Color color;
-  final String label;
-  const _LegendDot({required this.color, required this.label});
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Container(width: 12, height: 12, decoration: BoxDecoration(color: color, shape: BoxShape.circle)),
-        const SizedBox(width: 4),
-        Text(label, style: const TextStyle(fontSize: 12)),
-      ],
-    );
-  }
-}

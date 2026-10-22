@@ -18,7 +18,7 @@ void main() {
 
   testWidgets('最初に表示したときは動かさず、差額も出さない', (t) async {
     await t.pumpWidget(host(50000));
-    expect(find.text('¥ 50000'), findsOneWidget);
+    expect(find.text('¥ 50,000'), findsOneWidget);
     expect(find.textContaining('今回の更新'), findsNothing);
   });
 
@@ -26,28 +26,28 @@ void main() {
     await t.pumpWidget(host(50000));
     await t.pumpWidget(host(47000));
     await t.pump(const Duration(milliseconds: 100)); // 途中
-    expect(find.text('¥ 50000'), findsNothing);
-    expect(find.text('¥ 47000'), findsNothing, reason: 'まだ動いている途中');
+    expect(find.text('¥ 50,000'), findsNothing);
+    expect(find.text('¥ 47,000'), findsNothing, reason: 'まだ動いている途中');
     await t.pump(const Duration(milliseconds: 300)); // 250ms を過ぎた
-    expect(find.text('¥ 47000'), findsOneWidget);
-    expect(find.text('今回の更新 −¥3000'), findsOneWidget);
+    expect(find.text('¥ 47,000'), findsOneWidget);
+    expect(find.text('今回の更新 −¥3,000'), findsOneWidget);
   });
 
   testWidgets('差額は数秒で消える', (t) async {
     await t.pumpWidget(host(50000));
     await t.pumpWidget(host(53000));
     await t.pump(const Duration(milliseconds: 300));
-    expect(find.text('今回の更新 +¥3000'), findsOneWidget);
+    expect(find.text('今回の更新 +¥3,000'), findsOneWidget);
     await t.pump(const Duration(seconds: 5));
     expect(find.textContaining('今回の更新'), findsNothing);
-    expect(find.text('¥ 53000'), findsOneWidget);
+    expect(find.text('¥ 53,000'), findsOneWidget);
   });
 
   testWidgets('同じ金額で作り直されても動かない', (t) async {
     await t.pumpWidget(host(50000));
     await t.pumpWidget(host(50000));
     await t.pump(const Duration(milliseconds: 100));
-    expect(find.text('¥ 50000'), findsOneWidget);
+    expect(find.text('¥ 50,000'), findsOneWidget);
     expect(find.textContaining('今回の更新'), findsNothing);
   });
 
@@ -57,15 +57,15 @@ void main() {
     await t.pump(const Duration(milliseconds: 300));
     await t.pumpWidget(host(45000));
     await t.pump(const Duration(milliseconds: 300));
-    expect(find.text('¥ 45000'), findsOneWidget);
-    expect(find.text('今回の更新 −¥5000'), findsOneWidget);
+    expect(find.text('¥ 45,000'), findsOneWidget);
+    expect(find.text('今回の更新 −¥5,000'), findsOneWidget);
   });
 
   testWidgets('動きを減らす設定なら、すぐ最終値にする', (t) async {
     await t.pumpWidget(host(50000, reduceMotion: true));
     await t.pumpWidget(host(47000, reduceMotion: true));
     await t.pump(); // 1フレームだけ
-    expect(find.text('¥ 47000'), findsOneWidget);
-    expect(find.text('今回の更新 −¥3000'), findsOneWidget);
+    expect(find.text('¥ 47,000'), findsOneWidget);
+    expect(find.text('今回の更新 −¥3,000'), findsOneWidget);
   });
 }

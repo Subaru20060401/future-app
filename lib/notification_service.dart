@@ -2,6 +2,7 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:timezone/data/latest_all.dart' as tz;
 import 'package:timezone/timezone.dart' as tz;
 import 'app_state.dart' hide Priority;
+import 'money_format.dart';
 
 // 💡 ローカル通知を一手に管理するサービス
 class NotificationService {
@@ -90,7 +91,7 @@ class NotificationService {
         await _schedule(
           id++,
           '💳 ${p.cardName}の支払い ($label)',
-          '¥${p.amount} の支払日が近づいています',
+          '¥${yenNum(p.amount)} の支払日が近づいています',
           when,
         );
       }
@@ -133,7 +134,7 @@ class NotificationService {
     await _plugin.show(
       99999,
       '⚠ 残高不足の恐れ',
-      '今月末の予想残高が ¥$balance です。支払いを確認してください。',
+      '今月末の予想残高が ¥${yenNum(balance)} です。支払いを確認してください。',
       _details,
     );
   }

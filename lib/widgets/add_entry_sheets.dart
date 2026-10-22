@@ -9,6 +9,7 @@ import '../app_state.dart';
 import '../screens/event_edit_screen.dart';
 import '../screens/shift_image_import_screen.dart';
 import 'app_sheet.dart';
+import '../money_format.dart';
 
 void showAddEntrySheet(BuildContext hostContext, AppState appState, DateTime selectedDay) {
   showAppSheet(hostContext, (context) {
@@ -102,7 +103,7 @@ void showAddShiftSheet(BuildContext hostContext, AppState appState, DateTime sel
                           ),
                         ),
                         title: Text('${hm(t.startHour, t.startMinute)} - ${hm(t.endHour, t.endMinute)}  ${t.workplace}'),
-                        subtitle: Text('時給¥${t.hourlyWage} / 休憩${t.breakMinutes}分'),
+                        subtitle: Text('時給¥${yenNum(t.hourlyWage)} / 休憩${t.breakMinutes}分'),
                         trailing: const Icon(Icons.add_circle_outline, color: Colors.green),
                         onTap: () {
                           Navigator.pop(context);

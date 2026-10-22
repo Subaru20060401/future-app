@@ -6,6 +6,7 @@ import 'package:intl/intl.dart';
 
 import '../app_state.dart';
 import 'app_sheet.dart';
+import '../money_format.dart';
 
 Future<void> showPlannedExpenseSheet(
     BuildContext context, AppState appState) async {
@@ -72,7 +73,7 @@ Future<void> showPlannedExpenseSheet(
                         trailing: Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            Text('¥${e.amount}',
+                            Text('¥${yenNum(e.amount)}',
                                 style: const TextStyle(
                                     fontWeight: FontWeight.bold,
                                     color: Colors.deepOrange)),

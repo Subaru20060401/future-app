@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../app_state.dart';
 import '../card_styles.dart';
+import '../money_format.dart';
 
 // 💡 各クレカの分割金利（年率%）を設定。分割変換時にこの値を使う。
 class CardSettingsScreen extends StatelessWidget {
@@ -54,7 +55,7 @@ class CardSettingsScreen extends StatelessWidget {
                 leading: Icon(style.icon, color: style.color),
                 title: Text(c),
                 subtitle: Text(
-                    '分割は¥${minInstallmentAmount(c)}以上'
+                    '分割は¥${yenNum(minInstallmentAmount(c))}以上'
                     '${(c.contains('Amazon')) ? ' / 2・3回は手数料無料' : ''}',
                     style: const TextStyle(fontSize: 12)),
                 trailing: Row(

@@ -4,6 +4,7 @@ import 'package:intl/intl.dart';
 import '../app_state.dart';
 import '../gmail_service.dart';
 import '../gmail_sync.dart';
+import '../money_format.dart';
 
 class GmailScreen extends StatefulWidget {
   const GmailScreen({super.key});
@@ -167,7 +168,7 @@ class _GmailScreenState extends State<GmailScreen> {
                                   child: Text(p.kind.label,
                                       style: TextStyle(fontSize: 12, color: fgColor)),
                                 ),
-                                Expanded(child: Text('${p.cardName}  ¥${p.amount}')),
+                                Expanded(child: Text('${p.cardName}  ¥${yenNum(p.amount)}')),
                               ],
                             ),
                             subtitle: Text('${DateFormat('M/d').format(p.date)}\n${p.snippet}',

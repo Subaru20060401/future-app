@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:intl/intl.dart';
 import '../app_state.dart';
+import '../money_format.dart';
 
 // 💡 口座残高に反映した「入金・引き落とし」の履歴。
 //   いつ・何を・いくら反映したかを確認でき、間違えたら取り消せる。
@@ -128,14 +129,14 @@ class _BalanceHistoryScreenState extends State<BalanceHistoryScreen> {
                           subtitle: Text(
                             e.balanceAfter == null
                                 ? '${DateFormat('M/d HH:mm').format(e.at)}  ・  使った時点で口座から引かれています'
-                                : '${DateFormat('M/d HH:mm').format(e.at)}  →  残高 ¥${e.balanceAfter}',
+                                : '${DateFormat('M/d HH:mm').format(e.at)}  →  残高 ¥${yenNum(e.balanceAfter!)}',
                             style: const TextStyle(fontSize: 12),
                           ),
                           trailing: Row(
                             mainAxisSize: MainAxisSize.min,
                             children: [
                               Text(
-                                '${isDeposit ? '+' : '-'}¥${e.amount}',
+                                '${isDeposit ? '+' : '-'}¥${yenNum(e.amount)}',
                                 style: TextStyle(
                                     color: color, fontWeight: FontWeight.bold),
                               ),
@@ -172,7 +173,7 @@ class _BalanceHistoryScreenState extends State<BalanceHistoryScreen> {
         children: [
           Text(label, style: const TextStyle(fontSize: 11, color: Colors.black54)),
           const SizedBox(height: 2),
-          Text('$sign¥$amount',
+          Text('$sign¥${yenNum(amount)}',
               style: TextStyle(
                   fontSize: 16, fontWeight: FontWeight.bold, color: color)),
         ],
@@ -288,9 +289,9 @@ class _BalanceHistoryScreenState extends State<BalanceHistoryScreen> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('${e.label}  ${isDeposit ? '+' : '-'}¥${e.amount}'),
+            Text('${e.label}  ${isDeposit ? '+' : '-'}¥${yenNum(e.amount)}'),
             const SizedBox(height: 8),
-            Text('残高が ¥$after に戻ります。',
+            Text('残高が ¥${yenNum(after)} に戻ります。',
                 style: const TextStyle(fontSize: 12, color: Colors.black54)),
             const SizedBox(height: 4),
             const Text('元の通知は未処理に戻るので、入力し直せます。',

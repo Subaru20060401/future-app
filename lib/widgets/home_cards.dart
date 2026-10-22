@@ -8,6 +8,7 @@ import 'add_entry_sheets.dart';
 import 'app_sheet.dart';
 import 'deposit_dialog.dart';
 import 'planned_income_sheet.dart';
+import '../money_format.dart';
 
 // 確認待ちを1件開く（種類ごとに既存の確認処理へ渡す）。
 // 💡 開いただけでは残高を動かさない。反映・スキップの操作で解消する。
@@ -71,7 +72,7 @@ Widget _noticeTile(BuildContext context, AppState appState, HomeNotice n) {
     trailing: amount == null
         ? const Icon(Icons.chevron_right)
         : Text(
-            '${n.kind == HomeNoticeKind.draw ? '-' : '+'}¥$amount',
+            '${n.kind == HomeNoticeKind.draw ? '-' : '+'}¥${yenNum(amount)}',
             style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: color),
           ),
     onTap: () => openHomeNotice(context, appState, n),
