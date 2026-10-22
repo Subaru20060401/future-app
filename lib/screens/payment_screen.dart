@@ -205,14 +205,22 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
           final rate = double.tryParse(rateCtrl.text) ?? 0;
           final override = int.tryParse(monthlyCtrl.text) ?? 0;
           final first = int.tryParse(firstCtrl.text) ?? 0;
-          // 初回だけ違う契約は、残りを回数-1で割る（総額が合うように）
-          final monthly = override > 0
-              ? override
-              : (count > 1 && first > 0
-                  ? (((principal + principal * (rate / 100) * (count / 12)) - first) /
-                          (count - 1))
-                      .round()
-                  : (count > 0 ? computeInstallmentMonthly(principal, count, rate) : 0));
+          // 💡 見せる額も、保存後に予想で使う計算（Loan）そのものから出す。
+          // ⚠️ 以前はこの画面が同じ計算を自前で持っていて、端数の丸め方が違った
+          //   （画面は最後に1回、Loan は手数料込みの総額を先に丸める）。
+          //   元金100円・年利3%・3回・初回2円で、画面は 49円×2、保存後は 50円×2 になっていた。
+          final preview = Loan(
+            id: '',
+            name: '',
+            principal: principal,
+            totalCount: count,
+            startMonth: start,
+            interestRate: rate,
+            monthlyOverride: override,
+            firstPaymentAmount: first,
+            downPayment: int.tryParse(downCtrl.text) ?? 0,
+          );
+          final monthly = count > 0 ? preview.monthlyAmount : 0;
           final valid = nameCtrl.text.trim().isNotEmpty && count > 0;
 
           return AlertDialog(
@@ -360,13 +368,13 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
                         style: const TextStyle(fontWeight: FontWeight.bold)),
                   if (count > 0)
                     Text(
-                      '支払総額 ¥${first > 0 ? first + monthly * (count - 1) : monthly * count}',
+                      '支払総額 ¥${preview.totalRepayment}',
                       style: const TextStyle(fontSize: 12, color: Colors.grey),
                     ),
                   if ((int.tryParse(downCtrl.text) ?? 0) > 0)
                     Text(
-                      '総額 ¥${principal + (int.tryParse(downCtrl.text) ?? 0)}'
-                      '（頭金 ¥${int.tryParse(downCtrl.text) ?? 0} ＋ 借入 ¥$principal）',
+                      '総額 ¥${preview.totalPrice}'
+                      '（頭金 ¥${preview.downPayment} ＋ 借入 ¥$principal）',
                       style: const TextStyle(fontSize: 12, color: Colors.grey),
                     ),
                   if (count > 0)
