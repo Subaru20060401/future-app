@@ -661,7 +661,8 @@ class SettingsScreen extends StatelessWidget {
       }
     } catch (e) {
       if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('読み込み失敗: $e')));
+        ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('読み込み失敗（今のデータはそのままです）: $e')));
       }
     }
   }
@@ -811,7 +812,7 @@ class SettingsScreen extends StatelessWidget {
                     .showSnackBar(const SnackBar(content: Text('インポートしました')));
               } catch (e) {
                 ScaffoldMessenger.of(context)
-                    .showSnackBar(SnackBar(content: Text('読み込み失敗: $e')));
+                    .showSnackBar(SnackBar(content: Text('読み込み失敗（今のデータはそのままです）: $e')));
               }
             },
             child: const Text('取り込む（全置換）'),

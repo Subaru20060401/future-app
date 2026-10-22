@@ -5047,8 +5047,17 @@ class AppState extends ChangeNotifier {
     // 取り込みは「この端末での変更」ではないので、更新時刻を刻まない。
     // （刻むと、取り込んだ直後に「こちらの方が新しい」と誤判定して押し戻してしまう）
     _importing = true;
+    // ⚠️ _importJson は項目ごとに「消してから読む」。途中の項目が壊れていると
+    //   （日付が読めない・型が違うなど）そこで例外になり、前半だけ置き換わった状態が残る。
+    //   そのまま保存やドライブ同期が走ると、半端なデータで上書きしてしまう。
+    //   取り込む前の状態を書き出しておき、失敗したらそれで丸ごと戻す。
+    //   （書き出し→取り込みの往復はドライブ同期と同じ経路なので、元どおりに戻る）
+    final before = exportJson();
     try {
       _importJson(text);
+    } catch (_) {
+      _importJson(before);
+      rethrow;
     } finally {
       _importing = false;
     }
