@@ -68,4 +68,36 @@ void main() {
     expect(app.shifts, isEmpty);
     expect(app.payments, isEmpty);
   });
+
+  test('失敗時は保存・通知・同期用の更新時刻を変更しない', () async {
+    final app = await filled();
+    await app.saveData();
+    final prefs = await SharedPreferences.getInstance();
+    final before = {for (final k in prefs.getKeys()) k: prefs.get(k)};
+    final updatedAt = app.dataUpdatedAt;
+    var notifications = 0;
+    app.addListener(() => notifications++);
+    expect(() => app.importJson('{壊れた'), throwsA(anything));
+    await Future<void>.delayed(const Duration(milliseconds: 30));
+    expect(app.dataUpdatedAt, updatedAt);
+    expect(notifications, 0);
+    expect({for (final k in prefs.getKeys()) k: prefs.get(k)}, before);
+  });
+
+  test('成功時は保存・通知するが、同期用の更新時刻は変更しない', () async {
+    final app = await filled();
+    await app.saveData();
+    final updatedAt = app.dataUpdatedAt;
+    final other = jsonDecode(app.exportJson()) as Map<String, dynamic>;
+    other['payments'] = [];
+    var notifications = 0;
+    app.addListener(() => notifications++);
+    app.importJson(jsonEncode(other));
+    await Future<void>.delayed(const Duration(milliseconds: 30));
+    final prefs = await SharedPreferences.getInstance();
+    expect(prefs.getString('saved_payments'), '[]');
+    expect(prefs.getString('saved_data_updated_at'), updatedAt!.toIso8601String());
+    expect(app.dataUpdatedAt, updatedAt);
+    expect(notifications, 1);
+  });
 }

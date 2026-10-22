@@ -80,7 +80,7 @@ class _GmailScreenState extends State<GmailScreen> {
       if (!mounted) return;
       setState(() {
         _results = r.items;
-        _hasAccess = !r.needsPermission && !r.notSignedIn;
+        _hasAccess = !r.needsPermission;
         if (!r.ok) _error = r.message;
       });
       if (r.ok) {

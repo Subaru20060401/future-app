@@ -255,6 +255,9 @@ abstract interface class GmailSyncSource {
   int get lastFetchFailures;
   // 直近の fetchCardPayments で、件数の上限に達して取り切れなかった検索の数
   int get lastFetchTruncated;
+  // 💡 今回確認したメールの受信日時。解析結果が0件でも更新対象にする。
+  //   Amazonだけは複数メールを突合するため、注文単位の sourceId をキーにする。
+  Map<String, DateTime> get lastMailReceivedAt;
   // 起動してからの取りこぼし（本文の失敗＋上限での打ち切り）の累計。
   //   入金通知など、カード以外の取得で取りこぼしたかを前後の差で調べる
   int get missTotal;
@@ -265,6 +268,9 @@ abstract interface class GmailSyncSource {
 class GmailService implements GmailSyncSource {
   GmailService._();
   static final GmailService instance = GmailService._();
+
+  @override
+  final Map<String, DateTime> lastMailReceivedAt = {};
 
   // Gmail読み取り専用 ＋ Driveのアプリ専用フォルダ（端末間の同期用）。
   // 💡 drive.appdata はユーザーのDriveの「見えない領域」で、このアプリが作った
@@ -922,6 +928,7 @@ class GmailService implements GmailSyncSource {
     final results = <ParsedPayment>[];
     _fetchFailures = 0; // 今回の取りこぼし件数を数え直す
     _fetchTruncated = 0;
+    lastMailReceivedAt.clear();
     await _loadCache();
 
     // ① 各カード・銀行：期間内の全メールIDをページングで取得（並列）
@@ -931,6 +938,8 @@ class GmailService implements GmailSyncSource {
     ]);
     final ruleIds = listed.sublist(0, _rules.length);
     final bankIds = listed.last;
+    // 💡 反映できないと分かった時点で止め、数千通の本文を無駄に取りに行かない。
+    if (_fetchTruncated > 0) return results;
 
     // ② 未キャッシュのメールだけ本文を取って解析（ここが唯一の重い処理）
     for (var ri = 0; ri < _rules.length; ri++) {
@@ -940,6 +949,7 @@ class GmailService implements GmailSyncSource {
             payments: _parseRuleMessage(rule, full),
           ));
       results.addAll(_cachedPayments(ruleIds[ri]));
+      _recordMailDates(ruleIds[ri], '');
     }
 
     // ③ 銀行の引落確定メール（複数カードの明細を含む。正本）
@@ -949,6 +959,7 @@ class GmailService implements GmailSyncSource {
               _extractBody(full), (full.snippet ?? '').trim(), full.id ?? ''),
         ));
     results.addAll(_cachedPayments(bankIds, 'b'));
+    _recordMailDates(bankIds, 'b');
 
     // ④ Amazon（注文メールの金額 ＋ 発送メールの日付 を注文番号で突合）
     results.addAll(await _fetchAmazon(api));
@@ -1071,6 +1082,15 @@ class GmailService implements GmailSyncSource {
   List<ParsedPayment> _cachedPayments(List<String> ids, [String prefix = '']) => [
         for (final id in ids) ...(_cache['$prefix$id']?.payments ?? const [])
       ];
+
+  void _recordMailDates(List<String> ids, String prefix) {
+    for (final id in ids) {
+      final entry = _cache['$prefix$id'];
+      if (entry != null) {
+        lastMailReceivedAt[id] = DateTime.fromMillisecondsSinceEpoch(entry.epochMs);
+      }
+    }
+  }
 
   // ───────── レート制限（403 Quota exceeded 対策） ─────────
   // 💡 Gmail APIは「1分あたり15,000ユニット/ユーザー」。messages.list も get も
@@ -1226,6 +1246,7 @@ class GmailService implements GmailSyncSource {
       _listIds(api, 'from:digital-no-reply@amazon.co.jp $_window'), // 電子書籍・デジタル
     ]);
 
+    if (_fetchTruncated > 0) return const [];
     // 💡 同じメールが複数の分類に該当しうるので、キャッシュキーは分類ごとに分ける。
     //   未キャッシュのぶんだけ本文を取って「突合の材料」に変換して覚える。
     for (var c = 0; c < idLists.length; c++) {
@@ -1240,6 +1261,20 @@ class GmailService implements GmailSyncSource {
           for (final id in idLists[c])
             if (_cache['a$c$id']?.amazon != null) _cache['a$c$id']!.amazon!
         ];
+
+    // 💡 発送・デジタル・キャンセルで確認できた注文を更新対象にする。
+    //   注文メールだけでは、検索期間より前に発送済みか判断できないので対象にしない。
+    for (final c in [0, 2, 3]) {
+      for (final id in idLists[c]) {
+        final entry = _cache['a$c$id'];
+        final order = entry?.amazon?.orderNo;
+        if (entry == null || order == null || order.isEmpty) continue;
+        final key = 'amazon#$order';
+        final date = DateTime.fromMillisecondsSinceEpoch(entry.epochMs);
+        final previous = lastMailReceivedAt[key];
+        if (previous == null || date.isAfter(previous)) lastMailReceivedAt[key] = date;
+      }
+    }
 
     // キャンセルされた注文番号
     final cancelled = {

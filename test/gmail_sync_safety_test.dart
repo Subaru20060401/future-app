@@ -42,6 +42,8 @@ class FakeGmail implements GmailSyncSource {
   @override
   int get lastFetchTruncated => truncated;
   @override
+  final Map<String, DateTime> lastMailReceivedAt = {};
+  @override
   int get missTotal => _miss;
   @override
   Future<List<({String sourceId, DateTime date})>> fetchDepositNotices({DateTime? since}) async {
@@ -70,6 +72,7 @@ Payment auto(String card, int amount, DateTime d, String id) => Payment(
       paymentDate: d,
       source: PaymentSource.usage,
       sourceId: id,
+      mailReceivedAt: d,
     );
 
 void main() {
@@ -128,7 +131,7 @@ void main() {
 
     test('過去2年分でも、2年より前の明細は消さない', () async {
       final older = DateTime(now.year - 3, now.month, 1); // メールを取ってこない古さ
-      final edge = DateTime(now.year - 2, now.month, 15); // 境目（2か月の余裕の内側）
+      final edge = DateTime(now.year - 2, now.month, now.day).subtract(const Duration(days: 1));
       final inside = DateTime(now.year - 1, now.month, 1); // 取り直す範囲
       final app = await appWith([
         auto('楽天カード', 1000, older, 'older'),
@@ -138,14 +141,85 @@ void main() {
       final g = FakeGmail(); // どれも見つからなかった
       final r = await syncGmail(app, source: g, full: true);
       expect(r.ok, isTrue);
-      expect(g.cardCalls.single, isNull, reason: 'メールは2年分を取る');
+      expect(g.cardCalls.single, DateTime(now.year - 2, now.month, now.day),
+          reason: '検索と削除で同じ境界を使う');
       expect(app.payments.map((p) => p.sourceId).toSet(), {'older', 'edge'},
           reason: '範囲の内側だけ作り直す');
     });
 
-    test('作り直しの始まりは、2年前の2か月内側', () {
-      expect(fullSyncReconcileSince(DateTime(2026, 10, 22)), DateTime(2024, 12, 22));
-      expect(fullSyncReconcileSince(DateTime(2026, 11, 30)), DateTime(2025, 1, 30));
+    test('全取得は2年前の境目付近も追加し、再取得で二重にしない', () async {
+      final app = await appWith([]);
+      final d = DateTime(now.year - 2, now.month + 1, 1);
+      final g = FakeGmail()..cards = [mail('楽天カード', 5000, d, 'edge')];
+      g.lastMailReceivedAt['edge'] = d;
+      await syncGmail(app, source: g, full: true);
+      await syncGmail(app, source: g, full: true);
+      expect(app.payments.single.sourceId, 'edge');
+      expect(app.payments.single.mailReceivedAt, d);
+    });
+
+    test('受信日が検索範囲外なら、将来の引落日でも消さない', () async {
+      final p = auto('楽天カード', 5000, thisMonth, 'older-mail')
+        ..mailReceivedAt = DateTime(now.year, now.month - 3, 1);
+      final app = await appWith([p]);
+      await syncGmail(app, source: FakeGmail());
+      expect(app.payments.single.sourceId, 'older-mail');
+    });
+
+    test('旧データは保護し、元メールを再取得したら受信日時を補完する', () async {
+      final p = auto('楽天カード', 5000, thisMonth, 'legacy')..mailReceivedAt = null;
+      final app = await appWith([p]);
+      await syncGmail(app, source: FakeGmail());
+      expect(app.payments.single.sourceId, 'legacy');
+      final g = FakeGmail()..cards = [mail('楽天カード', 5000, thisMonth, 'legacy')];
+      g.lastMailReceivedAt['legacy'] = thisMonth;
+      await syncGmail(app, source: g);
+      expect(app.payments.single.mailReceivedAt, thisMonth);
+      final restored = Payment.fromJson(app.payments.single.toJson());
+      expect(restored.mailReceivedAt, thisMonth);
+    });
+
+    test('元メールを解析し直して0件になった場合は、旧データも削除する', () async {
+      final p = auto('楽天カード', 5000, thisMonth, 'old#0')..mailReceivedAt = null;
+      final app = await appWith([p]);
+      final g = FakeGmail();
+      g.lastMailReceivedAt['old'] = thisMonth;
+      await syncGmail(app, source: g);
+      expect(app.payments, isEmpty);
+    });
+
+    test('受信日が範囲内なら、明細の日付が古くても再解析結果で置き換える', () async {
+      final p = auto('楽天カード', 5000, DateTime(now.year - 3), 'old-date')
+        ..mailReceivedAt = thisMonth;
+      final app = await appWith([p]);
+      await syncGmail(app, source: FakeGmail());
+      expect(app.payments, isEmpty);
+    });
+
+    test('範囲外の銀行確定は保持し、今回届いた請求予定より優先する', () async {
+      final p = auto('楽天カード', 5000, thisMonth, 'bank#0')
+        ..source = PaymentSource.bank
+        ..mailReceivedAt = DateTime(now.year, now.month - 3);
+      final app = await appWith([p]);
+      final g = FakeGmail()..cards = [ParsedPayment(
+        cardName: '楽天カード', amount: 6000, date: thisMonth,
+        snippet: '', kind: MailKind.billing, sourceId: 'bill')];
+      await syncGmail(app, source: g);
+      expect(app.payments.single.source, PaymentSource.bank);
+      expect(app.payments.single.amount, 5000);
+    });
+
+    test('範囲外の請求予定も、新しく銀行確定が来れば除く', () async {
+      final p = auto('楽天カード', 5000, thisMonth, 'bill')
+        ..source = PaymentSource.billing
+        ..mailReceivedAt = DateTime(now.year, now.month - 3);
+      final app = await appWith([p]);
+      final g = FakeGmail()..cards = [ParsedPayment(
+        cardName: '楽天カード', amount: 6000, date: thisMonth,
+        snippet: '', kind: MailKind.bank, sourceId: 'bank#0')];
+      await syncGmail(app, source: g);
+      expect(app.payments.single.source, PaymentSource.bank);
+      expect(app.payments.single.amount, 6000);
     });
   });
 
@@ -178,6 +252,54 @@ void main() {
     });
   });
 
+  group('保持した明細との照合', () {
+    test('検索期間外のAmazonにも新しく届いたカード通知を照合する', () async {
+      final p = auto('楽天カード', 5000, thisMonth, 'amazon#old')
+        ..mailReceivedAt = DateTime(now.year, now.month - 3);
+      final app = await appWith([p]);
+      app.amazonCardOverrides[p.sourceId] = '楽天カード';
+      final g = FakeGmail()..cards = [mail('楽天カード', 5000, thisMonth, 'real')];
+      await syncGmail(app, source: g);
+      expect(app.payments.firstWhere(app.isAmazonPayment).infoOnly, isTrue);
+      expect(app.paymentTotalsByCardOf(thisMonth)['楽天カード'], 5000);
+      expect(app.paymentTotalsByCardOf(thisMonth)['Amazonマスター'], isNull);
+    });
+
+    test('古いAmazonのキャンセル通知を確認したら該当注文だけ除く', () async {
+      final app = await appWith([
+        auto('Amazonマスター', 5000, thisMonth, 'amazon#cancel')..mailReceivedAt = null,
+        auto('Amazonマスター', 3000, thisMonth, 'amazon#keep')..mailReceivedAt = null,
+      ]);
+      final g = FakeGmail();
+      g.lastMailReceivedAt['amazon#cancel'] = thisMonth;
+      await syncGmail(app, source: g);
+      expect(app.payments.single.sourceId, 'amazon#keep');
+    });
+
+    test('境界より古い明細の再取得でも削除済みを復活させない', () async {
+      final d = DateTime(now.year - 2, now.month + 1, 1);
+      final app = await appWith([auto('楽天カード', 5000, d, 'deleted')]);
+      app.removePayment(app.payments.single.id);
+      final g = FakeGmail()..cards = [mail('楽天カード', 5000, d, 'deleted')];
+      await syncGmail(app, source: g, full: true);
+      expect(app.payments, isEmpty);
+    });
+
+    test('旧データを補完しても支払済みと手書きメモを引き継ぐ', () async {
+      final p = auto('楽天カード', 5000, thisMonth, 'old#0')
+        ..mailReceivedAt = null
+        ..paid = true;
+      final app = await appWith([p]);
+      app.paymentNotes[p.sourceId] = '手書きのメモ';
+      final g = FakeGmail()..cards = [mail('楽天カード', 5000, thisMonth, 'old#0')];
+      g.lastMailReceivedAt['old'] = thisMonth;
+      await syncGmail(app, source: g);
+      expect(app.payments.single.mailReceivedAt, thisMonth);
+      expect(app.payments.single.paid, isTrue);
+      expect(app.payments.single.note, '手書きのメモ');
+    });
+  });
+
   test('通常の更新中に2年分を頼んだら、通常の結果ではなく2年分を走らせる', () async {
     final app = await appWith([]);
     final g = FakeGmail()..gate = Completer<void>();
@@ -187,6 +309,7 @@ void main() {
     await Future<void>.delayed(Duration.zero);
     g.gate!.complete();
     await Future.wait([normal, normal2, full]);
-    expect(g.cardCalls, [DateTime(now.year, now.month - 1, 1), null]);
+    expect(g.cardCalls, [DateTime(now.year, now.month - 1, 1),
+      DateTime(now.year - 2, now.month, now.day)]);
   });
 }

@@ -603,6 +603,7 @@ class SettingsScreen extends StatelessWidget {
       final dir = await getTemporaryDirectory();
       final file = File('${dir.path}/${baseName}_$ts.$ext');
       await file.writeAsString(content);
+      if (!context.mounted) return;
       // iOS/iPad の共有シートは元の位置(sharePositionOrigin)が必須。画面の矩形を渡す。
       final box = context.findRenderObject() as RenderBox?;
       final origin = (box != null && box.hasSize)

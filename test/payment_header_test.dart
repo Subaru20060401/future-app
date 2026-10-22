@@ -116,7 +116,6 @@ void main() {
       addTearDown(() => lastGmailSync.value = null);
       for (final r in [
         GmailSyncResult(needsPermission: true),
-        GmailSyncResult(notSignedIn: true),
       ]) {
         lastGmailSync.value = (at: DateTime(2026, 10, 14, 22, 0), result: r);
         await t.pumpWidget(ChangeNotifierProvider.value(

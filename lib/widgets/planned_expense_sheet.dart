@@ -165,13 +165,11 @@ Future<void> _edit(
                     date: date,
                     monthly: monthly);
               } else {
-                edit
-                  ..title = titleCtrl.text.trim()
-                  ..amount = amount
-                  ..date = date
-                  ..monthly = monthly;
-                appState.saveData();
-                appState.notifyListeners();
+                appState.updatePlannedExpense(edit.id,
+                    title: titleCtrl.text,
+                    amount: amount,
+                    date: date,
+                    monthly: monthly);
               }
               Navigator.pop(context);
             },

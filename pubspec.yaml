@@ -33,6 +33,9 @@ dependencies:
   flutter_localizations:
     sdk: flutter
 
+  # ⚠️ コードから直接は使っていないが、Flutter本体やパッケージの部品が CupertinoIcons を使う。
+  #   外すとビルドで「CupertinoIcons のフォントが無い」と警告が出て、そのアイコンが□になる。
+  cupertino_icons: ^1.0.8
   table_calendar: ^3.2.0
   intl: ^0.20.2
   fl_chart: ^1.2.0

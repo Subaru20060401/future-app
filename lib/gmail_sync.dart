@@ -9,7 +9,6 @@ class GmailSyncResult {
   final int removed;
   final int fetched;
   final String? error;
-  final bool notSignedIn;
   final int missed; // 取得できなかったメール数（>0なら反映を中止している）
   // 💡 Web用。サインイン済みだがGmail読み取りの許可が無い（403の原因）。
   final bool needsPermission;
@@ -26,7 +25,6 @@ class GmailSyncResult {
     this.removed = 0,
     this.fetched = 0,
     this.error,
-    this.notSignedIn = false,
     this.missed = 0,
     this.needsPermission = false,
     this.restoringAuth = false,
@@ -43,14 +41,13 @@ class GmailSyncResult {
 
   // 問題なく最後まで確認できたか
   bool get ok =>
-      error == null && !notSignedIn && !needsPermission && !restoringAuth && !skipped;
+      error == null && !needsPermission && !restoringAuth && !skipped;
 
   // 💡 画面に常に出しておく短い一言（詳細は detailLines で開いて見る）
   String get shortMessage {
     if (ok && partial) return 'カードの明細は確認しました（一部のメールは未確認）';
     if (ok) return 'メールを確認しました';
     if (restoringAuth) return 'Google連携を復帰しています…';
-    if (notSignedIn) return 'Googleに連携されていません';
     if (needsPermission) return 'Googleとの連携を更新してください';
     if (skipped) return '一部のメールが取れず、反映を見送りました';
     return 'メールを確認できませんでした';
@@ -71,7 +68,6 @@ class GmailSyncResult {
 
   String get message {
     if (restoringAuth) return 'Google連携を復帰しています…';
-    if (notSignedIn) return 'Googleに連携されていません（設定→Google連携）';
     if (needsPermission) {
       return 'Googleの有効期限が切れています。設定→Google連携で「連携し直す」を押してください';
     }
@@ -95,8 +91,6 @@ final ValueNotifier<({DateTime at, GmailSyncResult result})?> lastGmailSync =
 // 💡 最後に成功した時刻。失敗が出ていても「いつまでのデータか」が分かるようにする。
 DateTime? lastGmailSuccessAt;
 
-MailKind _kindOf(ParsedPayment p) => p.kind;
-
 PaymentSource toPaymentSource(MailKind kind) {
   switch (kind) {
     case MailKind.bank:
@@ -109,7 +103,7 @@ PaymentSource toPaymentSource(MailKind kind) {
 }
 
 // 💡 どの画面からでも呼べる共通のGmail取得＆照合処理。
-//   未連携なら silent サインインを試み、それでもダメなら notSignedIn を返す。
+//   認証を復帰できなければ、本人の操作が必要であることを返す。
 //   通常は「先月＋今月」だけ取得する（数秒で終わる）。
 //   過去分がほしいときだけ 設定→「過去2年分をすべて取り込み直す」= full:true。
 //   ⚠️ 初回だけ自動で2年分…にすると数千通ぶんのリクエストで
@@ -147,14 +141,6 @@ Future<GmailSyncResult> syncGmail(
   return f;
 }
 
-// 💡 「過去2年分」のときに明細を作り直す範囲の始まり。
-//   メールは過去2年分しか取らないので、それより前の明細まで作り直すと、
-//   取ってこなかった＝無いものとして消してしまう。
-//   ⚠️ 明細の日付はメールの日付より前のことがある（利用日・締め後に届く明細など）。
-//     境目の明細を消さないよう、2か月ぶん内側から作り直す。
-DateTime fullSyncReconcileSince(DateTime now) =>
-    DateTime(now.year - 2, now.month + 2, now.day);
-
 Future<GmailSyncResult> _syncGmail(
   AppState appState,
   GmailSyncSource gmail, {
@@ -174,11 +160,12 @@ Future<GmailSyncResult> _syncGmail(
   final now = DateTime.now();
   // 通常更新は先月1日から（＝直近1〜2ヶ月）。full のときだけ全期間。
   final since = full ? null : DateTime(now.year, now.month - 1, 1);
-  final reconcileSince = since ?? fullSyncReconcileSince(now);
+  // 💡 削除の境界は明細の日付ではなく、取得対象メールの受信日時で比較する。
+  final reconcileSince = since ?? DateTime(now.year - 2, now.month, now.day);
   try {
     // 💡 Googleがトークンを拒否（401）したら、捨てて取り直して1回だけやり直す
     final list = await gmail.withFreshToken(
-      () => gmail.fetchCardPayments(since: since),
+      () => gmail.fetchCardPayments(since: reconcileSince),
     );
     // 💡 取りこぼしがあるまま反映すると、その明細が消えて残高がブレる。
     //   （reconcile は取得結果を正本として自動明細を作り直すため）
@@ -198,12 +185,13 @@ Future<GmailSyncResult> _syncGmail(
           cardName: p.cardName,
           amount: p.amount,
           date: p.date,
-          source: toPaymentSource(_kindOf(p)),
+          source: toPaymentSource(p.kind),
           sourceId: p.sourceId,
           note: p.note,
         ),
       ),
       since: reconcileSince,
+      mailReceivedAt: gmail.lastMailReceivedAt,
     );
     // ⚠️ ここから下は足すだけ（消さない）ので、失敗してもカードの結果は返す。
     //   ただし黙って「確認しました」にはしない（残高の予想に要るメールが抜けているため）。

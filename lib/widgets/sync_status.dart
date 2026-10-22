@@ -78,7 +78,6 @@ class _SyncStatusBarState extends State<SyncStatusBar> {
         if (s == null) return const SizedBox.shrink();
         // ⚠️ 一度も連携していない人に「期限切れ」「再試行」と出さない
         //   （メール取り込みを使っていないだけ。連携は設定から）。
-        if (s.result.notSignedIn) return const SizedBox.shrink();
         if (s.result.needsPermission && !GmailService.instance.signedInOnce) {
           return const SizedBox.shrink();
         }

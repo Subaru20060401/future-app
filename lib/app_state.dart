@@ -575,6 +575,7 @@ class Payment {
   bool paid;
   PaymentSource source;
   String sourceId; // メール由来の一意キー（自動取り込みの識別用）
+  DateTime? mailReceivedAt; // 💡 検索範囲の判定用。旧データは再取得できたときに補完する
   String note; // 利用先（店舗名）など
   // 💡 「記録として残すが、金額は合計に足さない」明細。
   //   同じ買い物がカード会社の通知からも入ってきたときだけ立てる。
@@ -588,6 +589,7 @@ class Payment {
     this.paid = false,
     this.source = PaymentSource.manual,
     this.sourceId = '',
+    this.mailReceivedAt,
     this.note = '',
     this.infoOnly = false,
   });
@@ -600,6 +602,7 @@ class Payment {
         'paid': paid,
         'source': source.index,
         'sourceId': sourceId,
+        if (mailReceivedAt != null) 'mailReceivedAt': mailReceivedAt!.toIso8601String(),
         'note': note,
         'infoOnly': infoOnly,
       };
@@ -612,6 +615,7 @@ class Payment {
         paid: json['paid'] ?? false,
         source: PaymentSource.values[json['source'] ?? 0],
         sourceId: json['sourceId'] ?? '',
+        mailReceivedAt: DateTime.tryParse(json['mailReceivedAt'] as String? ?? ''),
         note: json['note'] ?? '',
         infoOnly: json['infoOnly'] ?? false,
       );
@@ -2156,17 +2160,19 @@ class AppState extends ChangeNotifier {
   }
 
 
-  // 💡 Gmail取り込みの完全同期。
-  //   取得結果(items)を「正本」とし、自動取り込み分(非manual)を丸ごと作り直す。
+  // 💡 Gmailの取得結果を正本として、確認できた範囲の自動明細を作り直す。
   //   ・重複は「カード＋金額＋利用日時」で1件に統合
   //   ・銀行確定(bank)が同カード・同月の請求予定(billing)を上書き
-  //   ・同月・同額で他カードとAmazonマスターが重複したらAmazon側を削除
+  //   ・同日・同額で付け替え先のカード通知と重複したAmazon明細は記録のみ残す
   //   ・支払済み(paid)は引き継ぎ、手動追加(manual)・変換済みは保持
   //   戻り値は (追加, 削除)。
   ({int added, int removed}) reconcilePayments(
       Iterable<({String cardName, int amount, DateTime date, PaymentSource source, String sourceId, String note})> rawItems,
-      {DateTime? since}) {
+      {DateTime? since, Map<String, DateTime>? mailReceivedAt}) {
     bool inWindow(DateTime d) => since == null || !d.isBefore(since);
+    String mailId(String sourceId) => sourceId.startsWith(kAmazonSourcePrefix)
+        ? sourceId
+        : sourceId.split('#').first;
 
     // 💡 銀行表記などの別名を、自分が付けたカード名に寄せてから照合する
     final items = rawItems.map((it) => (
@@ -2176,19 +2182,43 @@ class AppState extends ChangeNotifier {
           source: it.source,
           sourceId: it.sourceId,
           note: it.note,
-        ));
+        )).toList();
+
+    // ⚠️ 請求予定の引落日は受信日より後になる。明細の日付で削除すると、
+    //   検索範囲外のメールから作った明細まで消える。受信日時と確認済みIDで範囲を決める。
+    //   受信日時の無い旧データは、元メールを再取得できるまで保持する。
+    final checkedIds = {
+      ...?mailReceivedAt?.keys,
+      for (final it in items)
+        if (it.sourceId.isNotEmpty) mailId(it.sourceId),
+    };
+    bool replace(Payment p) {
+      if (p.source == PaymentSource.manual) return false;
+      if (checkedIds.contains(mailId(p.sourceId))) return true;
+      if (mailReceivedAt == null) return inWindow(p.paymentDate);
+      return p.mailReceivedAt != null && inWindow(p.mailReceivedAt!);
+    }
+    final retained = payments.where((p) =>
+        p.source != PaymentSource.manual && !replace(p)).toList();
 
     // 銀行確定があるカード月（請求予定を抑制）
-    final bankKeys = <String>{};
+    final bankKeys = <String>{
+      for (final p in retained.where((p) => p.source == PaymentSource.bank))
+        '${resolveCardName(p.cardName)}|${_ym(p.paymentDate)}',
+    };
     for (final it in items.where((e) => e.source == PaymentSource.bank)) {
       bankKeys.add('${it.cardName}|${_ym(it.date)}');
     }
 
     // 望ましい自動集合を構築（重複・変換済み・銀行に上書きされた予測を除外）
     final desired = <({String cardName, int amount, DateTime date, PaymentSource source, String sourceId, String note})>[];
-    final seen = <String>{};
+    final seen = <String>{
+      // ⚠️ Amazonは後でカード通知と照合する。ここで通知を落とすと正本が入らない。
+      for (final p in retained.where((p) => !isAmazonPayment(p)))
+        _dupKey(resolveCardName(p.cardName), p.amount, p.paymentDate, p.source),
+    };
     for (final it in items) {
-      if (!inWindow(it.date)) continue;
+      // 💡 取得できた明細は日付にかかわらず追加する。since は既存明細を消す範囲だけ。
       final key = _dupKey(it.cardName, it.amount, it.date, it.source);
       // 💡 分割へ移動済みは復活させない。dupKey（日時・金額が変われば外れる）に加え、
       //   sourceId と「既存の分割払いと一致するか」でも照合して取りこぼしを防ぐ。
@@ -2217,41 +2247,29 @@ class AppState extends ChangeNotifier {
         p.source == PaymentSource.manual &&
         officialDayKeys.contains(dayKey(p.cardName, p.amount, p.paymentDate)));
 
-    // 既存の自動データ（取得期間内のみ）: paid を引き継ぐ
+    // 既存の自動データ: paid を引き継ぐ
     final paidByKey = <String, bool>{};
+    final infoOnlyBySource = <String, bool>{};
+    final receivedBySource = <String, DateTime?>{};
     final beforeKeys = <String>{};
     for (final p in payments
-        .where((p) => p.source != PaymentSource.manual && inWindow(p.paymentDate))) {
+        .where((p) => p.source != PaymentSource.manual)) {
       final k = _dupKey(p.cardName, p.amount, p.paymentDate, p.source);
       paidByKey[k] = p.paid;
+      if (p.sourceId.isNotEmpty) {
+        infoOnlyBySource[p.sourceId] = p.infoOnly;
+        receivedBySource[p.sourceId] = p.mailReceivedAt;
+      }
       beforeKeys.add(k);
     }
 
-    // 自動データを総入れ替え（取得期間内のみ。期間外の過去データは保持）
-    payments.removeWhere((p) => p.source != PaymentSource.manual && inWindow(p.paymentDate));
-    final desiredKeys = <String>{};
+    // 💡 確認できる範囲だけ入れ替え、保持した請求予定も銀行確定があれば除く。
+    payments.removeWhere((p) => replace(p) ||
+        (p.source == PaymentSource.billing &&
+         bankKeys.contains('${resolveCardName(p.cardName)}|${_ym(p.paymentDate)}')));
     for (final it in desired) {
       final k = _dupKey(it.cardName, it.amount, it.date, it.source);
-      desiredKeys.add(k);
-      // 💡 Amazonは既定どおり Amazonマスター として計上する。
-      //   手で付け替えてあればそのカードへ。
-      //   ただし同じカード・同じ日・同じ金額の本物の明細が既にあるときだけは、
-      //   同じ買い物を二度数えることになるので「記録のみ」に落とす。
-      var card = it.cardName;
-      var infoOnly = false;
-      if (it.sourceId.startsWith(kAmazonSourcePrefix)) {
-        card = amazonCardOverrides[it.sourceId] ?? it.cardName;
-        final duplicated = desired.any((o) =>
-            !o.sourceId.startsWith(kAmazonSourcePrefix) &&
-            o.cardName == card &&
-            o.amount == it.amount &&
-            _formatDate(o.date) == _formatDate(it.date));
-        if (duplicated) {
-          infoOnly = true;
-          amazonCardOverrides.remove(it.sourceId);
-          card = it.cardName; // Amazonマスターの記録として残す
-        }
-      }
+      final card = amazonCardOverrides[it.sourceId] ?? it.cardName;
       payments.add(Payment(
         id: _id(),
         cardName: card,
@@ -2260,15 +2278,27 @@ class AppState extends ChangeNotifier {
         source: it.source,
         paid: paidByKey[k] ?? false,
         sourceId: it.sourceId,
+        mailReceivedAt: mailReceivedAt?[mailId(it.sourceId)] ?? receivedBySource[it.sourceId],
         // 手で書いたメモがあれば、メール由来の利用先より優先して残す
         note: paymentNotes[it.sourceId] ?? it.note,
-        infoOnly: infoOnly,
+        infoOnly: infoOnlyBySource[it.sourceId] ?? false,
       ));
     }
 
-    // 💡 Amazon発送(kind=usage・情報のみ)は他カードのAmazon利用と重複しても削除しない。
-    //   残高は各カードの請求/引落で計上するため二重計上は起きず、全件をそのまま表示する。
+    // 💡 期間外として保持したAmazon明細も、今回届いたカード通知と突き合わせる。
+    //   付け替え時と同じ判定を使い、重複分は記録だけ残す。
+    for (final p in payments.where(isAmazonPayment)) {
+      if (_hasRealChargeLike(p.cardName, p.paymentDate, p.amount, exceptId: p.id)) {
+        amazonCardOverrides.remove(p.sourceId);
+        p.cardName = 'Amazonマスター';
+        p.infoOnly = true;
+      }
+    }
     cleanupInstallmentDuplicates(); // 分割へ移した決済が残っていれば取り除く
+    final desiredKeys = {
+      for (final p in payments.where((p) => p.source != PaymentSource.manual))
+        _dupKey(p.cardName, p.amount, p.paymentDate, p.source),
+    };
     final added = desiredKeys.difference(beforeKeys).length;
     final removed = beforeKeys.difference(desiredKeys).length;
     saveData();
@@ -4002,6 +4032,22 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
+  void updatePlannedExpense(String id, {
+    required String title,
+    required int amount,
+    required DateTime date,
+    required bool monthly,
+  }) {
+    final expense = plannedExpenses.firstWhere((e) => e.id == id);
+    expense
+      ..title = title.trim()
+      ..amount = amount
+      ..date = date
+      ..monthly = monthly;
+    saveData();
+    notifyListeners();
+  }
+
   // 支払い済みにする（残高からは既に引かれているので、予想では二重に引かない）
   void markPlannedExpensePaid(String id, DateTime date) {
     paidPlannedExpenseKeys.add(_plannedExpenseKey(id, date));
@@ -5020,23 +5066,21 @@ class AppState extends ChangeNotifier {
 
   // エクスポートしたJSONを取り込んで全データを置き換える。
   void importJson(String text) {
-    // 取り込みは「この端末での変更」ではないので、更新時刻を刻まない。
-    // （刻むと、取り込んだ直後に「こちらの方が新しい」と誤判定して押し戻してしまう）
-    _importing = true;
     // ⚠️ _importJson は項目ごとに「消してから読む」。途中の項目が壊れていると
     //   （日付が読めない・型が違うなど）そこで例外になり、前半だけ置き換わった状態が残る。
     //   そのまま保存やドライブ同期が走ると、半端なデータで上書きしてしまう。
     //   取り込む前の状態を書き出しておき、失敗したらそれで丸ごと戻す。
-    //   （書き出し→取り込みの往復はドライブ同期と同じ経路なので、元どおりに戻る）
+    //   復元はメモリ内だけで行い、失敗時は保存・通知・更新時刻の変更をしない。
     final before = exportJson();
     try {
       _importJson(text);
     } catch (_) {
       _importJson(before);
       rethrow;
-    } finally {
-      _importing = false;
     }
+    // 💡 成功した取り込みも「この端末での編集」には数えない。
+    saveData(markModified: false);
+    notifyListeners();
   }
 
   void _importJson(String text) {
@@ -5177,17 +5221,12 @@ class AppState extends ChangeNotifier {
     (map['budgets'] as Map?)?.forEach((k, v) {
       if (v is int) budgets[k] = v;
     });
-
-    saveData();
-    notifyListeners();
   }
 
   // ════════════════ 保存・読込 ════════════════
-  bool _importing = false; // インポート中は「この端末で変更した」と数えない
-
-  Future<void> saveData() async {
+  Future<void> saveData({bool markModified = true}) async {
     final prefs = await SharedPreferences.getInstance();
-    if (!_importing) {
+    if (markModified) {
       dataUpdatedAt = DateTime.now();
       await prefs.setString('saved_data_updated_at', dataUpdatedAt!.toIso8601String());
     }

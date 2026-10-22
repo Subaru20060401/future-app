@@ -173,14 +173,16 @@ class _WorkplaceEditScreenState extends State<WorkplaceEditScreen> {
                 const SizedBox(height: 12),
                 const Text('給料日が土日祝のとき',
                     style: TextStyle(fontSize: 12, color: Colors.grey)),
-                ...PaydayAdjust.values.map((a) => RadioListTile<PaydayAdjust>(
+                RadioGroup<PaydayAdjust>(
+                  groupValue: adjust,
+                  onChanged: (v) => setLocal(() => adjust = v ?? PaydayAdjust.before),
+                  child: Column(children: PaydayAdjust.values.map((a) => RadioListTile<PaydayAdjust>(
                       contentPadding: EdgeInsets.zero,
                       dense: true,
                       value: a,
-                      groupValue: adjust,
                       title: Text(a.label, style: const TextStyle(fontSize: 14)),
-                      onChanged: (v) => setLocal(() => adjust = v ?? PaydayAdjust.before),
-                    )),
+                    )).toList()),
+                ),
                 const Text('例: 25日が土曜 → 前営業日=24日(金) / 翌営業日=27日(月)',
                     style: TextStyle(fontSize: 11, color: Colors.grey)),
               ],
