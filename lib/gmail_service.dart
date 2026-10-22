@@ -243,7 +243,25 @@ bool silentAuthOnCooldown(int? lastTriedMs, DateTime now) {
   return elapsed < kSilentAuthCooldown.inMilliseconds;
 }
 
-class GmailService {
+// 💡 同期処理（gmail_sync.dart）が使うGmail側の窓口。
+//   テストで偽物に差し替えて「取りこぼしたら反映しない」などを確かめるため。
+abstract interface class GmailSyncSource {
+  Future<GoogleAccessState> ensureAccess();
+  Future<T> withFreshToken<T>(Future<T> Function() run);
+  Future<void> invalidateRejectedToken({String? used});
+  Future<List<ParsedPayment>> fetchCardPayments({DateTime? since});
+  // 直近の fetchCardPayments で本文を取れなかったメール数
+  int get lastFetchFailures;
+  // 直近の fetchCardPayments で、件数の上限に達して取り切れなかった検索の数
+  int get lastFetchTruncated;
+  // 起動してからの取りこぼし（本文の失敗＋上限での打ち切り）の累計。
+  //   入金通知など、カード以外の取得で取りこぼしたかを前後の差で調べる
+  int get missTotal;
+  Future<List<({String sourceId, DateTime date})>> fetchDepositNotices({DateTime? since});
+  Future<List<PayPayTransferMail>> fetchPayPayTransfers({DateTime? since});
+}
+
+class GmailService implements GmailSyncSource {
   GmailService._();
   static final GmailService instance = GmailService._();
 
@@ -414,6 +432,7 @@ class GmailService {
   //   used＝失敗した呼び出しが使っていたトークン。
   //   ⚠️ Gmail と Drive が同時に401を受けると、先に取り直した「新しいトークン」を
   //     後から来た方が捨ててしまう。保存トークンが既に入れ替わっていたら何もしない。
+  @override
   Future<void> invalidateRejectedToken({String? used}) async {
     final saved = await _savedToken();
     if (used != null && saved != null && saved != used) return;
@@ -435,6 +454,7 @@ class GmailService {
 
   // 💡 API呼び出しを、トークン拒否のときだけ「捨てて取り直して1回やり直す」で包む。
   //   取り直しがページ移動／本人の操作待ちになったら GoogleAuthRejected を投げる。
+  @override
   Future<T> withFreshToken<T>(Future<T> Function() run) async {
     // 💡 呼び出し前に使うトークンを覚える（失敗時に「そのトークン」だけを捨てるため）
     await _authClient();
@@ -504,6 +524,7 @@ class GmailService {
   Future<GoogleAccessState>? _restoringAccess;
 
   // 💡 Gmail・Driveで同じ復帰経路を使い、同時更新は一度の認証にまとめる。
+  @override
   Future<GoogleAccessState> ensureAccess() {
     return _restoringAccess ??= _restoreAccess().whenComplete(() {
       _restoringAccess = null;
@@ -814,6 +835,7 @@ class GmailService {
   static const String _depositQuery = 'from:smbc.co.jp 振込入金';
 
   // 💡 入金通知メールを取得（メールIDと入金日だけ）。
+  @override
   Future<List<({String sourceId, DateTime date})>> fetchDepositNotices({DateTime? since}) async {
     try {
       return await _fetchDepositNotices(since: since);
@@ -848,6 +870,7 @@ class GmailService {
   static const String _paypayTransferQuery =
       'from:paypay-corp.co.jp subject:出金を受け付けました';
 
+  @override
   Future<List<PayPayTransferMail>> fetchPayPayTransfers({DateTime? since}) async {
     try {
       final from = since?.subtract(const Duration(days: 1));
@@ -875,6 +898,7 @@ class GmailService {
 
   // 💡 カード関連メール＋銀行の引落確定メールを取得して支払い候補を抽出
   //   since を渡すとその日付以降だけ取得（2回目以降の差分更新用）
+  @override
   Future<List<ParsedPayment>> fetchCardPayments({DateTime? since}) async {
     try {
       return await _fetchCardPayments(since: since);
@@ -896,6 +920,7 @@ class GmailService {
     final api = gmail.GmailApi(client);
     final results = <ParsedPayment>[];
     _fetchFailures = 0; // 今回の取りこぼし件数を数え直す
+    _fetchTruncated = 0;
     await _loadCache();
 
     // ① 各カード・銀行：期間内の全メールIDをページングで取得（並列）
@@ -1106,6 +1131,12 @@ class GmailService {
       ids.addAll((resp.messages ?? []).where((m) => m.id != null).map((m) => m.id!));
       token = resp.nextPageToken;
     } while (token != null && ids.length < cap);
+    // ⚠️ 続きがあるのに上限で止めた＝取り切れていない。
+    //   以前は黙って成功扱いにしていたので、続きのメールの明細が作り直しで消えうる。
+    if (token != null) {
+      _fetchTruncated++;
+      _missTotal++;
+    }
     return ids;
   }
 
@@ -1115,7 +1146,14 @@ class GmailService {
   //   取りこぼしたまま同期すると、その明細が消えて残高がブレるため、
   //   呼び出し側はこれが 0 でないときは反映を中止する。
   int _fetchFailures = 0;
+  @override
   int get lastFetchFailures => _fetchFailures;
+  int _fetchTruncated = 0;
+  @override
+  int get lastFetchTruncated => _fetchTruncated;
+  int _missTotal = 0;
+  @override
+  int get missTotal => _missTotal;
 
   //   同時実行数はスロットリング(_throttled)が実質の上限になるよう少し多めにとる。
   Future<List<gmail.Message>> _getByIds(gmail.GmailApi api, List<String> ids,
@@ -1168,6 +1206,7 @@ class GmailService {
     }
 
     _fetchFailures += failed.length; // 最後まで取れなかった件数
+    _missTotal += failed.length;
     return out;
   }
 

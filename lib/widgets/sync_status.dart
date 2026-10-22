@@ -82,7 +82,8 @@ class _SyncStatusBarState extends State<SyncStatusBar> {
         if (s.result.needsPermission && !GmailService.instance.signedInOnce) {
           return const SizedBox.shrink();
         }
-        final ok = s.result.ok;
+        // 💡 カードは確認できても、入金のお知らせなどを取りこぼしたときは色を変えて知らせる
+        final ok = s.result.ok && !s.result.partial;
         final color = ok ? Colors.black54 : Colors.orange[900]!;
         return Padding(
           padding: const EdgeInsets.only(bottom: 8),

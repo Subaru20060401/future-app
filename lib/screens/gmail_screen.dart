@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 import 'package:intl/intl.dart';
 import '../app_state.dart';
 import '../gmail_service.dart';
+import '../gmail_sync.dart';
 
 class GmailScreen extends StatefulWidget {
   const GmailScreen({super.key});
@@ -17,17 +18,6 @@ class _GmailScreenState extends State<GmailScreen> {
   bool _hasAccess = false; // Webはサインイン済みでもスコープ許可が別途必要
   String? _error;
   List<ParsedPayment> _results = [];
-
-  PaymentSource _toSource(MailKind kind) {
-    switch (kind) {
-      case MailKind.bank:
-        return PaymentSource.bank;
-      case MailKind.billing:
-        return PaymentSource.billing;
-      case MailKind.usage:
-        return PaymentSource.usage;
-    }
-  }
 
   // 種別ごとのラベル色
   (Color, Color) _kindColors(MailKind kind) {
@@ -70,65 +60,37 @@ class _GmailScreenState extends State<GmailScreen> {
     }
   }
 
-  // 💡 Gmail読み取りの許可を求める（ポップアップが開くのでボタン操作から呼ぶ）
-  Future<void> _grant() async {
-    setState(() {
-      _loading = true;
-      _error = null;
-    });
-    try {
-      final ok = await _gmail.requestGmailAccess();
-      setState(() {
-        _hasAccess = ok;
-        if (!ok) _error = '許可されませんでした。ポップアップがブロックされていないか確認してください。';
-      });
-    } catch (e) {
-      setState(() => _error = '許可の取得に失敗: $e');
-    } finally {
-      setState(() => _loading = false);
-    }
-  }
-
+  // 💡 普段の更新と同じ経路（syncGmail）で過去2年分を取り込む。
+  // ⚠️ 以前はこの画面だけが自前で取得・反映していて、取りこぼし（取得失敗・件数の上限）を
+  //   見ずに明細を作り直していた。取れなかったメールの明細や、2年より前の明細が消えうる。
   Future<void> _fetch() async {
     setState(() {
       _loading = true;
       _error = null;
       _results = [];
     });
-    // await前にAppStateを取得（context.read を非同期境界をまたいで使わない）
     final appState = context.read<AppState>();
     try {
-      // 許可が無いとAPIが403を返すので、先にここで求める（ボタン操作の延長）
-      if (!await _gmail.isUsable) {
-        final ok = await _gmail.requestGmailAccess();
-        if (!mounted) return;
-        setState(() => _hasAccess = ok);
-        if (!ok) {
-          setState(() => _error = 'Gmailの読み取りが許可されていません。'
-              '「Gmailのアクセスを許可」を押して許可してください。');
-          return;
-        }
+      var r = await syncGmail(appState, full: true);
+      // 許可が無ければ、このボタン操作の中で求めてからもう一度（ポップアップは操作中のみ開ける）
+      if (r.needsPermission && await _gmail.requestGmailAccess()) {
+        r = await syncGmail(appState, full: true);
       }
-      final list = await _gmail.fetchCardPayments();
-      // 💡 銀行確定を正本として照合・自動追加（重複は除外）
-      final r = appState.reconcilePayments(list.map((p) => (
-            cardName: p.cardName,
-            amount: p.amount,
-            date: p.date,
-            source: _toSource(p.kind),
-            sourceId: p.sourceId,
-            note: p.note,
-          )));
-      setState(() => _results = list);
-      if (mounted) {
+      if (!mounted) return;
+      setState(() {
+        _results = r.items;
+        _hasAccess = !r.needsPermission && !r.notSignedIn;
+        if (!r.ok) _error = r.message;
+      });
+      if (r.ok) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('${r.added}件追加 / ${r.removed}件削除')),
+          SnackBar(content: Text(r.shortMessage)),
         );
       }
     } catch (e) {
-      setState(() => _error = '取得失敗: $e');
+      if (mounted) setState(() => _error = '取得失敗: $e');
     } finally {
-      setState(() => _loading = false);
+      if (mounted) setState(() => _loading = false);
     }
   }
 
