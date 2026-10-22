@@ -156,14 +156,39 @@ void showAddShiftSheet(BuildContext hostContext, AppState appState, DateTime sel
 }
 
 void showShiftInputDialog(BuildContext hostContext, AppState appState, DateTime selectedDay) {
+  showShiftFormDialog(
+    hostContext,
+    appState,
+    selectedDay,
+    title: 'シフト入力',
+    onSave: (shift) => appState.addShift(selectedDay, shift),
+  );
+}
+
+// 💡 シフトの入力フォーム（追加と編集で共通）。
+//   ⚠️ 以前は追加（ここ）と編集（calendar_screen）に同じフォームが別々にあり、
+//     編集では勤務先を変えても時給が入れ替わらなかった。
+//   initial を渡すと編集（その値から始める）。保存した ShiftData を onSave に渡す。
+void showShiftFormDialog(
+  BuildContext hostContext,
+  AppState appState,
+  DateTime selectedDay, {
+  required String title,
+  required void Function(ShiftData shift) onSave,
+  ShiftData? initial,
+}) {
   final workplaces = appState.workplaces;
   // 勤務先が登録されていれば先頭を初期選択、無ければ手動入力。
-  String? selectedWpId = workplaces.isNotEmpty ? workplaces.first.id : null;
-  final titleCtrl = TextEditingController(text: 'バイト');
-  final wageCtrl = TextEditingController(text: '1000');
-  final breakCtrl = TextEditingController(text: '60');
-  TimeOfDay startTime = const TimeOfDay(hour: 9, minute: 0);
-  TimeOfDay endTime = const TimeOfDay(hour: 17, minute: 0);
+  String? selectedWpId = initial != null
+      ? (initial.workplaceId ?? (workplaces.isNotEmpty ? workplaces.first.id : null))
+      : (workplaces.isNotEmpty ? workplaces.first.id : null);
+  final titleCtrl = TextEditingController(text: initial?.workplace ?? 'バイト');
+  final wageCtrl = TextEditingController(text: '${initial?.hourlyWage ?? 1000}');
+  final breakCtrl = TextEditingController(text: '${initial?.breakMinutes ?? 60}');
+  TimeOfDay startTime =
+      initial != null ? TimeOfDay.fromDateTime(initial.start) : const TimeOfDay(hour: 9, minute: 0);
+  TimeOfDay endTime =
+      initial != null ? TimeOfDay.fromDateTime(initial.end) : const TimeOfDay(hour: 17, minute: 0);
 
   // 選択中の勤務先・勤務日に応じて時給欄を自動入力する。
   void applyWorkplaceWage() {
@@ -174,13 +199,14 @@ void showShiftInputDialog(BuildContext hostContext, AppState appState, DateTime 
     }
   }
 
-  applyWorkplaceWage();
+  // 新規は勤務先の時給から始める。編集は保存してある時給のまま（勤務先を変えたら入れ替える）
+  if (initial == null) applyWorkplaceWage();
 
   showDialog(
     context: hostContext,
     builder: (context) => StatefulBuilder(
       builder: (context, setLocal) => AlertDialog(
-        title: const Text('シフト入力'),
+        title: Text(title),
         content: SingleChildScrollView(
           child: Column(
             mainAxisSize: MainAxisSize.min,
@@ -265,7 +291,7 @@ void showShiftInputDialog(BuildContext hostContext, AppState appState, DateTime 
                       end: end,
                       breakMinutes: breakMin,
                     );
-              appState.addShift(selectedDay, shift);
+              onSave(shift);
               Navigator.pop(context);
             },
             child: const Text('保存'),

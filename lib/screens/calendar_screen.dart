@@ -141,100 +141,15 @@ class _CalendarScreenState extends State<CalendarScreen> {
     );
   }
 
-  // シフト編集ダイアログ
+  // シフト編集ダイアログ（入力フォームは追加と共通）
   void _editShift(String dateKey, int idx, ShiftData s, AppState appState) {
-    final selectedDay = DateTime.tryParse(dateKey) ?? DateTime.now();
-    final workplaces = appState.workplaces;
-    String? selectedWpId = s.workplaceId ?? (workplaces.isNotEmpty ? workplaces.first.id : null);
-    final titleCtrl = TextEditingController(text: s.workplace);
-    final wageCtrl = TextEditingController(text: s.hourlyWage.toString());
-    final breakCtrl = TextEditingController(text: s.breakMinutes.toString());
-    TimeOfDay startTime = TimeOfDay.fromDateTime(s.start);
-    TimeOfDay endTime = TimeOfDay.fromDateTime(s.end);
-
-    showDialog(
-      context: context,
-      builder: (context) => StatefulBuilder(
-        builder: (context, setLocal) => AlertDialog(
-          title: const Text('シフトを編集'),
-          content: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (workplaces.isNotEmpty)
-                  DropdownButtonFormField<String?>(
-                    initialValue: selectedWpId,
-                    isExpanded: true,
-                    decoration: const InputDecoration(labelText: '勤務先'),
-                    items: [
-                      ...workplaces.map((w) => DropdownMenuItem<String?>(
-                            value: w.id,
-                            child: Row(children: [
-                              Container(
-                                  width: 12, height: 12,
-                                  decoration: BoxDecoration(color: Color(w.colorValue), shape: BoxShape.circle)),
-                              const SizedBox(width: 8),
-                              Text(w.name),
-                            ]),
-                          )),
-                      const DropdownMenuItem<String?>(value: null, child: Text('その他（手動入力）')),
-                    ],
-                    onChanged: (v) => setLocal(() => selectedWpId = v),
-                  ),
-                if (selectedWpId == null)
-                  TextField(controller: titleCtrl, decoration: const InputDecoration(labelText: '勤務先（手動）')),
-                TextField(controller: wageCtrl, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: '時給')),
-                TextField(controller: breakCtrl, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: '休憩(分)')),
-                const SizedBox(height: 8),
-                ListTile(
-                  contentPadding: EdgeInsets.zero,
-                  title: const Text('開始'),
-                  trailing: Text(startTime.format(context)),
-                  onTap: () async {
-                    final t = await showTimePicker(context: context, initialTime: startTime);
-                    if (t != null) setLocal(() => startTime = t);
-                  },
-                ),
-                ListTile(
-                  contentPadding: EdgeInsets.zero,
-                  title: const Text('終了'),
-                  trailing: Text(endTime.format(context)),
-                  onTap: () async {
-                    final t = await showTimePicker(context: context, initialTime: endTime);
-                    if (t != null) setLocal(() => endTime = t);
-                  },
-                ),
-              ],
-            ),
-          ),
-          actions: [
-            TextButton(onPressed: () => Navigator.pop(context), child: const Text('キャンセル')),
-            ElevatedButton(
-              onPressed: () {
-                final start = DateTime(selectedDay.year, selectedDay.month, selectedDay.day, startTime.hour, startTime.minute);
-                var end = DateTime(selectedDay.year, selectedDay.month, selectedDay.day, endTime.hour, endTime.minute);
-                if (end.isBefore(start)) end = end.add(const Duration(days: 1));
-                final breakMin = int.tryParse(breakCtrl.text) ?? 0;
-                final wage = int.tryParse(wageCtrl.text) ?? 0;
-                final w = appState.workplaceById(selectedWpId);
-                final newShift = w != null
-                    ? appState.buildShiftFromWorkplace(w, selectedDay, start, end,
-                        breakMinutes: breakMin, overrideWage: wage)
-                    : ShiftData(
-                        workplace: titleCtrl.text,
-                        hourlyWage: wage,
-                        start: start,
-                        end: end,
-                        breakMinutes: breakMin,
-                      );
-                appState.updateShift(dateKey, idx, newShift);
-                Navigator.pop(context);
-              },
-              child: const Text('保存'),
-            )
-          ],
-        ),
-      ),
+    showShiftFormDialog(
+      context,
+      appState,
+      DateTime.tryParse(dateKey) ?? DateTime.now(),
+      title: 'シフトを編集',
+      initial: s,
+      onSave: (shift) => appState.updateShift(dateKey, idx, shift),
     );
   }
 
