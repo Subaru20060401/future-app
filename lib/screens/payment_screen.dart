@@ -9,6 +9,7 @@ import 'trash_screen.dart';
 import '../widgets/app_sheet.dart';
 import '../widgets/payment_row.dart';
 import '../money_format.dart';
+import '../widgets/billing_link_sheet.dart';
 
 class PaymentScreen extends StatefulWidget {
   const PaymentScreen({super.key});
@@ -61,6 +62,14 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
       appBar: AppBar(
         title: const Text('支払い管理'),
         actions: [
+          IconButton(
+            tooltip: 'メールの請求名を確認',
+            icon: Badge(
+              isLabelVisible: appState.unregisteredCardNames.isNotEmpty,
+              child: const Icon(Icons.link),
+            ),
+            onPressed: () => showBillingLinkSheet(context),
+          ),
           IconButton(
             tooltip: '削除した金額（ゴミ箱）',
             icon: Badge(

@@ -24,7 +24,7 @@ import 'card_settings_screen.dart';
 import 'workplace_list_screen.dart';
 import 'budget_screen.dart';
 import '../widgets/app_sheet.dart';
-import '../card_styles.dart';
+import '../widgets/billing_link_sheet.dart';
 import '../google_calendar_sync.dart';
 import '../gemini_client.dart';
 import 'shift_image_import_screen.dart';
@@ -199,12 +199,12 @@ class SettingsScreen extends StatelessWidget {
               //   割れている候補をここに出して、1つにまとめられるようにする。
               if (appState.unregisteredCardNames.isNotEmpty) ...[
                 const Divider(height: 24),
-                const Text('登録していないカード名',
+                const Text('未確認の請求名',
                     style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
                 const SizedBox(height: 2),
                 const Text(
                     '銀行やカード会社のメールから、この名前で明細が入っています。'
-                    '上のカードと同じものなら、まとめると1枚として扱えます。',
+                    '登録済みのカード・ローンと同じ支払いなら、対応を選んでください。',
                     style: TextStyle(fontSize: 12, color: Colors.black54)),
                 const SizedBox(height: 6),
                 ...appState.unregisteredCardNames.map((u) => ListTile(
@@ -215,13 +215,8 @@ class SettingsScreen extends StatelessWidget {
                       subtitle: Text('明細 ${u.count}件',
                           style: const TextStyle(fontSize: 12)),
                       trailing: TextButton(
-                        child: const Text('まとめる'),
-                        onPressed: () async {
-                          final to = await _pickCardToMerge(context, appState, u.name);
-                          if (to == null) return;
-                          appState.mergeCardName(u.name, to);
-                          setLocal(() {});
-                        },
+                        child: const Text('対応を選ぶ'),
+                        onPressed: () => showBillingLinkSheet(context),
                       ),
                     )),
               ],
@@ -266,39 +261,6 @@ class SettingsScreen extends StatelessWidget {
             ],
           ),
         ),
-      ),
-    );
-  }
-
-  // どのカードにまとめるか選ぶ
-  Future<String?> _pickCardToMerge(
-      BuildContext context, AppState appState, String from) {
-    final cards = appState.cardPaymentDays.keys.toList();
-    return showDialog<String>(
-      context: context,
-      builder: (_) => AlertDialog(
-        title: Text('「$from」をまとめる'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text('同じカードを選んでください。既存の明細もまとめ先に付け替わり、'
-                '次回以降の取り込みでも同じ扱いになります。',
-                style: TextStyle(fontSize: 12, color: Colors.black54)),
-            const SizedBox(height: 8),
-            ...cards.map((c) => ListTile(
-                  contentPadding: EdgeInsets.zero,
-                  dense: true,
-                  leading: Icon(cardStyleOf(c).icon, color: cardStyleOf(c).color),
-                  title: Text(c),
-                  onTap: () => Navigator.pop(context, c),
-                )),
-          ],
-        ),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(context), child: const Text('キャンセル')),
-        ],
       ),
     );
   }

@@ -730,6 +730,9 @@ class Loan {
   int downPayment;
   DateTime? downPaymentDate;
   String downPaymentMethod; // '' = 口座から, カード名 = そのカード
+  // 💡 請求元表記は表示名と分けて覚える。名前を変えても紐づけは維持する。
+  List<String> bankBillingNames;
+  bool autoLinkBankBills;
 
   Loan({
     required this.id,
@@ -745,7 +748,9 @@ class Loan {
     this.downPayment = 0,
     this.downPaymentDate,
     this.downPaymentMethod = '',
-  });
+    List<String>? bankBillingNames,
+    this.autoLinkBankBills = true,
+  }) : bankBillingNames = bankBillingNames ?? [];
 
   // 頭金を含めた総額（車両価格など）
   int get totalPrice => principal + downPayment;
@@ -834,6 +839,8 @@ class Loan {
         'downPayment': downPayment,
         'downPaymentDate': downPaymentDate?.toIso8601String(),
         'downPaymentMethod': downPaymentMethod,
+        'bankBillingNames': bankBillingNames,
+        'autoLinkBankBills': autoLinkBankBills,
       };
 
   factory Loan.fromJson(Map<String, dynamic> json) => Loan(
@@ -852,6 +859,9 @@ class Loan {
             ? null
             : DateTime.tryParse(json['downPaymentDate']),
         downPaymentMethod: json['downPaymentMethod'] ?? '',
+        bankBillingNames: (json['bankBillingNames'] as List? ?? [])
+            .map((e) => e.toString()).toList(),
+        autoLinkBankBills: json['autoLinkBankBills'] ?? true,
       );
 }
 
@@ -1958,6 +1968,102 @@ class AppState extends ChangeNotifier {
 
   String resolveCardName(String name) => cardAliases[name] ?? name;
 
+  // 💡 大小文字・全角英数・空白・法人略称・ジャックスの銀行表記を吸収する。
+  //   類似度は候補の並び順にだけ使い、曖昧な名前では自動統合しない。
+  static String billingNameKey(String name) {
+    var s = String.fromCharCodes(name.runes.map((r) =>
+        r >= 0xff01 && r <= 0xff5e ? r - 0xfee0 : r)).toLowerCase();
+    s = s.replaceAll('ｼﾞｬｯｸｽ', 'jaccs')
+        .replaceAll('ｼﾞﾔﾂｸｽ', 'jaccs')
+        .replaceAll('ジャックス', 'jaccs')
+        .replaceAll('ジヤツクス', 'jaccs')
+        .replaceAll(RegExp(r'株式会社|有限会社|\(カ\)|（カ）|㈱'), '');
+    return s.replaceAll(RegExp(r'[\s\u3000・（）()\-ー_]'), '');
+  }
+
+  static bool billingNamesSimilar(String a, String b) {
+    final x = billingNameKey(a);
+    final y = billingNameKey(b);
+    return x.isNotEmpty && y.isNotEmpty &&
+        (x.contains(y) || y.contains(x) ||
+         (x.contains('jaccs') && y.contains('jaccs')));
+  }
+
+  Loan? loanForBankBillingName(String name) {
+    final key = billingNameKey(resolveCardName(name));
+    final matches = loans.where((l) =>
+        l.bankBillingNames.any((n) => billingNameKey(resolveCardName(n)) == key));
+    // ⚠️ 壊れたバックアップ等で複数に紐づいていたら、勝手に一方を消さない。
+    return matches.length == 1 ? matches.single : null;
+  }
+
+  void linkBankBillingToLoan(String name, String loanId) {
+    final loan = loans.firstWhere((l) => l.id == loanId);
+    if (!loan.isFromAccount && !loan.isDownPaymentFromAccount) return;
+    final key = billingNameKey(resolveCardName(name));
+    for (final l in loans) {
+      l.bankBillingNames.removeWhere((n) => billingNameKey(resolveCardName(n)) == key);
+    }
+    loan.bankBillingNames.add(name);
+    saveData();
+    notifyListeners();
+  }
+
+  void unlinkBankBillingFromLoan(String loanId, String name) {
+    final loan = loans.firstWhere((l) => l.id == loanId);
+    loan.bankBillingNames.remove(name);
+    // 💡 外したものを次の起動・取り込みで自動的に戻さない。
+    loan.autoLinkBankBills = false;
+    saveData();
+    notifyListeners();
+  }
+
+  bool _hasLoanBankBill(Loan loan, DateTime payMonth,
+      {DateTime? onDate, int minimumAmount = 0}) => payments.any((p) =>
+      p.source == PaymentSource.bank && !p.infoOnly &&
+      p.paymentDate.year == payMonth.year && p.paymentDate.month == payMonth.month &&
+      p.amount >= minimumAmount &&
+      (onDate == null || (p.paymentDate.year == onDate.year &&
+          p.paymentDate.month == onDate.month && p.paymentDate.day == onDate.day)) &&
+      loanForBankBillingName(p.cardName)?.id == loan.id);
+
+  // 💡 既存の行も起動時・取り込み時に照合する。銀行の行は消さず正本として残す。
+  //   自動紐づけは名前が一致する場合か、表記が既知のジャックスに限定する。
+  //   同社のローンが複数ある場合や、金額・予定日が合わない場合は選んでもらう。
+  bool repairLoanBillingLinks() {
+    var changed = false;
+    for (final p in payments) {
+      if (p.source != PaymentSource.bank || p.infoOnly) continue;
+      if (loanForBankBillingName(p.cardName) != null) continue;
+      final name = resolveCardName(p.cardName);
+      if (cardPaymentDays.containsKey(name)) continue;
+      final key = billingNameKey(name);
+      if (key.isEmpty) continue;
+      final candidates = loans.where((l) {
+        final lk = billingNameKey(l.name);
+        return l.isFromAccount && (lk == key ||
+            (key == 'jaccs' && lk.contains('jaccs')));
+      }).toList();
+      if (candidates.length != 1) continue;
+      final l = candidates.single;
+      if (!l.autoLinkBankBills) continue;
+      final payMonth = DateTime(p.paymentDate.year, p.paymentDate.month);
+      final useMonth = DateTime(payMonth.year, payMonth.month - 1);
+      final last = DateTime(payMonth.year, payMonth.month + 1, 0).day;
+      final expectedDate = nextBusinessDay(DateTime(payMonth.year, payMonth.month,
+          l.payDay.clamp(1, last)));
+      final actualDate = DateTime(p.paymentDate.year, p.paymentDate.month, p.paymentDate.day);
+      final repaymentMatches = expectedDate == actualDate &&
+          l.amountIn(useMonth) > 0 && l.amountIn(useMonth) == p.amount;
+      final downMatches = l.hasDownPayment && l.isDownPaymentFromAccount &&
+          nextBusinessDay(l.downPaymentDate!) == actualDate && l.downPayment == p.amount;
+      if (!repaymentMatches && !downMatches) continue;
+      l.bankBillingNames.add(name);
+      changed = true;
+    }
+    return changed;
+  }
+
   // 💡 設定に登録されていないカード名で入っている明細（＝割れている候補）。
   List<({String name, int count})> get unregisteredCardNames {
     final counts = <String, int>{};
@@ -1965,6 +2071,7 @@ class AppState extends ChangeNotifier {
       final n = p.cardName.trim();
       if (n.isEmpty || n == kOtherCard) continue;
       if (cardPaymentDays.containsKey(n)) continue;
+      if (loanForBankBillingName(n) != null) continue;
       counts[n] = (counts[n] ?? 0) + 1;
     }
     final out = [for (final e in counts.entries) (name: e.key, count: e.value)];
@@ -2287,6 +2394,7 @@ class AppState extends ChangeNotifier {
       }
     }
     cleanupInstallmentDuplicates(); // 分割へ移した決済が残っていれば取り除く
+    repairLoanBillingLinks();
     final desiredKeys = {
       for (final p in payments.where((p) => p.source != PaymentSource.manual))
         _dupKey(p.cardName, p.amount, p.paymentDate, p.source),
@@ -3604,6 +3712,8 @@ class AppState extends ChangeNotifier {
     // 💡 口座から直接引かれるローンは、返済日が個別なので1本ずつ出す
     for (final l in activeLoansIn(month)) {
       if (!l.isFromAccount) continue;
+      // 💡 この利用月の翌月に銀行確定があれば、手動の予定額は足さない。
+      if (_hasLoanBankBill(l, DateTime(month.year, month.month + 1))) continue;
       out.add((
         label: l.name,
         amount: l.amountIn(month),
@@ -3655,8 +3765,10 @@ class AppState extends ChangeNotifier {
           out.add((title: i.name, subtitle: i.countLabelIn(month), amount: amount));
         }
       }
-    } else if (loans.any((l) => l.isFromAccount && l.name == label)) {
-      for (final l in loans.where((e) => e.isFromAccount && e.name == label)) {
+    } else if (loans.any((l) => l.isFromAccount && l.name == label &&
+        !_hasLoanBankBill(l, DateTime(month.year, month.month + 1)))) {
+      for (final l in loans.where((e) => e.isFromAccount && e.name == label &&
+          !_hasLoanBankBill(e, DateTime(month.year, month.month + 1)))) {
         final n = l.countIn(month);
         if (n == 0) continue;
         out.add((
@@ -3978,11 +4090,13 @@ class AppState extends ChangeNotifier {
       monthlyOverride: monthlyOverride,
       firstPaymentAmount: firstPaymentAmount,
     ));
+    repairLoanBillingLinks();
     saveData();
     notifyListeners();
   }
 
   void updateLoan(Loan loan) {
+    repairLoanBillingLinks();
     saveData();
     notifyListeners();
   }
@@ -4082,6 +4196,11 @@ class AppState extends ChangeNotifier {
       final d = l.downPaymentDate;
       if (!l.hasDownPayment || !l.isDownPaymentFromAccount) continue;
       if (d!.year != month.year || d.month != month.month) continue;
+      // ⚠️ 頭金は日付どおりの月。翌月の請求では消さない。
+      if (_hasLoanBankBill(l, month, onDate: nextBusinessDay(d),
+          minimumAmount: l.downPayment)) {
+        continue;
+      }
       out.add((label: '${l.name} 頭金', amount: l.downPayment, date: d));
     }
     for (final e in plannedExpensesIn(month)) {
@@ -5227,6 +5346,7 @@ class AppState extends ChangeNotifier {
     (map['budgets'] as Map?)?.forEach((k, v) {
       if (v is int) budgets[k] = v;
     });
+    repairLoanBillingLinks();
   }
 
   // ════════════════ 保存・読込 ════════════════
@@ -5602,6 +5722,7 @@ class AppState extends ChangeNotifier {
     if (_migrateWorkplaces()) migrated = true;
     // 分割へ移した決済がカード側に残っていたら掃除（旧バージョンの取りこぼしを自己修復）
     if (cleanupInstallmentDuplicates() > 0) migrated = true;
+    if (repairLoanBillingLinks()) migrated = true;
     if (migrated) saveData();
 
     notifyListeners();
