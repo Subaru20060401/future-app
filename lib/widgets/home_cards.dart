@@ -8,6 +8,7 @@ import 'add_entry_sheets.dart';
 import 'app_sheet.dart';
 import 'deposit_dialog.dart';
 import 'planned_income_sheet.dart';
+import 'mail_schedule_review_sheet.dart';
 import '../money_format.dart';
 
 // 確認待ちを1件開く（種類ごとに既存の確認処理へ渡す）。
@@ -22,6 +23,8 @@ Future<void> openHomeNotice(
       await showDepositDialog(context, appState, notice.deposit!);
     case HomeNoticeKind.plannedIncome:
       await showPlannedIncomeSheet(context, appState);
+    case HomeNoticeKind.scheduleSuggestion:
+      await showSuggestionReviewSheet(context, appState, notice.suggestion!);
     case HomeNoticeKind.installmentWithoutCard:
       await showDialog<void>(
         context: context,
@@ -47,6 +50,7 @@ IconData _iconOf(HomeNoticeKind kind) => switch (kind) {
       HomeNoticeKind.deposit => Icons.south_west,
       HomeNoticeKind.plannedIncome => Icons.event_available,
       HomeNoticeKind.installmentWithoutCard => Icons.credit_card_off,
+      HomeNoticeKind.scheduleSuggestion => Icons.mark_email_unread_outlined,
     };
 
 Color _colorOf(HomeNoticeKind kind) => switch (kind) {
@@ -54,6 +58,7 @@ Color _colorOf(HomeNoticeKind kind) => switch (kind) {
       HomeNoticeKind.deposit => Colors.green,
       HomeNoticeKind.plannedIncome => Colors.teal,
       HomeNoticeKind.installmentWithoutCard => Colors.orange,
+      HomeNoticeKind.scheduleSuggestion => Colors.indigo,
     };
 
 Widget _noticeTile(BuildContext context, AppState appState, HomeNotice n) {

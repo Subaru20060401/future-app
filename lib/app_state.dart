@@ -9,6 +9,8 @@ import 'package:path_provider/path_provider.dart';
 import 'card_styles.dart';
 import 'japanese_holidays.dart';
 import 'workplace_styles.dart';
+import 'mail_schedule_models.dart';
+export 'mail_schedule_models.dart';
 import 'money_format.dart';
 
 // ───────────────────────── 列挙型 ─────────────────────────
@@ -19,6 +21,11 @@ enum RepeatType { none, daily, weekly, monthly }
 // ───────────────────────── シフト ─────────────────────────
 // 💡 新仕様: 開始/終了時刻 + 休憩(分)から勤務時間を自動算出
 class ShiftData {
+  // 💡 シフトの固定ID。メールから来た「変更・取消」を、再起動後も同じシフトに当てるため。
+  //   ⚠️ 旧データにはIDが無い。読み込み時に採番し（legacyId）、起動時の自己修復で保存する。
+  //   別の端末が同じ旧データから独立に採番すると別のIDになる（同じIDになるとは仮定しない）。
+  String id;
+  final bool legacyId;
   final String workplace;
   final int hourlyWage;
   final DateTime start;
@@ -35,6 +42,8 @@ class ShiftData {
   String? calendarEventId; // Appleカレンダー連携で作成したイベントID（更新/削除用）
 
   ShiftData({
+    String? id,
+    this.legacyId = false,
     required this.workplace,
     required this.hourlyWage,
     required this.start,
@@ -47,7 +56,11 @@ class ShiftData {
     this.overtimeMultiplier = 1.0,
     this.holidayMultiplier = 1.0,
     this.calendarEventId,
-  });
+  }) : id = id ?? newShiftId();
+
+  static int _seq = 0;
+  static String newShiftId() =>
+      'sh-${DateTime.now().microsecondsSinceEpoch}-${_seq++}';
 
   // 実働時間（時間）
   double get workHours {
@@ -84,6 +97,7 @@ class ShiftData {
   int get earnings => wageEarnings + transportPerDay;
 
   Map<String, dynamic> toJson() => {
+        'id': id,
         'workplace': workplace,
         'hourlyWage': hourlyWage,
         'start': start.toIso8601String(),
@@ -101,7 +115,10 @@ class ShiftData {
   factory ShiftData.fromJson(Map<String, dynamic> json) {
     // 💡 旧形式 (title / hours) からの移行も吸収
     if (json.containsKey('start')) {
+      final savedId = json['id'] as String?;
       return ShiftData(
+        id: savedId,
+        legacyId: savedId == null,
         workplace: json['workplace'] ?? json['title'] ?? 'バイト',
         hourlyWage: json['hourlyWage'] ?? 0,
         start: DateTime.parse(json['start']),
@@ -122,6 +139,7 @@ class ShiftData {
           : (json['hours'] ?? 0.0) as double;
       final base = DateTime(2020, 1, 1, 9, 0);
       return ShiftData(
+        legacyId: true,
         workplace: json['title'] ?? 'バイト',
         hourlyWage: json['hourlyWage'] ?? 0,
         start: base,
@@ -1245,6 +1263,7 @@ enum HomeNoticeKind {
   deposit, // 入金の反映待ち（メールに金額が無いので入力が要る）
   plannedIncome, // 予定入金の受け取り確認
   installmentWithoutCard, // カード未設定の分割払い（予想から漏れる可能性）
+  scheduleSuggestion, // メールから見つけた予定・単発バイトの提案（承認するまで何も登録しない）
 }
 
 class HomeNotice {
@@ -1257,6 +1276,7 @@ class HomeNotice {
   final ({String id, String label, int amount, DateTime date})? draw;
   final DepositNotice? deposit;
   final ({PlannedIncome income, DateTime date})? planned;
+  final ScheduleSuggestion? suggestion;
 
   const HomeNotice({
     required this.kind,
@@ -1267,6 +1287,7 @@ class HomeNotice {
     this.draw,
     this.deposit,
     this.planned,
+    this.suggestion,
   });
 }
 
@@ -1379,6 +1400,9 @@ class AppState extends ChangeNotifier {
   List<Loan> loans = [];
   List<PlannedExpense> plannedExpenses = [];
   final Set<String> paidPlannedExpenseKeys = {};
+  // 💡 メールから見つけた予定の提案と、予約⇔登録先の対応（mail_schedule_models.dart）
+  List<ScheduleSuggestion> scheduleSuggestions = [];
+  final Map<String, MailEntityLink> mailEntityLinks = {};
   List<Withdrawal> withdrawals = [];
 
   int currentBalance = 0;
@@ -1735,6 +1759,7 @@ class AppState extends ChangeNotifier {
     if (list == null || index < 0 || index >= list.length) return;
     final old = list[index];
     newShift.calendarEventId = old.calendarEventId;
+    newShift.id = old.id; // 💡 編集しても同じシフト（メール由来の変更・取消が当てられるように）
     list[index] = newShift;
     saveData();
     notifyListeners();
@@ -3179,7 +3204,305 @@ class AppState extends ChangeNotifier {
         detail: 'どのカードの請求に入るか決めると、予想が正確になります',
       ));
     }
+    // 💡 予定の提案は、お金の確認待ちの後ろに置く（入出金の確認を埋もれさせない）。
+    //   変更・取消を先に、そのあと新しい予定を日付順に。保留中はホームに出さない。
+    for (final sg in pendingScheduleSuggestions) {
+      out.add(HomeNotice(
+        kind: HomeNoticeKind.scheduleSuggestion,
+        title: switch (sg.action) {
+          SuggestionAction.add => sg.kind == SuggestionKind.shift
+              ? '勤務の確定が見つかりました：${sg.title}'
+              : '予定が見つかりました：${sg.title}',
+          SuggestionAction.change => '予定の変更：${sg.title}',
+          SuggestionAction.cancel => '予定の取消：${sg.title}',
+        },
+        detail: [
+          scheduleWhenLabel(sg),
+          if (sg.location.isNotEmpty) sg.location,
+          if (sg.sample) '見本',
+        ].join('／'),
+        date: sg.start,
+        suggestion: sg,
+      ));
+    }
     return out;
+  }
+
+  // ───── メールから見つけた予定の提案 ─────
+  // 💡 承認するまで、予定・シフト・収入・残高には何も入れない。
+  //   登録・状態の更新は必ずここを通す（画面から addShift と状態更新を別々に呼ばない）。
+
+  // ホームに出す提案（保留を除く）。変更・取消が先、そのあと開始日の順
+  List<ScheduleSuggestion> get pendingScheduleSuggestions {
+    final list =
+        scheduleSuggestions.where((s) => s.status == SuggestionStatus.pending).toList();
+    int rank(ScheduleSuggestion s) => s.action == SuggestionAction.add ? 1 : 0;
+    list.sort((a, b) {
+      final r = rank(a).compareTo(rank(b));
+      if (r != 0) return r;
+      return (a.start ?? DateTime(9999)).compareTo(b.start ?? DateTime(9999));
+    });
+    return list;
+  }
+
+  // 「11月12日 14:00〜15:30」のような日時の見出し
+  static String scheduleWhenLabel(ScheduleSuggestion s) {
+    final st = s.start;
+    if (st == null) return '日時未定';
+    final d = '${st.month}月${st.day}日';
+    if (s.allDay) return '$d（終日）';
+    String hm(DateTime t) => '${t.hour}:${t.minute.toString().padLeft(2, '0')}';
+    final e = s.end;
+    if (e == null) return '$d ${hm(st)}〜（終了未定）';
+    final nextDay = e.day != st.day || e.month != st.month;
+    return '$d ${hm(st)}〜${nextDay ? '翌' : ''}${hm(e)}';
+  }
+
+  String _linkKey(String accountKey, String entityKey) => '$accountKey|$entityKey';
+
+  void _setMailEntityLinks(List raw) {
+    mailEntityLinks
+      ..clear()
+      ..addAll({
+        for (final e in raw)
+          if (e is Map<String, dynamic>)
+            _linkKey('${e['accountKey'] ?? ''}', '${e['entityKey'] ?? ''}'):
+                MailEntityLink.fromJson(e),
+      });
+  }
+
+  // 💡 新しい提案を受け取る。同じID（同じメールの同じ予約）は増やさない。
+  //   ・確認待ち／保留のものは中身を新しくする（版を上げる）
+  //   ・登録済み・却下済みのものは触らない（同じ通知で再提案しない）
+  //   ・本人が消した予約の「追加」は復活させない
+  //   戻り値は新しく増えた件数。
+  int addScheduleSuggestions(Iterable<ScheduleSuggestion> incoming) {
+    var added = 0;
+    for (final sg in incoming) {
+      final link = mailEntityLinks[_linkKey(sg.accountKey, sg.entityKey)];
+      if (sg.action == SuggestionAction.add && link != null && link.removed) continue;
+      final i = scheduleSuggestions.indexWhere((e) => e.id == sg.id);
+      if (i < 0) {
+        scheduleSuggestions.add(sg);
+        added++;
+        continue;
+      }
+      final old = scheduleSuggestions[i];
+      if (!old.isOpen) continue;
+      sg
+        ..version = old.version + 1
+        ..status = old.status;
+      scheduleSuggestions[i] = sg;
+    }
+    saveData();
+    notifyListeners();
+    return added;
+  }
+
+  void holdScheduleSuggestion(String id) => _setSuggestionStatus(id, SuggestionStatus.held);
+  void rejectScheduleSuggestion(String id) =>
+      _setSuggestionStatus(id, SuggestionStatus.rejected);
+
+  // 保留から確認待ちへ戻す
+  void reopenScheduleSuggestion(String id) {
+    final s = scheduleSuggestions.where((e) => e.id == id).firstOrNull;
+    if (s == null || s.status != SuggestionStatus.held) return;
+    s.status = SuggestionStatus.pending;
+    saveData();
+    notifyListeners();
+  }
+
+  void _setSuggestionStatus(String id, SuggestionStatus st) {
+    final s = scheduleSuggestions.where((e) => e.id == id).firstOrNull;
+    if (s == null || !s.isOpen) return;
+    s.status = st;
+    saveData();
+    notifyListeners();
+  }
+
+  // 💡 確認画面で直した内容を提案に書き戻す（承認の前に呼ぶ）。版を上げる。
+  void editScheduleSuggestion(
+    String id, {
+    required String title,
+    required DateTime? start,
+    required DateTime? end,
+    required bool allDay,
+    required String location,
+  }) {
+    final s = scheduleSuggestions.where((e) => e.id == id).firstOrNull;
+    if (s == null || !s.isOpen) return;
+    s
+      ..title = title.trim()
+      ..start = start
+      ..end = allDay ? null : end
+      ..allDay = allDay
+      ..location = location.trim()
+      ..version = s.version + 1;
+    saveData();
+    notifyListeners();
+  }
+
+  // 見本の提案をまとめて消す（登録済みの予定・シフトは残す）
+  void removeSampleSuggestions() {
+    scheduleSuggestions
+        .removeWhere((s) => s.sample && s.status != SuggestionStatus.approved);
+    saveData();
+    notifyListeners();
+  }
+
+  ({String dateKey, int index})? _findShiftById(String id) {
+    for (final e in shifts.entries) {
+      final i = e.value.indexWhere((s) => s.id == id);
+      if (i >= 0) return (dateKey: e.key, index: i);
+    }
+    return null;
+  }
+
+  ({String dateKey, int index})? _findEventById(String id) {
+    for (final e in events.entries) {
+      final i = e.value.indexWhere((x) => x.id == id);
+      if (i >= 0) return (dateKey: e.key, index: i);
+    }
+    return null;
+  }
+
+  // 💡 提案を承認して、予定またはシフトとして登録する。戻り値は「できなかった理由」（null＝登録した）。
+  //   ・登録先のIDは予約の安定IDから決める。途中で落ちてやり直しても、同じ予定・シフトに上書きされる
+  //   ・シフトは勤務先を選び、休憩を本人が入れてから（給与は勤務先の設定で計算。AIには計算させない）
+  //   ・変更・取消は、先に登録した予定／シフトにだけ当てる。見つからなければ何もしない
+  //   as: 予定として／シフトとして、の本人の選択（提案の種類と違ってもよい）
+  String? approveScheduleSuggestion(
+    String id, {
+    SuggestionKind? as,
+    String? workplaceId,
+    int? breakMinutes,
+  }) {
+    final s = scheduleSuggestions.where((e) => e.id == id).firstOrNull;
+    if (s == null) return '提案が見つかりません';
+    if (!s.isOpen) return 'この提案はもう処理済みです';
+    final kind = as ?? s.kind;
+    final key = _linkKey(s.accountKey, s.entityKey);
+    final link = mailEntityLinks[key];
+
+    if (s.blockers.isNotEmpty) return s.blockers.first;
+
+    if (s.action == SuggestionAction.add) {
+      final targetId = mailTargetId(s.accountKey, s.entityKey);
+      if (kind == SuggestionKind.event) {
+        upsertEvent(EventData(
+          id: targetId,
+          title: s.title.trim(),
+          location: s.location,
+          url: s.url,
+          memo: [
+            if (s.sender.isNotEmpty) '${s.sender}からのメール',
+            if (s.evidence.isNotEmpty) s.evidence,
+          ].join('\n'),
+          allDay: s.allDay,
+          start: s.start,
+          end: s.allDay ? null : s.end,
+        ));
+      } else {
+        final w = workplaceById(workplaceId);
+        if (w == null) return '勤務先を選んでください';
+        if (breakMinutes == null || breakMinutes < 0) return '休憩時間を入れてください';
+        if (s.allDay || s.end == null) return '勤務の開始・終了時刻が必要です';
+        final day = DateTime(s.start!.year, s.start!.month, s.start!.day);
+        final shift = buildShiftFromWorkplace(w, day, s.start!, s.end!,
+            breakMinutes: breakMinutes)
+          ..id = targetId;
+        final at = _findShiftById(targetId);
+        if (at != null) {
+          updateShift(at.dateKey, at.index, shift);
+        } else {
+          addShift(day, shift);
+        }
+      }
+      mailEntityLinks[key] = MailEntityLink(
+        entityKey: s.entityKey,
+        accountKey: s.accountKey,
+        targetRef: '${kind.name}:$targetId',
+        approvedVersion: s.version,
+      );
+      s.targetRef = '${kind.name}:$targetId';
+    } else {
+      // 変更・取消は、登録済みの予定／シフトに当てる
+      if (link == null || link.removed) {
+        return s.action == SuggestionAction.cancel
+            ? '取り消す予定が見つかりません（まだ登録していないか、もう消してあります）'
+            : '変更する予定が見つかりません（先に元の予定を登録してください）';
+      }
+      final sep = link.targetRef.indexOf(':');
+      final type = link.targetRef.substring(0, sep);
+      final targetId = link.targetRef.substring(sep + 1);
+      if (type == SuggestionKind.event.name) {
+        final at = _findEventById(targetId);
+        if (at == null) return '登録した予定が見つかりません（手で消した可能性があります）';
+        if (s.action == SuggestionAction.cancel) {
+          removeEvent(at.dateKey, at.index);
+          link.removed = true;
+        } else {
+          final e = events[at.dateKey]![at.index];
+          if (s.title.trim().isNotEmpty) e.title = s.title.trim();
+          e
+            ..start = s.start
+            ..end = s.allDay ? null : s.end
+            ..allDay = s.allDay;
+          if (s.location.isNotEmpty) e.location = s.location;
+          upsertEvent(e);
+        }
+      } else {
+        final at = _findShiftById(targetId);
+        if (at == null) return '登録したシフトが見つかりません（手で消した可能性があります）';
+        if (s.action == SuggestionAction.cancel) {
+          removeShift(at.dateKey, at.index);
+          link.removed = true;
+        } else {
+          if (s.allDay || s.end == null) return '勤務の開始・終了時刻が必要です';
+          final old = shifts[at.dateKey]![at.index];
+          final w = workplaceById(old.workplaceId);
+          final day = DateTime(s.start!.year, s.start!.month, s.start!.day);
+          final moved = w != null
+              ? buildShiftFromWorkplace(w, day, s.start!, s.end!,
+                  breakMinutes: breakMinutes ?? old.breakMinutes,
+                  overrideWage: old.hourlyWage)
+              : ShiftData(
+                  workplace: old.workplace,
+                  hourlyWage: old.hourlyWage,
+                  start: s.start!,
+                  end: s.end!,
+                  breakMinutes: breakMinutes ?? old.breakMinutes,
+                );
+          if (dateKey(day) == at.dateKey) {
+            updateShift(at.dateKey, at.index, moved);
+          } else {
+            // 日付が変わったら箱を移す（IDとカレンダーの予定は同じまま）
+            moved
+              ..id = old.id
+              ..calendarEventId = old.calendarEventId;
+            final list = shifts[at.dateKey]!..removeAt(at.index);
+            if (list.isEmpty) shifts.remove(at.dateKey);
+            addShift(day, moved);
+          }
+        }
+      }
+      link.approvedVersion = s.version;
+      s.targetRef = link.targetRef;
+    }
+    s.status = SuggestionStatus.approved;
+    // 同じ予約・同じ種類の、まだ開いている古い提案は置き換わったことにする
+    for (final o in scheduleSuggestions) {
+      if (!identical(o, s) &&
+          o.isOpen &&
+          o.accountKey == s.accountKey &&
+          o.entityKey == s.entityKey &&
+          o.action == s.action) {
+        o.status = SuggestionStatus.superseded;
+      }
+    }
+    saveData();
+    notifyListeners();
+    return null;
   }
 
   // 💡 ホームに出す「今日・直近の予定」（シフトと予定をまとめて時刻順）。
@@ -4903,6 +5226,8 @@ class AppState extends ChangeNotifier {
       'loans': loans.map((e) => e.toJson()).toList(),
       'plannedExpenses': plannedExpenses.map((e) => e.toJson()).toList(),
       'paidPlannedExpenseKeys': paidPlannedExpenseKeys.toList(),
+      'scheduleSuggestions': scheduleSuggestions.map((e) => e.toJson()).toList(),
+      'mailEntityLinks': mailEntityLinks.values.map((e) => e.toJson()).toList(),
       'withdrawals': withdrawals.map((e) => e.toJson()).toList(),
       'currentBalance': currentBalance,
       'walletCash': walletCash,
@@ -5279,6 +5604,10 @@ class AppState extends ChangeNotifier {
     plannedExpenses = (map['plannedExpenses'] as List? ?? [])
         .map((e) => PlannedExpense.fromJson(e))
         .toList();
+    scheduleSuggestions = (map['scheduleSuggestions'] as List? ?? [])
+        .map((e) => ScheduleSuggestion.fromJson(e))
+        .toList();
+    _setMailEntityLinks(map['mailEntityLinks'] as List? ?? const []);
     paidPlannedExpenseKeys
       ..clear()
       ..addAll((map['paidPlannedExpenseKeys'] as List? ?? []).map((e) => '$e'));
@@ -5385,6 +5714,10 @@ class AppState extends ChangeNotifier {
         'saved_loans', jsonEncode(loans.map((e) => e.toJson()).toList()));
     await prefs.setString('saved_planned_expenses',
         jsonEncode(plannedExpenses.map((e) => e.toJson()).toList()));
+    await prefs.setString('saved_schedule_suggestions',
+        jsonEncode(scheduleSuggestions.map((e) => e.toJson()).toList()));
+    await prefs.setString('saved_mail_entity_links',
+        jsonEncode(mailEntityLinks.values.map((e) => e.toJson()).toList()));
     await prefs.setStringList(
         'saved_paid_planned_expenses', paidPlannedExpenseKeys.toList());
     await prefs.setString('saved_withdrawals',
@@ -5537,6 +5870,14 @@ class AppState extends ChangeNotifier {
           .map((e) => PlannedExpense.fromJson(e))
           .toList();
     }
+    final sgStr = prefs.getString('saved_schedule_suggestions');
+    if (sgStr != null) {
+      scheduleSuggestions = (jsonDecode(sgStr) as List)
+          .map((e) => ScheduleSuggestion.fromJson(e))
+          .toList();
+    }
+    final mlStr = prefs.getString('saved_mail_entity_links');
+    if (mlStr != null) _setMailEntityLinks(jsonDecode(mlStr) as List);
     paidPlannedExpenseKeys
       ..clear()
       ..addAll(prefs.getStringList('saved_paid_planned_expenses') ?? []);
@@ -5723,6 +6064,8 @@ class AppState extends ChangeNotifier {
     // 分割へ移した決済がカード側に残っていたら掃除（旧バージョンの取りこぼしを自己修復）
     if (cleanupInstallmentDuplicates() > 0) migrated = true;
     if (repairLoanBillingLinks()) migrated = true;
+    // 💡 IDの無い旧シフトに採番したIDを保存する（次の起動で別のIDにならないように）
+    if (shifts.values.any((l) => l.any((s) => s.legacyId))) migrated = true;
     if (migrated) saveData();
 
     notifyListeners();

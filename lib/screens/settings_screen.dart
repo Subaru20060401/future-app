@@ -28,6 +28,7 @@ import '../widgets/billing_link_sheet.dart';
 import '../google_calendar_sync.dart';
 import '../gemini_client.dart';
 import 'shift_image_import_screen.dart';
+import 'mail_schedule_screen.dart';
 import '../money_format.dart';
 
 class SettingsScreen extends StatelessWidget {
@@ -966,6 +967,41 @@ class SettingsScreen extends StatelessWidget {
             trailing: const Icon(Icons.chevron_right),
             onTap: () => showGeminiSettingsSheet(context),
           ),
+          const Divider(),
+          // 💡 メールから予定・単発バイトを見つける機能（docs/mail-schedule-proposal-plan-2026-10-25.md）。
+          //   今は Gmail・AI につないでいない。見本の提案で確認の流れだけ試せる。
+          _SectionHeader('メールから予定（準備中）',
+              note: 'メールから予約・説明会・面接・単発バイトを見つけて提案する機能です。'
+                  '今は見本で確認の流れだけ試せます（メールの読み取りはまだ行いません）。'),
+          ListTile(
+            leading: const Icon(Icons.mark_email_unread_outlined, color: Colors.indigo),
+            title: const Text('見つけた予定の一覧'),
+            subtitle: Text('確認待ち ${appState.pendingScheduleSuggestions.length}件'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const MailScheduleScreen()),
+            ),
+          ),
+          ListTile(
+            dense: true,
+            leading: const Icon(Icons.science_outlined, color: Colors.grey),
+            title: const Text('見本の提案を入れて試す'),
+            subtitle: const Text('架空の3件（説明会・面接・単発バイト）。ホームの確認待ちに出ます'),
+            onTap: () {
+              final n = appState.addScheduleSuggestions(sampleScheduleSuggestions(DateTime.now()));
+              ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                  content: Text(n > 0 ? '見本を$n件入れました' : '見本はもう入っています')));
+            },
+          ),
+          if (appState.scheduleSuggestions.any((s) => s.sample))
+            ListTile(
+              dense: true,
+              leading: const Icon(Icons.delete_sweep_outlined, color: Colors.grey),
+              title: const Text('見本の提案を消す'),
+              subtitle: const Text('登録した予定・シフトは残ります'),
+              onTap: () => appState.removeSampleSuggestions(),
+            ),
           const Divider(),
           _SectionHeader('表示・通知'),
           ListTile(
