@@ -12,6 +12,7 @@ import 'package:googleapis/drive/v3.dart' as drive;
 import 'package:googleapis/gmail/v1.dart' as gmail;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'money_format.dart';
+import 'mail_schedule_rules.dart';
 
 // 💡 メールの種別: 利用通知 / カード請求予定 / 銀行引落確定
 enum MailKind { usage, billing, bank }
@@ -898,6 +899,99 @@ class GmailService implements GmailSyncSource {
     } catch (e) {
       throw _describeApiError(e);
     }
+  }
+
+  // ───── 予定用のメール取得（メールから予定を探す） ─────
+  // 💡 支払いの取り込みとは別に数える（_fetchFailures などを触らない）。
+  //   支払い側の「1件でも取れなければ反映しない」を、予定の取得が狂わせないように。
+  //   通信の間隔（_throttled）だけは共有する（30回/秒を超えないように）。
+  // ⚠️ 返すのは端末で読むためのメール本文。端末の外へは送らない（AIを使わない方式）。
+  static const int kScheduleMailCap = 300; // 1回で読む上限（超えたら「取り切れていない」）
+
+  // キーワードで候補を絞る（予約・勤務の確定や変更・取消を含みうるもの）
+  static const String _scheduleQuery =
+      '{予約 確定 面接 説明会 勤務 シフト お仕事 キャンセル 中止 変更 集合 申込 申し込み 参加 受付}'
+      ' -in:spam -in:trash -in:drafts -in:sent';
+
+  // 予定用のアカウントの目印（メールアドレスそのものは保存しない）
+  String? get scheduleAccountKey {
+    final email = displayEmail;
+    if (email == null || email.isEmpty) return null;
+    var h = 0x811c9dc5;
+    for (final c in email.toLowerCase().codeUnits) {
+      h ^= c;
+      h = (h * 0x01000193) & 0xffffffff;
+    }
+    return 'g${h.toRadixString(16).padLeft(8, '0')}';
+  }
+
+  Future<({List<ScheduleMail> mails, int failed, bool truncated})> fetchScheduleMails(
+      {required DateTime after}) async {
+    final client = await _authClient();
+    if (client == null) throw Exception('Googleの認証に失敗しました。連携し直してください。');
+    final api = gmail.GmailApi(client);
+    final q = 'after:${after.millisecondsSinceEpoch ~/ 1000} $_scheduleQuery';
+    final ids = <String>[];
+    String? token;
+    do {
+      final resp = await _throttled(() =>
+          api.users.messages.list('me', q: q, maxResults: 100, pageToken: token));
+      ids.addAll((resp.messages ?? []).where((m) => m.id != null).map((m) => m.id!));
+      token = resp.nextPageToken;
+    } while (token != null && ids.length < kScheduleMailCap);
+    final truncated = token != null;
+    final mails = <ScheduleMail>[];
+    var failed = 0;
+    for (final id in ids.take(kScheduleMailCap)) {
+      try {
+        final m = await _throttled(() => api.users.messages.get('me', id, format: 'full'));
+        final at = _internalDate(m);
+        // ⚠️ 検索の日付は日単位でずれうるので、受信日時でも境界を確かめる
+        if (at == null || at.isBefore(after)) continue;
+        mails.add(ScheduleMail(
+          id: id,
+          threadId: m.threadId ?? '',
+          subject: _subject(m),
+          from: _header(m, 'from'),
+          receivedAt: at,
+          body: _plainOrHtmlText(m),
+        ));
+      } catch (_) {
+        failed++;
+      }
+    }
+    return (mails: mails, failed: failed, truncated: truncated);
+  }
+
+  String _header(gmail.Message m, String name) {
+    for (final h in m.payload?.headers ?? const <gmail.MessagePartHeader>[]) {
+      if ((h.name ?? '').toLowerCase() == name) return h.value ?? '';
+    }
+    return '';
+  }
+
+  // 💡 テキストの本文があればそれを、無ければHTMLから文字だけを取り出す
+  //   （両方つなげると同じ日時が2回出て「日付が複数」と誤読するため）
+  String _plainOrHtmlText(gmail.Message m) {
+    final plain = StringBuffer();
+    final html = StringBuffer();
+    void walk(gmail.MessagePart p) {
+      final data = p.body?.data;
+      if (data != null) {
+        try {
+          final text = utf8.decode(base64Url.decode(_normalize(data)), allowMalformed: true);
+          if (p.mimeType == 'text/plain') plain.writeln(text);
+          if (p.mimeType == 'text/html') html.writeln(text);
+        } catch (_) {}
+      }
+      for (final c in p.parts ?? const <gmail.MessagePart>[]) {
+        walk(c);
+      }
+    }
+
+    final payload = m.payload;
+    if (payload != null) walk(payload);
+    return plain.isNotEmpty ? plain.toString() : htmlToText(html.toString());
   }
 
   // 取得対象期間。since 指定時はその日付以降（差分更新）、未指定は過去2年

@@ -29,6 +29,7 @@ import '../google_calendar_sync.dart';
 import '../gemini_client.dart';
 import 'shift_image_import_screen.dart';
 import 'mail_schedule_screen.dart';
+import '../mail_schedule_service.dart';
 import '../money_format.dart';
 
 class SettingsScreen extends StatelessWidget {
@@ -969,10 +970,12 @@ class SettingsScreen extends StatelessWidget {
           ),
           const Divider(),
           // 💡 メールから予定・単発バイトを見つける機能（docs/mail-schedule-proposal-plan-2026-10-25.md）。
-          //   今は Gmail・AI につないでいない。見本の提案で確認の流れだけ試せる。
-          _SectionHeader('メールから予定（準備中）',
-              note: 'メールから予約・説明会・面接・単発バイトを見つけて提案する機能です。'
-                  '今は見本で確認の流れだけ試せます（メールの読み取りはまだ行いません）。'),
+          //   AIを使わず、端末の中で決まった書き方の確定メールだけ読む（メールは外に送らない）。
+          _SectionHeader('メールから予定（試験中）',
+              note: 'Gmailから予約・説明会・面接・単発バイトの確定メールを見つけて提案します。'
+                  'メールはこの端末の中で読み、どこにも送りません（AIは使いません）。'
+                  '決まった書き方のメールだけ読めます。登録するかは確認画面で決めます。'),
+          const _MailScanTile(),
           ListTile(
             leading: const Icon(Icons.mark_email_unread_outlined, color: Colors.indigo),
             title: const Text('見つけた予定の一覧'),
@@ -1331,6 +1334,62 @@ class _SectionHeader extends StatelessWidget {
             ),
         ],
       ),
+    );
+  }
+}
+
+// 💡 「メールから予定を探す」。押したときだけ動く（自動では確認しない）。
+//   初回は過去30日、次からは前回確認したところから。
+class _MailScanTile extends StatefulWidget {
+  const _MailScanTile();
+
+  @override
+  State<_MailScanTile> createState() => _MailScanTileState();
+}
+
+class _MailScanTileState extends State<_MailScanTile> {
+  bool _busy = false;
+  DateTime? _lastAt;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadLast();
+  }
+
+  Future<void> _loadLast() async {
+    final key = GmailService.instance.scheduleAccountKey;
+    if (key == null) return;
+    final at = await lastScheduleScanAt(key);
+    if (mounted) setState(() => _lastAt = at);
+  }
+
+  Future<void> _run() async {
+    final appState = context.read<AppState>();
+    if (!await ensureGoogleConnected(context)) return;
+    setState(() => _busy = true);
+    final r = await scanScheduleMails(appState);
+    if (!mounted) return;
+    setState(() => _busy = false);
+    await _loadLast();
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(r.message),
+      duration: const Duration(seconds: 6),
+    ));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ListTile(
+      leading: _busy
+          ? const SizedBox(width: 24, height: 24, child: CircularProgressIndicator(strokeWidth: 2))
+          : const Icon(Icons.manage_search, color: Colors.indigo),
+      title: const Text('メールから予定を探す'),
+      subtitle: Text(_lastAt == null
+          ? 'まだ確認していません（初回は過去30日を確認）'
+          : '前回の確認: ${DateFormat('M/d HH:mm').format(_lastAt!)}（その続きから確認）'),
+      onTap: _busy ? null : _run,
     );
   }
 }

@@ -3342,6 +3342,27 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
+  // 💡 処理済みの提案の履歴は、予定の終わりから90日で消す（2026-10-25 本人と決めた目安）。
+  //   確認待ち・保留は消さない。予約⇔登録先の対応（mailEntityLinks）は残すので、
+  //   消した予約を復活させない仕組みは期間に関係なく効く。
+  static const Duration kSuggestionHistoryKeep = Duration(days: 90);
+
+  int pruneScheduleSuggestions(DateTime now) {
+    final limit = now.subtract(kSuggestionHistoryKeep);
+    final before = scheduleSuggestions.length;
+    scheduleSuggestions.removeWhere((s) {
+      if (s.isOpen) return false;
+      final last = s.end ?? s.start ?? s.receivedAt;
+      return last.isBefore(limit);
+    });
+    final removed = before - scheduleSuggestions.length;
+    if (removed > 0) {
+      saveData();
+      notifyListeners();
+    }
+    return removed;
+  }
+
   // 見本の提案をまとめて消す（登録済みの予定・シフトは残す）
   void removeSampleSuggestions() {
     scheduleSuggestions
