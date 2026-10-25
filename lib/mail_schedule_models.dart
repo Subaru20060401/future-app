@@ -3,6 +3,9 @@
 //   承認・却下の判断は AppState（approveScheduleSuggestion など）で行い、画面は表示と入力だけ。
 // ⚠️ メールの全文は持たない。短い根拠（evidence）と元メールの参照（messageId）だけを残す。
 
+// 💡 読み取り規則と保存モデルで版を共有する。規則を変えたらここを上げる。
+const int kScheduleRulesVersion = 4;
+
 enum SuggestionKind { event, shift }
 
 // 追加／変更／取消。変更・取消は「承認済みの予定」に対する別の提案として扱う。
@@ -14,6 +17,7 @@ enum SuggestionStatus { pending, held, approved, rejected, expired, superseded }
 
 class ScheduleSuggestion {
   // 💡 提案のID。同じメールの同じ予約なら同じID（再取得しても増えない）。
+  final int rulesVersion;
   final String id;
   final String accountKey; // どのGoogleアカウントのメールか
   final String messageId; // 元メールのID（全文は持たない）
@@ -40,6 +44,7 @@ class ScheduleSuggestion {
   final bool sample;
 
   ScheduleSuggestion({
+    this.rulesVersion = kScheduleRulesVersion,
     required this.id,
     required this.accountKey,
     required this.messageId,
@@ -62,7 +67,8 @@ class ScheduleSuggestion {
     this.sample = false,
   }) : missing = missing ?? [];
 
-  bool get isOpen => status == SuggestionStatus.pending || status == SuggestionStatus.held;
+  bool get isOpen =>
+      status == SuggestionStatus.pending || status == SuggestionStatus.held;
 
   // 💡 登録に足りないもの。終了時刻の無い時間指定の予定は、本人が補うまで登録させない
   //   （カレンダーへ「1時間」と勝手に補うと、根拠のない時刻になる）。
@@ -83,53 +89,62 @@ class ScheduleSuggestion {
   }
 
   Map<String, dynamic> toJson() => {
-        'id': id,
-        'accountKey': accountKey,
-        'messageId': messageId,
-        'entityKey': entityKey,
-        'version': version,
-        'kind': kind.name,
-        'action': action.name,
-        'title': title,
-        'start': start?.toIso8601String(),
-        'end': end?.toIso8601String(),
-        'allDay': allDay,
-        'location': location,
-        'url': url,
-        'evidence': evidence,
-        'sender': sender,
-        'receivedAt': receivedAt.toIso8601String(),
-        'missing': missing,
-        'status': status.name,
-        'targetRef': targetRef,
-        if (sample) 'sample': true,
-      };
+    'rulesVersion': rulesVersion,
+    'id': id,
+    'accountKey': accountKey,
+    'messageId': messageId,
+    'entityKey': entityKey,
+    'version': version,
+    'kind': kind.name,
+    'action': action.name,
+    'title': title,
+    'start': start?.toIso8601String(),
+    'end': end?.toIso8601String(),
+    'allDay': allDay,
+    'location': location,
+    'url': url,
+    'evidence': evidence,
+    'sender': sender,
+    'receivedAt': receivedAt.toIso8601String(),
+    'missing': missing,
+    'status': status.name,
+    'targetRef': targetRef,
+    if (sample) 'sample': true,
+  };
 
   static T _enum<T extends Enum>(List<T> values, Object? name, T fallback) =>
       values.firstWhere((v) => v.name == name, orElse: () => fallback);
 
-  factory ScheduleSuggestion.fromJson(Map<String, dynamic> j) => ScheduleSuggestion(
-        id: j['id'] as String,
-        accountKey: j['accountKey'] as String? ?? '',
-        messageId: j['messageId'] as String? ?? '',
-        entityKey: j['entityKey'] as String? ?? '',
-        version: j['version'] as int? ?? 1,
-        kind: _enum(SuggestionKind.values, j['kind'], SuggestionKind.event),
-        action: _enum(SuggestionAction.values, j['action'], SuggestionAction.add),
-        title: j['title'] as String? ?? '',
-        start: DateTime.tryParse(j['start'] as String? ?? ''),
-        end: DateTime.tryParse(j['end'] as String? ?? ''),
-        allDay: j['allDay'] as bool? ?? false,
-        location: j['location'] as String? ?? '',
-        url: j['url'] as String? ?? '',
-        evidence: j['evidence'] as String? ?? '',
-        sender: j['sender'] as String? ?? '',
-        receivedAt: DateTime.tryParse(j['receivedAt'] as String? ?? '') ?? DateTime(2000),
-        missing: [for (final m in (j['missing'] as List? ?? const [])) '$m'],
-        status: _enum(SuggestionStatus.values, j['status'], SuggestionStatus.pending),
-        targetRef: j['targetRef'] as String?,
-        sample: j['sample'] as bool? ?? false,
-      );
+  factory ScheduleSuggestion.fromJson(
+    Map<String, dynamic> j,
+  ) => ScheduleSuggestion(
+    rulesVersion: j['rulesVersion'] as int? ?? 0,
+    id: j['id'] as String,
+    accountKey: j['accountKey'] as String? ?? '',
+    messageId: j['messageId'] as String? ?? '',
+    entityKey: j['entityKey'] as String? ?? '',
+    version: j['version'] as int? ?? 1,
+    kind: _enum(SuggestionKind.values, j['kind'], SuggestionKind.event),
+    action: _enum(SuggestionAction.values, j['action'], SuggestionAction.add),
+    title: j['title'] as String? ?? '',
+    start: DateTime.tryParse(j['start'] as String? ?? ''),
+    end: DateTime.tryParse(j['end'] as String? ?? ''),
+    allDay: j['allDay'] as bool? ?? false,
+    location: j['location'] as String? ?? '',
+    url: j['url'] as String? ?? '',
+    evidence: j['evidence'] as String? ?? '',
+    sender: j['sender'] as String? ?? '',
+    receivedAt:
+        DateTime.tryParse(j['receivedAt'] as String? ?? '') ?? DateTime(2000),
+    missing: [for (final m in (j['missing'] as List? ?? const [])) '$m'],
+    status: _enum(
+      SuggestionStatus.values,
+      j['status'],
+      SuggestionStatus.pending,
+    ),
+    targetRef: j['targetRef'] as String?,
+    sample: j['sample'] as bool? ?? false,
+  );
 }
 
 // 💡 予約（entityKey）と、登録した予定・シフトの対応。
@@ -151,20 +166,20 @@ class MailEntityLink {
   });
 
   Map<String, dynamic> toJson() => {
-        'entityKey': entityKey,
-        'accountKey': accountKey,
-        'targetRef': targetRef,
-        'approvedVersion': approvedVersion,
-        'removed': removed,
-      };
+    'entityKey': entityKey,
+    'accountKey': accountKey,
+    'targetRef': targetRef,
+    'approvedVersion': approvedVersion,
+    'removed': removed,
+  };
 
   factory MailEntityLink.fromJson(Map<String, dynamic> j) => MailEntityLink(
-        entityKey: j['entityKey'] as String? ?? '',
-        accountKey: j['accountKey'] as String? ?? '',
-        targetRef: j['targetRef'] as String? ?? '',
-        approvedVersion: j['approvedVersion'] as int? ?? 1,
-        removed: j['removed'] as bool? ?? false,
-      );
+    entityKey: j['entityKey'] as String? ?? '',
+    accountKey: j['accountKey'] as String? ?? '',
+    targetRef: j['targetRef'] as String? ?? '',
+    approvedVersion: j['approvedVersion'] as int? ?? 1,
+    removed: j['removed'] as bool? ?? false,
+  );
 }
 
 // 💡 登録先のIDは予約の安定IDから決める（同じ予約を何度承認しても同じ予定・シフトになる）。
@@ -182,7 +197,11 @@ String mailTargetId(String accountKey, String entityKey) {
 // 💡 見本の提案（架空のデータ）。Gmail・AIにつなぐ前に、確認画面を端末で試すためのもの。
 //   ⚠️ 実在の人・会社・予約番号を使わない。
 List<ScheduleSuggestion> sampleScheduleSuggestions(DateTime now) {
-  final base = DateTime(now.year, now.month, now.day).add(const Duration(days: 10));
+  final base = DateTime(
+    now.year,
+    now.month,
+    now.day,
+  ).add(const Duration(days: 10));
   DateTime at(int days, int h, [int m = 0]) =>
       DateTime(base.year, base.month, base.day + days, h, m);
   const account = 'sample';

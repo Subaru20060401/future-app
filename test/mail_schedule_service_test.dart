@@ -24,8 +24,8 @@ class FakeSource implements ScheduleMailSource {
   @override
   String? get scheduleAccountKey => account;
   @override
-  Future<({List<ScheduleMail> mails, int failed, bool truncated})> fetchScheduleMails(
-      {required DateTime after}) async {
+  Future<({List<ScheduleMail> mails, int failed, bool truncated})>
+  fetchScheduleMails({required DateTime after}) async {
     calls.add(after);
     return (mails: mails, failed: failed, truncated: truncated);
   }
@@ -34,12 +34,12 @@ class FakeSource implements ScheduleMailSource {
 final now = DateTime(2026, 11, 1, 10);
 
 ScheduleMail confirmMail(String id, String date) => ScheduleMail(
-      id: id,
-      subject: 'ご予約が確定しました',
-      from: 'テスト <noreply@example.com>',
-      receivedAt: now.subtract(const Duration(days: 1)),
-      body: 'ご予約が確定しました。\n日時：$date 14:00〜15:00\n',
-    );
+  id: id,
+  subject: 'ご予約が確定しました',
+  from: 'テスト <noreply@example.com>',
+  receivedAt: now.subtract(const Duration(days: 1)),
+  body: 'ご予約が確定しました。\n日時：$date 14:00〜15:00\n',
+);
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -50,6 +50,33 @@ void main() {
     await a.ready;
     return a;
   }
+
+  test('規則更新後は直近30日を再解析し、完了後だけ新しい版を記録する', () async {
+    final a = await app();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(
+      'local_mail_schedule_scan_at|acct',
+      now.subtract(const Duration(hours: 1)).toIso8601String(),
+    );
+    await prefs.setInt('local_mail_schedule_rules|acct', 2);
+    final src = FakeSource()..failed = 1;
+    await scanScheduleMails(a, source: src, now: now);
+    expect(src.calls.last, now.subtract(kFirstScanWindow));
+    expect(prefs.getInt('local_mail_schedule_rules|acct'), 2);
+    src.failed = 0;
+    await scanScheduleMails(a, source: src, now: now);
+    expect(src.calls.last, now.subtract(kFirstScanWindow));
+    expect(
+      prefs.getInt('local_mail_schedule_rules|acct'),
+      kScheduleRulesVersion,
+    );
+    await scanScheduleMails(
+      a,
+      source: src,
+      now: now.add(const Duration(hours: 1)),
+    );
+    expect(src.calls.last, now.subtract(kScanOverlap));
+  });
 
   test('初回は過去30日。全部取れたら、次は前回の確認から24時間重ねて取る', () async {
     final a = await app();
@@ -78,8 +105,15 @@ void main() {
 
     // 次もまた過去30日から
     src.failed = 0;
-    await scanScheduleMails(a, source: src, now: now.add(const Duration(hours: 1)));
-    expect(src.calls.last, now.add(const Duration(hours: 1)).subtract(const Duration(days: 30)));
+    await scanScheduleMails(
+      a,
+      source: src,
+      now: now.add(const Duration(hours: 1)),
+    );
+    expect(
+      src.calls.last,
+      now.add(const Duration(hours: 1)).subtract(const Duration(days: 30)),
+    );
   });
 
   test('件数の上限で取り切れなかったときも進めない', () async {
@@ -112,23 +146,46 @@ void main() {
     final src = FakeSource()..mails = [confirmMail('m1', '2026年11月12日(木)')];
     await scanScheduleMails(a, source: src, now: now);
     a.rejectScheduleSuggestion(a.scheduleSuggestions.single.id);
-    await scanScheduleMails(a, source: src, now: now.add(const Duration(days: 1)));
+    await scanScheduleMails(
+      a,
+      source: src,
+      now: now.add(const Duration(days: 1)),
+    );
     expect(a.pendingScheduleSuggestions, isEmpty);
   });
 
   test('処理済みの履歴は予定の終わりから90日で消す。確認待ちは消さない', () async {
     final a = await app();
     a.addScheduleSuggestions([
-      ScheduleSuggestion(id: 'done', accountKey: 'acct', messageId: 'x', entityKey: 'E1',
-          kind: SuggestionKind.event, title: '終わった予定',
-          start: DateTime(2026, 7, 1, 10), end: DateTime(2026, 7, 1, 11),
-          receivedAt: DateTime(2026, 6, 20), status: SuggestionStatus.rejected),
-      ScheduleSuggestion(id: 'open', accountKey: 'acct', messageId: 'y', entityKey: 'E2',
-          kind: SuggestionKind.event, title: '確認待ち',
-          start: DateTime(2026, 7, 1, 10), end: DateTime(2026, 7, 1, 11),
-          receivedAt: DateTime(2026, 6, 20)),
+      ScheduleSuggestion(
+        id: 'done',
+        accountKey: 'acct',
+        messageId: 'x',
+        entityKey: 'E1',
+        kind: SuggestionKind.event,
+        title: '終わった予定',
+        start: DateTime(2026, 7, 1, 10),
+        end: DateTime(2026, 7, 1, 11),
+        receivedAt: DateTime(2026, 6, 20),
+        status: SuggestionStatus.rejected,
+      ),
+      ScheduleSuggestion(
+        id: 'open',
+        accountKey: 'acct',
+        messageId: 'y',
+        entityKey: 'E2',
+        kind: SuggestionKind.event,
+        title: '確認待ち',
+        start: DateTime(2026, 7, 1, 10),
+        end: DateTime(2026, 7, 1, 11),
+        receivedAt: DateTime(2026, 6, 20),
+      ),
     ]);
-    expect(a.pruneScheduleSuggestions(DateTime(2026, 9, 1)), 0, reason: 'まだ90日たっていない');
+    expect(
+      a.pruneScheduleSuggestions(DateTime(2026, 9, 1)),
+      0,
+      reason: 'まだ90日たっていない',
+    );
     expect(a.pruneScheduleSuggestions(DateTime(2026, 10, 1)), 1);
     expect(a.scheduleSuggestions.map((s) => s.id), ['open']);
   });
@@ -136,16 +193,26 @@ void main() {
   test('前日の案内は同じ予約として、新しい提案にしない（実メールの書き方を架空化）', () async {
     final a = await app();
     ScheduleMail m(String id, String subject, String body) => ScheduleMail(
-        id: id, subject: subject, from: 'テスト採用 <saiyo@example.com>',
-        receivedAt: now.subtract(const Duration(days: 1)), body: body);
+      id: id,
+      subject: subject,
+      from: 'テスト採用 <saiyo@example.com>',
+      receivedAt: now.subtract(const Duration(days: 1)),
+      body: body,
+    );
     final src = FakeSource()
       ..mails = [
-        m('b1', 'ご予約ありがとうございました',
-            'この度は会社説明会にご予約いただき、誠にありがとうございます。\n'
-                'イベント：会社説明会\n日　時 ：2026/11/14(土) 14:30\n'),
-        m('b2', '明日の会社説明会のご案内',
-            'ご予約いただいた会社説明会の前日となりましたので、ご案内いたします。\n'
-                'イベント：会社説明会\n日　時 ：2026年11月14日(土) 14時30分\n'),
+        m(
+          'b1',
+          'ご予約ありがとうございました',
+          'この度は会社説明会にご予約いただき、誠にありがとうございます。\n'
+              'イベント：会社説明会\n日　時 ：2026/11/14(土) 14:30\n',
+        ),
+        m(
+          'b2',
+          '明日の会社説明会のご案内',
+          'ご予約いただいた会社説明会の前日となりましたので、ご案内いたします。\n'
+              'イベント：会社説明会\n日　時 ：2026年11月14日(土) 14時30分\n',
+        ),
       ];
     await scanScheduleMails(a, source: src, now: now);
     expect(a.pendingScheduleSuggestions, hasLength(1));
@@ -154,18 +221,33 @@ void main() {
   test('まだ登録していない予約の取消が来たら、その提案を下げる', () async {
     final a = await app();
     ScheduleMail m(String id, String subject, String body) => ScheduleMail(
-        id: id, subject: subject, from: 'テスト採用 <saiyo@example.com>',
-        receivedAt: now.subtract(const Duration(days: 1)), body: body);
+      id: id,
+      subject: subject,
+      from: 'テスト採用 <saiyo@example.com>',
+      receivedAt: now.subtract(const Duration(days: 1)),
+      body: body,
+    );
     final src = FakeSource()
       ..mails = [
-        m('c1', 'ご予約ありがとうございました',
-            'ご予約いただき、ありがとうございます。\n日　時 ：2026/11/20(金) 10:30\n'),
-        m('c2', 'キャンセル完了のご連絡',
-            '日　時 ：2026/11/20(金) 10:30\n'
-                '上記日時の予約キャンセルが、完了いたしましたのでご連絡いたします。\n'),
+        m(
+          'c1',
+          'ご予約ありがとうございました',
+          'ご予約いただき、ありがとうございます。\n日　時 ：2026/11/20(金) 10:30\n',
+        ),
+        m(
+          'c2',
+          'キャンセル完了のご連絡',
+          '日　時 ：2026/11/20(金) 10:30\n'
+              '上記日時の予約キャンセルが、完了いたしましたのでご連絡いたします。\n',
+        ),
       ];
     await scanScheduleMails(a, source: src, now: now);
     expect(a.pendingScheduleSuggestions, isEmpty);
-    expect(a.scheduleSuggestions.single.status, SuggestionStatus.superseded);
+    expect(
+      a.scheduleSuggestions.every(
+        (s) => s.status == SuggestionStatus.superseded,
+      ),
+      isTrue,
+    );
   });
 }

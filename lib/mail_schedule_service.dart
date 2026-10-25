@@ -13,8 +13,8 @@ import 'mail_schedule_rules.dart';
 abstract interface class ScheduleMailSource {
   Future<GoogleAccessState> ensureAccess();
   String? get scheduleAccountKey;
-  Future<({List<ScheduleMail> mails, int failed, bool truncated})> fetchScheduleMails(
-      {required DateTime after});
+  Future<({List<ScheduleMail> mails, int failed, bool truncated})>
+  fetchScheduleMails({required DateTime after});
 }
 
 class _GmailScheduleSource implements ScheduleMailSource {
@@ -24,8 +24,8 @@ class _GmailScheduleSource implements ScheduleMailSource {
   @override
   String? get scheduleAccountKey => g.scheduleAccountKey;
   @override
-  Future<({List<ScheduleMail> mails, int failed, bool truncated})> fetchScheduleMails(
-          {required DateTime after}) =>
+  Future<({List<ScheduleMail> mails, int failed, bool truncated})>
+  fetchScheduleMails({required DateTime after}) =>
       g.withFreshToken(() => g.fetchScheduleMails(after: after));
 }
 
@@ -58,6 +58,7 @@ class MailScanResult {
 // 💡 どこまで確認したか（この端末だけの記録。書き出し・ドライブ同期には入れない）。
 //   アカウントごとに分ける（別のアカウントに切り替えたら、そのアカウントは初回の扱い）。
 const String _kScanAt = 'local_mail_schedule_scan_at';
+const String _kScanRules = 'local_mail_schedule_rules';
 const Duration kFirstScanWindow = Duration(days: 30); // 初回は過去30日
 const Duration kScanOverlap = Duration(hours: 24); // 次からは前回から24時間重ねて取る
 
@@ -69,13 +70,23 @@ Future<DateTime?> lastScheduleScanAt(String accountKey) async {
 Future<MailScanResult>? _running;
 
 // 同時に押されても1回にまとめる
-Future<MailScanResult> scanScheduleMails(AppState app,
-    {ScheduleMailSource? source, DateTime? now}) {
-  return _running ??= _scan(app, source ?? _GmailScheduleSource(), now ?? DateTime.now())
-      .whenComplete(() => _running = null);
+Future<MailScanResult> scanScheduleMails(
+  AppState app, {
+  ScheduleMailSource? source,
+  DateTime? now,
+}) {
+  return _running ??= _scan(
+    app,
+    source ?? _GmailScheduleSource(),
+    now ?? DateTime.now(),
+  ).whenComplete(() => _running = null);
 }
 
-Future<MailScanResult> _scan(AppState app, ScheduleMailSource src, DateTime now) async {
+Future<MailScanResult> _scan(
+  AppState app,
+  ScheduleMailSource src,
+  DateTime now,
+) async {
   final access = await src.ensureAccess();
   if (access == GoogleAccessState.redirecting) {
     return const MailScanResult(error: 'Google連携を復帰しています…もう一度押してください');
@@ -89,7 +100,12 @@ Future<MailScanResult> _scan(AppState app, ScheduleMailSource src, DateTime now)
     return const MailScanResult(error: 'Googleアカウントが分かりません。連携し直してください');
   }
   final last = await lastScheduleScanAt(account);
-  final after = last != null ? last.subtract(kScanOverlap) : now.subtract(kFirstScanWindow);
+  final prefs = await SharedPreferences.getInstance();
+  final currentRules =
+      prefs.getInt('$_kScanRules|$account') == kScheduleRulesVersion;
+  final after = currentRules && last != null
+      ? last.subtract(kScanOverlap)
+      : now.subtract(kFirstScanWindow);
 
   final ({List<ScheduleMail> mails, int failed, bool truncated}) got;
   try {
@@ -104,11 +120,17 @@ Future<MailScanResult> _scan(AppState app, ScheduleMailSource src, DateTime now)
     for (final s in readScheduleMail(m, accountKey: account).suggestions) {
       // 終わった予定の「追加」は出さない（変更・取消は、登録済みに当たりうるので出す）
       final endsAt = s.end ?? s.start;
-      if (s.action == SuggestionAction.add && endsAt != null && endsAt.isBefore(today)) continue;
+      if (s.action == SuggestionAction.add &&
+          endsAt != null &&
+          endsAt.isBefore(today)) {
+        continue;
+      }
       found.add(s);
     }
   }
-  final added = found.isEmpty ? 0 : app.addScheduleSuggestions(found);
+  app.retireOldScheduleSuggestions();
+  app.reconcileScheduleScan(account, got.mails.map((m) => m.id).toSet(), found);
+  final added = app.addScheduleSuggestions(found);
   app.pruneScheduleSuggestions(now);
 
   final result = MailScanResult(
@@ -118,8 +140,8 @@ Future<MailScanResult> _scan(AppState app, ScheduleMailSource src, DateTime now)
     truncated: got.truncated,
   );
   if (result.complete) {
-    final prefs = await SharedPreferences.getInstance();
     await prefs.setString('$_kScanAt|$account', now.toIso8601String());
+    await prefs.setInt('$_kScanRules|$account', kScheduleRulesVersion);
   }
   return result;
 }

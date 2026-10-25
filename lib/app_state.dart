@@ -3277,13 +3277,28 @@ class AppState extends ChangeNotifier {
   //   ・本人が消した予約の「追加」は復活させない
   //   戻り値は新しく増えた件数。
   int addScheduleSuggestions(Iterable<ScheduleSuggestion> incoming) {
-    var added = 0;
-    for (final sg in incoming) {
+    final alreadyOpen = scheduleSuggestions.where((s) => s.isOpen).map((s) => s.id).toSet();
+    final ordered = incoming.toList()..sort((a, b) {
+      final byTime = a.receivedAt.compareTo(b.receivedAt);
+      if (byTime != 0) return byTime;
+      return a.action.index.compareTo(b.action.index);
+    });
+    for (final sg in ordered) {
       final link = mailEntityLinks[_linkKey(sg.accountKey, sg.entityKey)];
       if (sg.action == SuggestionAction.add && link != null && link.removed) continue;
       bool sameEntity(ScheduleSuggestion o) =>
           o.id != sg.id && o.accountKey == sg.accountKey && o.entityKey == sg.entityKey;
       if (sg.action == SuggestionAction.add) {
+        // 💡 不要にした同じ予約を、別メールのリマインドで再提案しない。
+        if (scheduleSuggestions.any((o) => sameEntity(o) &&
+            o.action == SuggestionAction.add && o.status == SuggestionStatus.rejected)) {
+          continue;
+        }
+        if (scheduleSuggestions.any((o) => sameEntity(o) &&
+            o.action == SuggestionAction.cancel &&
+            !o.receivedAt.isBefore(sg.receivedAt))) {
+          continue;
+        }
         // 💡 同じ予約の前日案内・リマインドは、新しい提案にしない（登録済み、または確認待ちが既にある）
         if (link != null && !link.removed) continue;
         if (scheduleSuggestions.any((o) =>
@@ -3291,44 +3306,77 @@ class AppState extends ChangeNotifier {
           continue;
         }
       }
-      if (sg.action == SuggestionAction.cancel && link == null) {
-        // 💡 まだ登録していない予約が取り消されたら、その「追加」の提案を下げて終わり
-        //   （取り消す相手が無い取消の提案を出しても、承認できないので）
-        final open = scheduleSuggestions.where((o) =>
-            sameEntity(o) && o.action == SuggestionAction.add && o.isOpen);
-        if (open.isNotEmpty) {
-          for (final o in open) {
+      if (sg.action != SuggestionAction.add && (link == null || link.removed)) {
+        // 💡 取消は照合用の履歴に残す。取り消す相手が無い通知は確認待ちに出さない。
+        if (sg.action == SuggestionAction.cancel) {
+          for (final o in scheduleSuggestions.where((o) =>
+              sameEntity(o) && o.action == SuggestionAction.add &&
+              o.isOpen && !o.receivedAt.isAfter(sg.receivedAt))) {
             o.status = SuggestionStatus.superseded;
           }
+          sg.status = SuggestionStatus.superseded;
+        } else {
           continue;
         }
       }
       final i = scheduleSuggestions.indexWhere((e) => e.id == sg.id);
       if (i < 0) {
         scheduleSuggestions.add(sg);
-        added++;
         continue;
       }
       final old = scheduleSuggestions[i];
-      if (!old.isOpen) continue;
+      if (!old.isOpen &&
+          !(old.status == SuggestionStatus.superseded &&
+              old.rulesVersion < sg.rulesVersion)) {
+        continue;
+      }
       sg
         ..version = old.version + 1
-        ..status = old.status;
+        ..status = old.isOpen ? old.status : sg.status;
       scheduleSuggestions[i] = sg;
     }
     saveData();
     notifyListeners();
-    return added;
+    // ⚠️ 同じ取得内で取り消された候補を「見つかった件数」に含めない。
+    return scheduleSuggestions.where((s) => s.isOpen && !alreadyOpen.contains(s.id)).length;
+  }
+
+  int retireOldScheduleSuggestions() {
+    var count = 0;
+    for (final s in scheduleSuggestions) {
+      if (!s.sample && s.status == SuggestionStatus.pending &&
+          s.rulesVersion < kScheduleRulesVersion) {
+        s.status = SuggestionStatus.superseded;
+        count++;
+      }
+    }
+    return count;
+  }
+
+  // 💡 再解析で対象外になったメールの未操作候補も下げる。
+  void reconcileScheduleScan(String account, Set<String> messageIds,
+      List<ScheduleSuggestion> found) {
+    final valid = found.map((s) => s.id).toSet();
+    for (final s in scheduleSuggestions) {
+      if (!s.sample && s.accountKey == account &&
+          s.status == SuggestionStatus.pending &&
+          messageIds.contains(s.messageId) && !valid.contains(s.id)) {
+        s.status = SuggestionStatus.superseded;
+      }
+    }
   }
 
   void holdScheduleSuggestion(String id) => _setSuggestionStatus(id, SuggestionStatus.held);
   void rejectScheduleSuggestion(String id) =>
       _setSuggestionStatus(id, SuggestionStatus.rejected);
 
-  // 保留から確認待ちへ戻す
+  // 💡 本人の操作で保留・不要から確認待ちへ戻す。登録済みや取消履歴は戻さない。
   void reopenScheduleSuggestion(String id) {
     final s = scheduleSuggestions.where((e) => e.id == id).firstOrNull;
-    if (s == null || s.status != SuggestionStatus.held) return;
+    if (s == null || (s.status != SuggestionStatus.held &&
+        s.status != SuggestionStatus.rejected)) {
+      return;
+    }
     s.status = SuggestionStatus.pending;
     saveData();
     notifyListeners();
@@ -5651,6 +5699,7 @@ class AppState extends ChangeNotifier {
         .map((e) => ScheduleSuggestion.fromJson(e))
         .toList();
     _setMailEntityLinks(map['mailEntityLinks'] as List? ?? const []);
+    retireOldScheduleSuggestions();
     paidPlannedExpenseKeys
       ..clear()
       ..addAll((map['paidPlannedExpenseKeys'] as List? ?? []).map((e) => '$e'));
@@ -6081,7 +6130,7 @@ class AppState extends ChangeNotifier {
     driveKnownRemoteAt = readAt('saved_drive_remote_at');
 
     // 💡 「三井住友」は「三井OLIVE」に統合
-    var migrated = false;
+    var migrated = retireOldScheduleSuggestions() > 0;
     for (final p in payments) {
       if (p.cardName == '三井住友') {
         p.cardName = '三井OLIVE';

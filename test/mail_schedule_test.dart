@@ -22,21 +22,20 @@ ScheduleSuggestion sg({
   DateTime? start,
   DateTime? end,
   String title = 'テスト説明会',
-}) =>
-    ScheduleSuggestion(
-      id: id,
-      accountKey: 'acct',
-      messageId: id.split('#').first,
-      entityKey: entity,
-      kind: kind,
-      action: action,
-      title: title,
-      start: start ?? DateTime(2026, 11, 12, 14),
-      end: end ?? DateTime(2026, 11, 12, 15, 30),
-      evidence: '「ご予約が確定しました」',
-      sender: 'テスト株式会社',
-      receivedAt: DateTime(2026, 11, 1, 9),
-    );
+}) => ScheduleSuggestion(
+  id: id,
+  accountKey: 'acct',
+  messageId: id.split('#').first,
+  entityKey: entity,
+  kind: kind,
+  action: action,
+  title: title,
+  start: start ?? DateTime(2026, 11, 12, 14),
+  end: end ?? DateTime(2026, 11, 12, 15, 30),
+  evidence: '「ご予約が確定しました」',
+  sender: 'テスト株式会社',
+  receivedAt: DateTime(2026, 11, 1, 9),
+);
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -45,12 +44,14 @@ void main() {
   Future<AppState> app() async {
     final a = AppState();
     await a.ready;
-    a.workplaces.add(Workplace(
-      id: 'w1',
-      name: 'テスト派遣',
-      paydayMonthOffset: 1,
-      wagePeriods: [WagePeriod(hourlyWage: 1200, transportPerDay: 500)],
-    ));
+    a.workplaces.add(
+      Workplace(
+        id: 'w1',
+        name: 'テスト派遣',
+        paydayMonthOffset: 1,
+        wagePeriods: [WagePeriod(hourlyWage: 1200, transportPerDay: 500)],
+      ),
+    );
     return a;
   }
 
@@ -63,13 +64,21 @@ void main() {
       final before = a.incomeArrivingIn(DateTime(2026, 12));
       a.addScheduleSuggestions([
         sg(),
-        sg(id: 'a:m2#G1', entity: 'G1', kind: SuggestionKind.shift,
-            start: DateTime(2026, 11, 20, 9), end: DateTime(2026, 11, 20, 17)),
+        sg(
+          id: 'a:m2#G1',
+          entity: 'G1',
+          kind: SuggestionKind.shift,
+          start: DateTime(2026, 11, 20, 9),
+          end: DateTime(2026, 11, 20, 17),
+        ),
       ]);
       expect(eventCount(a), 0);
       expect(shiftCount(a), 0);
       expect(a.incomeArrivingIn(DateTime(2026, 12)), before);
-      expect(a.homeNotices.where((n) => n.kind == HomeNoticeKind.scheduleSuggestion), hasLength(2));
+      expect(
+        a.homeNotices.where((n) => n.kind == HomeNoticeKind.scheduleSuggestion),
+        hasLength(2),
+      );
     });
 
     test('同じ提案を何度受け取っても1件', () async {
@@ -77,7 +86,11 @@ void main() {
       expect(a.addScheduleSuggestions([sg()]), 1);
       expect(a.addScheduleSuggestions([sg(title: 'テスト説明会（会場変更前）')]), 0);
       expect(a.scheduleSuggestions, hasLength(1));
-      expect(a.scheduleSuggestions.single.version, 2, reason: '中身が新しくなったら版を上げる');
+      expect(
+        a.scheduleSuggestions.single.version,
+        2,
+        reason: '中身が新しくなったら版を上げる',
+      );
     });
   });
 
@@ -92,7 +105,10 @@ void main() {
       expect(e.title, 'テスト説明会');
       expect(e.memo, contains('テスト株式会社'));
       expect(a.scheduleSuggestions.single.status, SuggestionStatus.approved);
-      expect(a.homeNotices.where((n) => n.kind == HomeNoticeKind.scheduleSuggestion), isEmpty);
+      expect(
+        a.homeNotices.where((n) => n.kind == HomeNoticeKind.scheduleSuggestion),
+        isEmpty,
+      );
     });
 
     test('承認をやり直しても（途中で落ちたときなど）二重にならない', () async {
@@ -121,8 +137,14 @@ void main() {
       a.addScheduleSuggestions([s]);
       expect(a.approveScheduleSuggestion(s.id), contains('終了時刻'));
       expect(eventCount(a), 0);
-      a.editScheduleSuggestion(s.id,
-          title: s.title, start: s.start, end: null, allDay: true, location: '');
+      a.editScheduleSuggestion(
+        s.id,
+        title: s.title,
+        start: s.start,
+        end: null,
+        allDay: true,
+        location: '',
+      );
       expect(a.approveScheduleSuggestion(s.id), isNull, reason: '終日にすれば登録できる');
     });
   });
@@ -130,22 +152,37 @@ void main() {
   group('シフトとして登録', () {
     final start = DateTime(2026, 11, 20, 9);
     final end = DateTime(2026, 11, 20, 17);
-    ScheduleSuggestion gig() =>
-        sg(id: 'a:m2#G1', entity: 'G1', kind: SuggestionKind.shift, start: start, end: end,
-            title: '単発：設営');
+    ScheduleSuggestion gig() => sg(
+      id: 'a:m2#G1',
+      entity: 'G1',
+      kind: SuggestionKind.shift,
+      start: start,
+      end: end,
+      title: '単発：設営',
+    );
 
     test('勤務先と休憩が無いと登録しない（休憩を0分と決めつけない）', () async {
       final a = await app();
       a.addScheduleSuggestions([gig()]);
       expect(a.approveScheduleSuggestion('a:m2#G1'), contains('勤務先'));
-      expect(a.approveScheduleSuggestion('a:m2#G1', workplaceId: 'w1'), contains('休憩'));
+      expect(
+        a.approveScheduleSuggestion('a:m2#G1', workplaceId: 'w1'),
+        contains('休憩'),
+      );
       expect(shiftCount(a), 0);
     });
 
     test('給与は勤務先の設定で計算する', () async {
       final a = await app();
       a.addScheduleSuggestions([gig()]);
-      expect(a.approveScheduleSuggestion('a:m2#G1', workplaceId: 'w1', breakMinutes: 60), isNull);
+      expect(
+        a.approveScheduleSuggestion(
+          'a:m2#G1',
+          workplaceId: 'w1',
+          breakMinutes: 60,
+        ),
+        isNull,
+      );
       final s = a.shifts['2026-11-20']!.single;
       expect(s.id, mailTargetId('acct', 'G1'));
       expect(s.hourlyWage, 1200);
@@ -156,18 +193,34 @@ void main() {
 
     test('勤務時間の変更は同じシフトを動かし、取消はそのシフトだけ消す', () async {
       final a = await app();
-      a.addShift(DateTime(2026, 11, 20),
-          a.buildShiftFromWorkplace(a.workplaces.single, DateTime(2026, 11, 20),
-              DateTime(2026, 11, 20, 18), DateTime(2026, 11, 20, 21)));
+      a.addShift(
+        DateTime(2026, 11, 20),
+        a.buildShiftFromWorkplace(
+          a.workplaces.single,
+          DateTime(2026, 11, 20),
+          DateTime(2026, 11, 20, 18),
+          DateTime(2026, 11, 20, 21),
+        ),
+      );
       a.addScheduleSuggestions([gig()]);
-      a.approveScheduleSuggestion('a:m2#G1', workplaceId: 'w1', breakMinutes: 60);
+      a.approveScheduleSuggestion(
+        'a:m2#G1',
+        workplaceId: 'w1',
+        breakMinutes: 60,
+      );
       final id = mailTargetId('acct', 'G1');
 
       // 日付が変わる変更
       a.addScheduleSuggestions([
-        sg(id: 'a:m3#G1', entity: 'G1', kind: SuggestionKind.shift,
-            action: SuggestionAction.change,
-            start: DateTime(2026, 11, 21, 10), end: DateTime(2026, 11, 21, 16), title: '単発：設営'),
+        sg(
+          id: 'a:m3#G1',
+          entity: 'G1',
+          kind: SuggestionKind.shift,
+          action: SuggestionAction.change,
+          start: DateTime(2026, 11, 21, 10),
+          end: DateTime(2026, 11, 21, 16),
+          title: '単発：設営',
+        ),
       ]);
       expect(a.approveScheduleSuggestion('a:m3#G1'), isNull);
       expect(a.shifts['2026-11-20'], hasLength(1), reason: '元からあった自分のシフトは残る');
@@ -177,8 +230,13 @@ void main() {
 
       // 取消
       a.addScheduleSuggestions([
-        sg(id: 'a:m4#G1', entity: 'G1', kind: SuggestionKind.shift,
-            action: SuggestionAction.cancel, title: '単発：設営'),
+        sg(
+          id: 'a:m4#G1',
+          entity: 'G1',
+          kind: SuggestionKind.shift,
+          action: SuggestionAction.cancel,
+          title: '単発：設営',
+        ),
       ]);
       expect(a.approveScheduleSuggestion('a:m4#G1'), isNull);
       expect(a.shifts.containsKey('2026-11-21'), isFalse);
@@ -194,8 +252,9 @@ void main() {
       a.addScheduleSuggestions([
         sg(id: 'a:m9#X', entity: 'X', action: SuggestionAction.cancel),
       ]);
-      expect(a.approveScheduleSuggestion('a:m9#X'), contains('見つかりません'));
-      expect(a.scheduleSuggestions.single.isOpen, isTrue);
+      expect(a.approveScheduleSuggestion('a:m9#X'), contains('処理済み'));
+      expect(a.pendingScheduleSuggestions, isEmpty);
+      expect(a.scheduleSuggestions.single.status, SuggestionStatus.superseded);
     });
   });
 
@@ -204,18 +263,39 @@ void main() {
       final a = await app();
       a.addScheduleSuggestions([sg()]);
       a.holdScheduleSuggestion('a:m1#R1');
-      expect(a.homeNotices.where((n) => n.kind == HomeNoticeKind.scheduleSuggestion), isEmpty);
+      expect(
+        a.homeNotices.where((n) => n.kind == HomeNoticeKind.scheduleSuggestion),
+        isEmpty,
+      );
       a.reopenScheduleSuggestion('a:m1#R1');
-      expect(a.homeNotices.where((n) => n.kind == HomeNoticeKind.scheduleSuggestion), hasLength(1));
+      expect(
+        a.homeNotices.where((n) => n.kind == HomeNoticeKind.scheduleSuggestion),
+        hasLength(1),
+      );
     });
 
     test('取消・変更の提案は、新しい予定の提案より先に出す', () async {
       final a = await app();
+      a.addScheduleSuggestions([sg(id: 'original', entity: 'R5')]);
+      expect(a.approveScheduleSuggestion('original'), isNull);
       a.addScheduleSuggestions([
-        sg(id: 'a:m1#R1', entity: 'R1', start: DateTime(2026, 11, 1, 10), end: DateTime(2026, 11, 1, 11)),
-        sg(id: 'a:m5#R5', entity: 'R5', action: SuggestionAction.cancel, start: DateTime(2026, 12, 1, 10)),
+        sg(
+          id: 'a:m1#R1',
+          entity: 'R1',
+          start: DateTime(2026, 11, 1, 10),
+          end: DateTime(2026, 11, 1, 11),
+        ),
+        sg(
+          id: 'a:m5#R5',
+          entity: 'R5',
+          action: SuggestionAction.cancel,
+          start: DateTime(2026, 12, 1, 10),
+        ),
       ]);
-      expect(a.pendingScheduleSuggestions.first.action, SuggestionAction.cancel);
+      expect(
+        a.pendingScheduleSuggestions.first.action,
+        SuggestionAction.cancel,
+      );
     });
 
     test('提案と対応関係は、書き出し→取り込みでも残る（置き換え）', () async {
@@ -226,7 +306,10 @@ void main() {
       final b = await app();
       b.importJson(json);
       expect(b.scheduleSuggestions.single.status, SuggestionStatus.approved);
-      expect(b.mailEntityLinks.values.single.targetRef, 'event:${mailTargetId('acct', 'R1')}');
+      expect(
+        b.mailEntityLinks.values.single.targetRef,
+        'event:${mailTargetId('acct', 'R1')}',
+      );
       // 同じ予約の再通知は、取り込んだ先でも再提案しない
       b.addScheduleSuggestions([sg()]);
       expect(b.scheduleSuggestions.where((s) => s.isOpen), isEmpty);
@@ -254,15 +337,17 @@ void main() {
               'hourlyWage': 1100,
               'start': '2026-11-03T09:00:00.000',
               'end': '2026-11-03T13:00:00.000',
-            }
-          ]
+            },
+          ],
         }),
       });
       final a = AppState();
       await a.ready;
       final id = a.shifts['2026-11-03']!.single.id;
       expect(id, startsWith('sh-'));
-      await Future<void>.delayed(const Duration(milliseconds: 50)); // 自己修復の保存を待つ
+      await Future<void>.delayed(
+        const Duration(milliseconds: 50),
+      ); // 自己修復の保存を待つ
       final b = AppState();
       await b.ready;
       expect(b.shifts['2026-11-03']!.single.id, id);
@@ -271,13 +356,23 @@ void main() {
     test('シフトを編集してもIDは変わらない', () async {
       final a = await app();
       final s = ShiftData(
-          workplace: 'カフェ', hourlyWage: 1100,
-          start: DateTime(2026, 11, 3, 9), end: DateTime(2026, 11, 3, 13));
+        workplace: 'カフェ',
+        hourlyWage: 1100,
+        start: DateTime(2026, 11, 3, 9),
+        end: DateTime(2026, 11, 3, 13),
+      );
       a.addShift(DateTime(2026, 11, 3), s);
       final id = s.id;
-      a.updateShift('2026-11-03', 0, ShiftData(
-          workplace: 'カフェ', hourlyWage: 1200,
-          start: DateTime(2026, 11, 3, 10), end: DateTime(2026, 11, 3, 14)));
+      a.updateShift(
+        '2026-11-03',
+        0,
+        ShiftData(
+          workplace: 'カフェ',
+          hourlyWage: 1200,
+          start: DateTime(2026, 11, 3, 10),
+          end: DateTime(2026, 11, 3, 14),
+        ),
+      );
       expect(a.shifts['2026-11-03']!.single.id, id);
     });
   });
@@ -290,17 +385,21 @@ void main() {
     addTearDown(t.view.resetDevicePixelRatio);
     final a = await app();
     a.addScheduleSuggestions(sampleScheduleSuggestions(DateTime(2026, 11, 1)));
-    final gigSg = a.scheduleSuggestions.firstWhere((s) => s.kind == SuggestionKind.shift);
-    await t.pumpWidget(MaterialApp(
-      home: Builder(
-        builder: (context) => Scaffold(
-          body: ElevatedButton(
-            onPressed: () => showSuggestionReviewSheet(context, a, gigSg),
-            child: const Text('開く'),
+    final gigSg = a.scheduleSuggestions.firstWhere(
+      (s) => s.kind == SuggestionKind.shift,
+    );
+    await t.pumpWidget(
+      MaterialApp(
+        home: Builder(
+          builder: (context) => Scaffold(
+            body: ElevatedButton(
+              onPressed: () => showSuggestionReviewSheet(context, a, gigSg),
+              child: const Text('開く'),
+            ),
           ),
         ),
       ),
-    ));
+    );
     await t.tap(find.text('開く'));
     await t.pumpAndSettle();
     expect(t.takeException(), isNull, reason: '320pxでもはみ出さない');
