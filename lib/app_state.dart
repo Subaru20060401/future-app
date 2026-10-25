@@ -3281,6 +3281,28 @@ class AppState extends ChangeNotifier {
     for (final sg in incoming) {
       final link = mailEntityLinks[_linkKey(sg.accountKey, sg.entityKey)];
       if (sg.action == SuggestionAction.add && link != null && link.removed) continue;
+      bool sameEntity(ScheduleSuggestion o) =>
+          o.id != sg.id && o.accountKey == sg.accountKey && o.entityKey == sg.entityKey;
+      if (sg.action == SuggestionAction.add) {
+        // 💡 同じ予約の前日案内・リマインドは、新しい提案にしない（登録済み、または確認待ちが既にある）
+        if (link != null && !link.removed) continue;
+        if (scheduleSuggestions.any((o) =>
+            sameEntity(o) && o.action == SuggestionAction.add && o.isOpen)) {
+          continue;
+        }
+      }
+      if (sg.action == SuggestionAction.cancel && link == null) {
+        // 💡 まだ登録していない予約が取り消されたら、その「追加」の提案を下げて終わり
+        //   （取り消す相手が無い取消の提案を出しても、承認できないので）
+        final open = scheduleSuggestions.where((o) =>
+            sameEntity(o) && o.action == SuggestionAction.add && o.isOpen);
+        if (open.isNotEmpty) {
+          for (final o in open) {
+            o.status = SuggestionStatus.superseded;
+          }
+          continue;
+        }
+      }
       final i = scheduleSuggestions.indexWhere((e) => e.id == sg.id);
       if (i < 0) {
         scheduleSuggestions.add(sg);

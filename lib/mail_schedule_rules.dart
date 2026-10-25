@@ -7,7 +7,7 @@
 import 'mail_schedule_models.dart';
 
 // 規則の版。読み方を変えたら上げる（どの規則で作った提案か分かるように）
-const int kScheduleRulesVersion = 1;
+const int kScheduleRulesVersion = 2;
 
 // 端末で読むメール1通ぶん（Gmailから取ったもの、またはテストの架空メール）
 class ScheduleMail {
@@ -82,13 +82,14 @@ String _dropQuoted(String body) {
 }
 
 // ───── 種類の判定 ─────
-final _payment = RegExp(r'カード利用|ご利用金額|ご請求|引落|引き落とし|振込入金|入金のお知らせ|お支払金額');
+final _payment = RegExp(
+    r'カード利用|ご利用金額|ご請求|引落|引き落とし|振込入金|入金のお知らせ|お支払金額|支払金額|決済|支払い?を受け付け|売上');
 final _promoSubject = RegExp(r'募集|キャンペーン|セール|クーポン|メルマガ|おすすめ|新着求人|プレゼント|お得');
 final _cancel = RegExp(r'(キャンセル|取り?消し|取消)(が完了|を承り|いたしました|されました|のお知らせ|となりました|完了)|開催中止|中止(のお知らせ|となりました|いたします)|勤務(の)?取り?消し');
 final _change = RegExp(r'(日程|日時|時間|会場|場所|勤務時間|集合時間)(の)?変更(が完了|されました|のお知らせ|となりました|いたしました|しました)|予約(の)?変更(が完了|を承り|しました)');
-final _confirm = RegExp(r'(ご?予約|お?申し?込み?)(が|を)?(確定|完了|承りました)|予約確定|予約完了|(面接|面談|説明会|選考)(の)?(日時|日程)?(が|を)?(確定|決定)|(勤務|お仕事|シフト|就業)(が|の)?(確定|決定)|採用(が)?決定|参加(が)?確定|ご来店をお待ち');
-final _tentative = RegExp(r'受付(いたしました|しました|完了)|受け付けました|抽選|候補日|ご都合|日程調整|ご回答|仮予約|キャンセル待ち');
-final _remind = RegExp(r'リマインド|前日のお知らせ|明日は|まもなく|予定のお知らせ');
+final _confirm = RegExp(r'(ご?予約|お?申し?込み?)(が|を)?(確定|完了|承りました)|予約確定|予約完了|予約受付完了|ご予約(を)?いただ(き|いた)|ご予約ありがとう|お申し?込みいただき|(面接|面談|説明会|選考)(の)?(日時|日程)?(が|を)?(確定|決定)|(勤務|お仕事|シフト|就業)(が|の)?(確定|決定)|採用(が)?決定|参加(が)?確定|ご来店をお待ち');
+final _tentative = RegExp(r'受付(いたしました|しました|完了)|受け付けました|抽選|候補日|ご都合の(良い|よい)|日程調整|ご回答|仮予約|キャンセル待ち');
+final _remind = RegExp(r'リマインド|前日のお知らせ|前日となりました|明日は|明日の|まもなく|予定のお知らせ');
 final _shiftWords = RegExp(r'勤務|お仕事|シフト|単発|派遣|就業|集合時間|集合時刻|バイト|稼働');
 final _english = RegExp(r'\b(reservation|appointment|confirmed|interview)\b', caseSensitive: false);
 
@@ -142,7 +143,10 @@ _When? _readWhen(String text, DateTime received) {
     // 2つ目の時刻は「〜」でつながっているときだけ終了として読む
     if (times.length > 1) {
       final between = rest.substring(times[0].end, times[1].start);
-      if (between.contains('〜') || between.contains('-')) en = toMin(times[1]);
+      // 飛行機の「発 20:45 → 着 22:55」も範囲として読む
+      if (between.contains('〜') || between.contains('-') || between.contains('→')) {
+        en = toMin(times[1]);
+      }
     }
   }
   return _When(day, hadYear, _wd[dm.group(4)], st, en);
@@ -150,15 +154,27 @@ _When? _readWhen(String text, DateTime received) {
 
 // ───── 項目の取り出し ─────
 String? _label(String text, String labels) {
-  final m = RegExp('(?:^|\\n)\\s*[■●・【\\[]?\\s*(?:$labels)\\s*[】\\]]?\\s*[:]?\\s*([^\\n]+)').firstMatch(text);
+  final m = RegExp('(?:^|\\n)\\s*[■●・]?\\s*(?:[【\\[]\\s*(?:$labels)\\s*[】\\]]\\s*[:]?|(?:$labels)\\s*:)\\s*([^\\n]+)')
+      .firstMatch(text);
   final v = m?.group(1)?.trim();
   return (v == null || v.isEmpty) ? null : v;
+}
+
+// 💡「日　時」「会　場」のように字の間に空白を入れたラベルを詰める（実メールで多い）
+String _joinLabelSpaces(String t) {
+  for (final w in const ['日時', '会場', '場所', '内容', '時間', '件名', '勤務', '集合', '開催', '実施']) {
+    // 行の頭（記号の後ろ）にあるラベルだけ詰める（「前日 場所」のような文中は触らない）
+    t = t.replaceAllMapped(RegExp(r'(^|\n|[■●・【\[])(\s*)' + w[0] + r'[ \t]+' + w[1]),
+        (m) => '${m.group(1)}${m.group(2)}$w');
+  }
+  return t;
 }
 
 String _cleanSubject(String s) => _half(s)
     .replaceAll(RegExp(r'^((re|fw|fwd)\s*:\s*)+', caseSensitive: false), '')
     .replaceAll(RegExp(r'【[^】]*】|\[[^\]]*\]'), '')
     .replaceAll(RegExp(r'(のお知らせ|のご案内|のご連絡|について)$'), '')
+    .replaceAll(RegExp(r'(の)?(ご?予約)?(受付)?(完了|確定)$'), '')
     .trim();
 
 String _senderName(String from) {
@@ -191,7 +207,7 @@ String _evidence(String text, RegExpMatch? m) {
 //   accountKey: どのGoogleアカウントのメールか（メールアドレスそのものは入れない）
 ScheduleReadResult readScheduleMail(ScheduleMail mail, {required String accountKey}) {
   final subject = _half(mail.subject);
-  final body = _dropQuoted(_half(mail.body));
+  final body = _joinLabelSpaces(_dropQuoted(_half(mail.body)));
   final text = '$subject\n$body';
 
   // 支払い・入金のメールは既存の明細取り込みに任せる
@@ -236,8 +252,10 @@ ScheduleReadResult readScheduleMail(ScheduleMail mail, {required String accountK
 
   // 日時の行（「日時：」などのラベル行を優先。無ければ本文の最初の日付）
   final whenLines = <String>[];
+  const whenLabels =
+      '(?:変更後の?)?(?:日時|日程|開催日時|開催日|予約日時|ご予約日時|面接日時|面談日時|勤務日時|勤務日|就業日|集合日時|日付|実施日|来店日時|搭乗日|出発日)';
   final lineRe = RegExp(
-      r'(?:^|\n)\s*[■●・【\[]?\s*(?:変更後の?)?(?:日時|日程|開催日時|開催日|予約日時|ご予約日時|面接日時|面談日時|勤務日時|勤務日|就業日|集合日時|日付|実施日|来店日時)\s*[】\]]?\s*[:]?\s*([^\n]+)');
+      '(?:^|\\n)\\s*[■●・]?\\s*(?:[【\\[]\\s*$whenLabels\\s*[】\\]]\\s*:?|$whenLabels\\s*:)\\s*([^\\n]+)');
   for (final m in lineRe.allMatches(body)) {
     whenLines.add(m.group(1)!);
   }
@@ -262,7 +280,7 @@ ScheduleReadResult readScheduleMail(ScheduleMail mail, {required String accountK
     final w = _readWhen(l, mail.receivedAt);
     if (w != null && !whens.any((x) => x.day == w.day && x.startMin == w.startMin)) whens.add(w);
   }
-  if (_tentative.hasMatch(text) && RegExp(r'候補日|ご都合|日程調整').hasMatch(text)) {
+  if (RegExp(r'候補日|日程調整|ご都合の(良い|よい)').hasMatch(text)) {
     // 候補日の中から選ぶメールは、どれか1つに決めつけない
     whens.clear();
     missing.add('候補日から選ぶメールです（日時は決まっていません）');
@@ -275,9 +293,9 @@ ScheduleReadResult readScheduleMail(ScheduleMail mail, {required String accountK
     }
   }
 
-  final title = _label(body, 'イベント名|講座名|説明会名|セミナー名|予約内容|ご予約内容|コース|メニュー|お仕事内容|職種|案件名') ??
+  final title = _label(body, 'イベント名|イベント|講座名|説明会名|セミナー名|予約内容|ご予約内容|コース|メニュー|お仕事内容|職種|案件名') ??
       _cleanSubject(mail.subject);
-  final location = _label(body, '会場|場所|開催場所|勤務地|就業場所|集合場所|住所|店舗') ??
+  final location = _label(body, '会場名|開催場所|実施場所|会場|場所|勤務地|就業場所|集合場所|住所|店舗') ??
       (RegExp(r'オンライン|Zoom|Google Meet|Teams', caseSensitive: false).hasMatch(body) ? 'オンライン' : '');
   final url = _meetingUrl(body);
   final evidence = _evidence(text, cancelM ?? changeM ?? confirmM ?? tentativeM ?? remindM);
@@ -324,9 +342,15 @@ ScheduleReadResult readScheduleMail(ScheduleMail mail, {required String accountK
     if (isShift && action == SuggestionAction.add && _label(body, '休憩|休憩時間') == null) {
       miss.add('休憩時間が書かれていません');
     }
+    // 💡 予約番号が無ければ「送信元＋開始日時」を同じ予約の目印にする。
+    //   確定メール・前日の案内・取消メールが同じ予約だと分かり、提案が二重にならない。
+    //   ⚠️ 日時が変わる「変更」はこの目印では元の予約に当たらない（本人が確認画面で対応する）。
+    String two(int v) => v.toString().padLeft(2, '0');
     final entity = reservationNo != null
         ? '$domain#$reservationNo${whens.length > 1 ? '#$n' : ''}'
-        : 'msg:${mail.id}#$n';
+        : start != null && !allDay
+            ? '$domain#at:${start.year}-${two(start.month)}-${two(start.day)}T${two(start.hour)}:${two(start.minute)}'
+            : 'msg:${mail.id}#$n';
     return ScheduleSuggestion(
       id: '$accountKey:${mail.id}#$n',
       accountKey: accountKey,

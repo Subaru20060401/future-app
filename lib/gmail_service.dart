@@ -909,9 +909,13 @@ class GmailService implements GmailSyncSource {
   static const int kScheduleMailCap = 300; // 1回で読む上限（超えたら「取り切れていない」）
 
   // キーワードで候補を絞る（予約・勤務の確定や変更・取消を含みうるもの）
+  // ⚠️ 本文まで探すと、就活サイトのお知らせなどで30日に約1,900通も当たり、上限（300通）で
+  //   毎回「取り切れていない」になって先へ進めなかった（2026-10-25 本人のGmailで確認）。
+  //   件名だけで探す（同じ期間で約135通）。宣伝タブも除く。
+  //   件名にこれらの言葉が無い確定メールは見つからない（その代わり確実に最後まで確認できる）。
   static const String _scheduleQuery =
-      '{予約 確定 面接 説明会 勤務 シフト お仕事 キャンセル 中止 変更 集合 申込 申し込み 参加 受付}'
-      ' -in:spam -in:trash -in:drafts -in:sent';
+      'subject:{予約 確定 キャンセル 面接 勤務 シフト お仕事 日程 中止 前日 明日}'
+      ' -category:promotions -in:spam -in:trash -in:drafts -in:sent';
 
   // 予定用のアカウントの目印（メールアドレスそのものは保存しない）
   String? get scheduleAccountKey {

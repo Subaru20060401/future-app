@@ -235,6 +235,39 @@ final cases = <(String, ScheduleMail, Expect)>[
   ('英語のメール（未対応）', mail('Your reservation is confirmed', '''
 Your reservation is confirmed for Nov 12, 2:00 PM.
 '''), Expect(count: 0)),
+  // ── 実メールの書き方を架空化して足したもの（2026-10-25 本人のGmailで試し読みして見つけた） ──
+  ('字の間に空白のあるラベル「【日　時】」と「ご予約いただきありがとう」',
+      mail('【サンプル社】会社説明会予約受付完了のお知らせ', '''
+この度は会社説明会にご予約いただきありがとうございます。
+【日　時】2026年 11月 19日(木) 16:00～17:30
+※ご都合が悪くなった場合は、前日までにキャンセルをお願いいたします。
+'''),
+      Expect(start: DateTime(2026, 11, 19, 16), end: DateTime(2026, 11, 19, 17, 30),
+          noMissing: '候補日', title: '会社説明会')),
+  ('「イベント：」「会場名：」の書き方（終了時刻なし）',
+      mail('ご予約ありがとうございました', '''
+この度は＜web会社説明会＞にご予約いただき、誠にありがとうございます。
+イベント：web会社説明会
+日　時 ：2026/11/14(土) 14:30
+会場名：WEB
+もしご都合が悪くなった場合は、マイページよりキャンセル・変更の手続きをお願いいたします。
+'''),
+      Expect(start: DateTime(2026, 11, 14, 14, 30), title: 'web会社説明会', location: 'WEB',
+          missing: '終了時刻', noMissing: '確定していません')),
+  ('飛行機の予約（発 → 着）',
+      mail('サンプル航空 予約完了', '''
+■ご利用便情報
+・2026年12月5日(土) XX 123便 [予約番号：0001]
+那覇 発 9:00 → 羽田 着 11:30
+ご予約ありがとうございました。
+'''),
+      Expect(start: DateTime(2026, 12, 5, 9), end: DateTime(2026, 12, 5, 11, 30))),
+  ('決済サービスの「支払いを受け付けました」は出さない',
+      mail('サンプル決済 - 支払い受付のお知らせ', '''
+下記商品について、サンプル決済での支払いを受け付けました。
+売上はまだ確定していない状態のため、後ほどキャンセルとなることがあります。
+'''),
+      Expect(count: 0)),
   ('引用の中の古い日時は読まない',
       mail('Re: ご予約が確定しました', '''
 ご予約が確定しました。
@@ -247,7 +280,7 @@ Your reservation is confirmed for Nov 12, 2:00 PM.
 ];
 
 void main() {
-  test('評価セットは30件ある', () => expect(cases, hasLength(30)));
+  test('評価セットは30件以上ある', () => expect(cases.length, greaterThanOrEqualTo(30)));
 
   for (final (name, m, e) in cases) {
     test(name, () {
@@ -287,10 +320,14 @@ void main() {
       expect(read(m).suggestions.single.id, read(m).suggestions.single.id);
     });
 
-    test('予約番号が無ければ、別のメールを同じ予約とは決めつけない', () {
+    test('予約番号が無ければ「送信元＋開始日時」で同じ予約とみなす（前日の案内を二重に出さない）', () {
       final a = read(mail('ご予約が確定しました', '日時：2026年11月12日(木) 14:00〜15:30', id: 'x1'));
-      final b = read(mail('ご予約が確定しました', '日時：2026年11月12日(木) 14:00〜15:30', id: 'x2'));
-      expect(a.suggestions.single.entityKey, isNot(b.suggestions.single.entityKey));
+      final b = read(mail('明日の説明会のご案内', 'ご予約いただいた説明会の前日となりました。\n日時：2026年11月12日(木) 14:00〜15:30', id: 'x2'));
+      final c = read(mail('ご予約が確定しました', '日時：2026年11月12日(木) 14:00〜15:30',
+          from: '別の会社 <info@another.example>', id: 'x3'));
+      expect(a.suggestions.single.entityKey, b.suggestions.single.entityKey);
+      expect(a.suggestions.single.entityKey, isNot(c.suggestions.single.entityKey),
+          reason: '送信元が違えば別の予約');
     });
   });
 

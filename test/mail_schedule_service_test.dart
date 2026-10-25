@@ -132,4 +132,40 @@ void main() {
     expect(a.pruneScheduleSuggestions(DateTime(2026, 10, 1)), 1);
     expect(a.scheduleSuggestions.map((s) => s.id), ['open']);
   });
+
+  test('前日の案内は同じ予約として、新しい提案にしない（実メールの書き方を架空化）', () async {
+    final a = await app();
+    ScheduleMail m(String id, String subject, String body) => ScheduleMail(
+        id: id, subject: subject, from: 'テスト採用 <saiyo@example.com>',
+        receivedAt: now.subtract(const Duration(days: 1)), body: body);
+    final src = FakeSource()
+      ..mails = [
+        m('b1', 'ご予約ありがとうございました',
+            'この度は会社説明会にご予約いただき、誠にありがとうございます。\n'
+                'イベント：会社説明会\n日　時 ：2026/11/14(土) 14:30\n'),
+        m('b2', '明日の会社説明会のご案内',
+            'ご予約いただいた会社説明会の前日となりましたので、ご案内いたします。\n'
+                'イベント：会社説明会\n日　時 ：2026年11月14日(土) 14時30分\n'),
+      ];
+    await scanScheduleMails(a, source: src, now: now);
+    expect(a.pendingScheduleSuggestions, hasLength(1));
+  });
+
+  test('まだ登録していない予約の取消が来たら、その提案を下げる', () async {
+    final a = await app();
+    ScheduleMail m(String id, String subject, String body) => ScheduleMail(
+        id: id, subject: subject, from: 'テスト採用 <saiyo@example.com>',
+        receivedAt: now.subtract(const Duration(days: 1)), body: body);
+    final src = FakeSource()
+      ..mails = [
+        m('c1', 'ご予約ありがとうございました',
+            'ご予約いただき、ありがとうございます。\n日　時 ：2026/11/20(金) 10:30\n'),
+        m('c2', 'キャンセル完了のご連絡',
+            '日　時 ：2026/11/20(金) 10:30\n'
+                '上記日時の予約キャンセルが、完了いたしましたのでご連絡いたします。\n'),
+      ];
+    await scanScheduleMails(a, source: src, now: now);
+    expect(a.pendingScheduleSuggestions, isEmpty);
+    expect(a.scheduleSuggestions.single.status, SuggestionStatus.superseded);
+  });
 }

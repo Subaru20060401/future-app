@@ -59,6 +59,7 @@ void main() {
     final r = await http.runWithClient(() => service.fetchScheduleMails(after: after), () => client);
     expect(query, contains('after:${after.millisecondsSinceEpoch ~/ 1000}'));
     expect(query, contains('-in:spam'));
+    expect(query, contains('subject:'));
     expect(r.mails.map((m) => m.id), ['a', 'b'], reason: '受信日時が範囲より前のものは外す');
     expect(RegExp('11月12日').allMatches(r.mails[0].body), hasLength(1), reason: 'テキストとHTMLを二重に読まない');
     expect(r.mails[1].body, contains('日時：11月13日'));
