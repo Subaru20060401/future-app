@@ -14,6 +14,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../app_state.dart';
 import '../gemini_client.dart';
 import '../shift_image_import.dart';
+import '../shift_calendar_ocr.dart';
+import '../ocr_digits.dart';
 import '../widgets/app_sheet.dart';
 
 const int kMaxShiftImageBytes = 8 * 1024 * 1024; // 8MB（実機で様子を見て調整）
@@ -64,6 +66,7 @@ class _ShiftImageImportScreenState extends State<ShiftImageImportScreen> {
   bool _reading = false;
   String? _error;
   ShiftReadResult? _result;
+  bool? _totalMatched; // 画面の「シフト合計時間」と一致したか（端末で読んだとき）
   final _bulkBreak = TextEditingController();
 
   @override
@@ -168,6 +171,43 @@ class _ShiftImageImportScreenState extends State<ShiftImageImportScreen> {
     }
   }
 
+  bool get _readyLocal =>
+      _bytes != null && _workplaceId != null && ocrDigitsAvailable && !_reading;
+
+  // 💡 端末の中で読む（カレンダー形式のシフト画面。AIを使わない・画像を送らない）
+  Future<void> _readLocal() async {
+    if (!_readyLocal) return;
+    setState(() {
+      _reading = true;
+      _error = null;
+    });
+    try {
+      final page = await ocrDigits(_bytes!);
+      final r = parseShiftCalendarOcr(page, year: _month.year, month: _month.month);
+      if (!mounted) return; // 閉じた後に返ってきた結果は使わない
+      if (r.read.candidates.isEmpty) {
+        setState(() => _error = r.read.warnings.isEmpty
+            ? 'シフトが読み取れませんでした'
+            : r.read.warnings.join('\n'));
+        return;
+      }
+      // 画面の日付の並びから月を読み替えたときは、そちらに合わせる（時給の期間もその月で見る）
+      _month = DateTime(r.year, r.month);
+      final app = context.read<AppState>();
+      final w = app.workplaceById(_workplaceId);
+      markDuplicates(r.read.candidates, app.shifts,
+          workplaceName: w?.name ?? '', workplaceId: w?.id);
+      setState(() {
+        _result = r.read;
+        _totalMatched = r.totalMatched;
+      });
+    } catch (e) {
+      if (mounted) setState(() => _error = '読み取りに失敗しました（$e）');
+    } finally {
+      if (mounted) setState(() => _reading = false);
+    }
+  }
+
   void _register() {
     final app = context.read<AppState>();
     final w = app.workplaceById(_workplaceId);
@@ -223,20 +263,11 @@ class _ShiftImageImportScreenState extends State<ShiftImageImportScreen> {
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
-        if (!GeminiClient.instance.hasKey)
-          Card(
-            color: Colors.amber[50],
-            child: ListTile(
-              leading: const Icon(Icons.key, color: Colors.orange),
-              title: const Text('GeminiのAPIキーが必要です'),
-              subtitle: const Text('Google AI Studio で発行したキーを入れてください'),
-              trailing: const Icon(Icons.chevron_right),
-              onTap: () async {
-                await showGeminiSettingsSheet(context);
-                if (mounted) setState(() {});
-              },
-            ),
-          ),
+        const Text(
+          'シフトアプリ（ジョブカンなど）の「確定シフト」のカレンダー画面をスクリーンショットして選んでください。'
+          '画像はこの端末の中で読み取り、どこにも送りません。',
+          style: TextStyle(fontSize: 12, color: Colors.black54),
+        ),
         const SizedBox(height: 8),
         OutlinedButton.icon(
           onPressed: _reading ? null : _pick,
@@ -256,16 +287,6 @@ class _ShiftImageImportScreenState extends State<ShiftImageImportScreen> {
               style: const TextStyle(fontSize: 12, color: Colors.black54)),
         ],
         const SizedBox(height: 16),
-        TextField(
-          controller: _person,
-          decoration: const InputDecoration(
-            labelText: '表の中の自分の名前',
-            helperText: '他の人のシフトと取り違えないための目印です',
-            border: OutlineInputBorder(),
-          ),
-          onChanged: (_) => setState(() {}),
-        ),
-        const SizedBox(height: 12),
         DropdownButtonFormField<DateTime>(
           initialValue: _month,
           decoration: const InputDecoration(labelText: 'シフトの年月', border: OutlineInputBorder()),
@@ -288,33 +309,79 @@ class _ShiftImageImportScreenState extends State<ShiftImageImportScreen> {
             ],
             onChanged: (v) => setState(() => _workplaceId = v),
           ),
-        const SizedBox(height: 16),
-        Container(
-          padding: const EdgeInsets.all(12),
-          decoration: BoxDecoration(
-            color: Colors.blueGrey[50],
-            borderRadius: BorderRadius.circular(8),
-          ),
-          child: const Text(
-            '「読み取る」を押すと、この画像と、名前・年月を Google（Gemini API）へ送ります。'
-            '家計のデータやメールは送りません。\n'
-            '・利用状況によってはAPIの料金がかかることがあります\n'
-            '・他の人の名前が写っているときは、自分の行の周りだけ切り出してから選ぶと安心です',
-            style: TextStyle(fontSize: 12),
-          ),
-        ),
         if (_error != null) ...[
           const SizedBox(height: 12),
           Text(_error!, style: const TextStyle(color: Colors.red)),
         ],
         const SizedBox(height: 16),
+        // 💡 おすすめ：端末の中で読む（無料・画像を送らない）。カレンダー形式の画面向け
         FilledButton.icon(
-          onPressed: _ready ? _read : null,
+          onPressed: _readyLocal ? _readLocal : null,
           icon: _reading
               ? const SizedBox(
                   width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
-              : const Icon(Icons.auto_awesome),
-          label: Text(_reading ? '読み取り中…（数十秒かかることがあります）' : '読み取る'),
+              : const Icon(Icons.document_scanner_outlined),
+          label: Text(_reading ? '読み取り中…（初回は部品の読み込みで少しかかります）' : 'この端末で読み取る（無料・送信なし）'),
+        ),
+        if (!ocrDigitsAvailable)
+          const Padding(
+            padding: EdgeInsets.only(top: 4),
+            child: Text('この端末では使えません（Web版で使ってください）',
+                style: TextStyle(fontSize: 12, color: Colors.black54)),
+          ),
+        const SizedBox(height: 16),
+        // 表の形がばらばらなときだけ使う（AIへ画像を送る）
+        ExpansionTile(
+          tilePadding: EdgeInsets.zero,
+          title: const Text('表の形の画像をAI（Gemini）で読む', style: TextStyle(fontSize: 14)),
+          subtitle: const Text('自分のAPIキーが必要。画像をGoogleへ送ります', style: TextStyle(fontSize: 12)),
+          children: [
+            if (!GeminiClient.instance.hasKey)
+              Card(
+                color: Colors.amber[50],
+                child: ListTile(
+                  leading: const Icon(Icons.key, color: Colors.orange),
+                  title: const Text('GeminiのAPIキーが必要です'),
+                  subtitle: const Text('Google AI Studio で発行したキーを入れてください'),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () async {
+                    await showGeminiSettingsSheet(context);
+                    if (mounted) setState(() {});
+                  },
+                ),
+              ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: _person,
+              decoration: const InputDecoration(
+                labelText: '表の中の自分の名前',
+                helperText: '他の人のシフトと取り違えないための目印です',
+                border: OutlineInputBorder(),
+              ),
+              onChanged: (_) => setState(() {}),
+            ),
+            const SizedBox(height: 12),
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.blueGrey[50],
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: const Text(
+                '「AIで読み取る」を押すと、この画像と、名前・年月を Google（Gemini API）へ送ります。'
+                '家計のデータやメールは送りません。\n'
+                '・無料枠では、送った画像がGoogleのサービス改善に使われることがあります\n'
+                '・他の人の名前が写っているときは、自分の行の周りだけ切り出してから選ぶと安心です',
+                style: TextStyle(fontSize: 12),
+              ),
+            ),
+            const SizedBox(height: 12),
+            OutlinedButton.icon(
+              onPressed: _ready ? _read : null,
+              icon: const Icon(Icons.auto_awesome),
+              label: const Text('AIで読み取る'),
+            ),
+          ],
         ),
       ],
     );
@@ -335,11 +402,20 @@ class _ShiftImageImportScreenState extends State<ShiftImageImportScreen> {
           child: ListView(
             padding: const EdgeInsets.fromLTRB(12, 12, 12, 24),
             children: [
-              Text('${DateFormat('yyyy年M月').format(_month)} ・ ${w?.name ?? ''} ・ ${_person.text.trim()}',
+              Text(
+                  [
+                    DateFormat('yyyy年M月').format(_month),
+                    w?.name ?? '',
+                    if (_person.text.trim().isNotEmpty) _person.text.trim(),
+                  ].join(' ・ '),
                   style: const TextStyle(fontWeight: FontWeight.bold)),
               const SizedBox(height: 4),
               const Text('画像と見比べて、違うところは直してください。チェックしたものだけ登録します。',
                   style: TextStyle(fontSize: 12, color: Colors.black54)),
+              if (_totalMatched == true) ...[
+                const SizedBox(height: 8),
+                const _Notice(color: Colors.green, lines: ['画面の「シフト合計時間」と、読み取った合計が一致しました']),
+              ],
               if (r.warnings.isNotEmpty) ...[
                 const SizedBox(height: 8),
                 _Notice(
