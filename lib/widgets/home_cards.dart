@@ -133,9 +133,10 @@ class HomeNoticesCard extends StatelessWidget {
               children: [
                 const Icon(Icons.notifications_active, size: 18, color: Colors.pink),
                 const SizedBox(width: 6),
-                Text('確認待ち（${notices.length}件）',
-                    style: const TextStyle(fontWeight: FontWeight.bold)),
-                const Spacer(),
+                Expanded(
+                  child: Text('確認待ち（${notices.length}件）',
+                      style: const TextStyle(fontWeight: FontWeight.bold)),
+                ),
                 if (notices.length > 3)
                   TextButton(
                     onPressed: () => showAllNotices(context, appState),

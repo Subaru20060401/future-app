@@ -7,7 +7,7 @@
 import 'dart:async';
 import 'dart:convert';
 
-import 'package:flutter/foundation.dart' show visibleForTesting;
+import 'package:flutter/foundation.dart' show ValueNotifier, visibleForTesting;
 
 import 'package:googleapis/drive/v3.dart' as drive;
 
@@ -224,6 +224,11 @@ class GoogleDriveStore implements DriveStore {
   }
 }
 
+// 💡 最後に分かった同期の状態（開いている間だけ。保存しない）。
+//   競合・失敗のときは自動保存が止まるので、ホームに出して「選ぶ」「やり直す」を押せるようにする。
+//   ⚠️ 以前は自動保存が黙って止まるだけで、競合していることに気づけなかった。
+final ValueNotifier<DriveSyncState?> lastDriveSyncState = ValueNotifier(null);
+
 class DriveSync {
   DriveSync._(this._store);
   static final DriveSync instance = DriveSync._(GoogleDriveStore());
@@ -242,6 +247,12 @@ class DriveSync {
   // 💡 いまの状況を判定する（何もしない）。
   //   「向こうが新しい」「両方変わっている」を区別して、勝手に上書きしないための入口。
   Future<DriveSyncResult> check(AppState app) async {
+    final r = await _check(app);
+    lastDriveSyncState.value = r.state;
+    return r;
+  }
+
+  Future<DriveSyncResult> _check(AppState app) async {
     try {
       // 💡 「連携したことがある」ではなく「いま本当に叩けるか」で判定する。
       final localAt = app.dataUpdatedAt;
@@ -344,6 +355,7 @@ class DriveSync {
         () => _store.write(updatedAt: sentAt, device: app.deviceLabel, dataJson: json),
       );
       await app.markDriveSynced(localAt: localAt, remoteAt: sentAt);
+      lastDriveSyncState.value = DriveSyncState.upToDate;
       return const DriveSyncResult(DriveSyncState.upToDate);
     } catch (e) {
       return _failure(e);
@@ -368,6 +380,7 @@ class DriveSync {
       }
       await app.importJson(remote.json);
       await app.markDriveSynced(localAt: app.clockNow(), remoteAt: remote.updatedAt);
+      lastDriveSyncState.value = DriveSyncState.upToDate;
       return DriveSyncResult(DriveSyncState.upToDate, remote: remote);
     } catch (e) {
       return _failure(e);

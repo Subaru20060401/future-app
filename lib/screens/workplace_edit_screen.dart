@@ -184,7 +184,7 @@ class _WorkplaceEditScreenState extends State<WorkplaceEditScreen> {
                     )).toList()),
                 ),
                 const Text('例: 25日が土曜 → 前営業日=24日(金) / 翌営業日=27日(月)',
-                    style: TextStyle(fontSize: 11, color: Colors.grey)),
+                    style: TextStyle(fontSize: 12, color: Colors.grey)),
               ],
             ),
           ),
@@ -304,7 +304,7 @@ class _WorkplaceEditScreenState extends State<WorkplaceEditScreen> {
               decoration: BoxDecoration(
                   color: Colors.red, borderRadius: BorderRadius.circular(4)),
               child: const Text('必須',
-                  style: TextStyle(color: Colors.white, fontSize: 11)),
+                  style: TextStyle(color: Colors.white, fontSize: 12)),
             ),
           ],
         ],
@@ -340,7 +340,7 @@ class _WorkplaceEditScreenState extends State<WorkplaceEditScreen> {
                       decoration: BoxDecoration(
                           color: Colors.red, borderRadius: BorderRadius.circular(4)),
                       child: const Text('必須',
-                          style: TextStyle(color: Colors.white, fontSize: 11)),
+                          style: TextStyle(color: Colors.white, fontSize: 12)),
                     ),
                   ]),
                   subtitle: TextField(

@@ -3004,6 +3004,28 @@ class AppState extends ChangeNotifier {
         (downPaymentByCardOf(useMonth)[cardName] ?? 0);
   }
 
+  // 💡 支払い画面の一覧の合計。表示中の明細（記録のみを除く）と、そのカードの請求に合算される分割払い。
+  //   ・検索で絞っているときは明細の合計だけ（分割は足さない）
+  //   ・カードで絞っているときはそのカードの分割（銀行確定済みなら確定額に含まれるので 0）
+  //   ・絞っていないときは、確定していないカードの分割の合計（installmentFoldedInto）
+  //   ⚠️ 以前は画面の中で同じ判定を書いていた（確定済みの判定を画面が複製していた）。
+  ({int shownTotal, int installmentPart}) paymentListTotals({
+    required DateTime month,
+    required Iterable<Payment> shown,
+    String? card,
+    bool searching = false,
+  }) {
+    final shownTotal = shown.where((p) => !p.infoOnly).fold(0, (s, p) => s + p.amount);
+    final installmentPart = searching
+        ? 0
+        : (card == null
+            ? installmentFoldedInto(month)
+            : (isCardConfirmedByBank(card, month)
+                ? 0
+                : (installmentTotalByCardOf(month)[card] ?? 0)));
+    return (shownTotal: shownTotal, installmentPart: installmentPart);
+  }
+
   // 💡 「うち分割払い」の注記に出す額＝実際にカードへ足し込んだ分割払いの合計。
   //   確定済みのカードは確定額の中に入っていて内訳が分からないので数えない
   //   （注記が合計より大きくなる、という食い違いを出さないため）。
@@ -4022,6 +4044,28 @@ class AppState extends ChangeNotifier {
   List<ForecastLine> forecastLinesAhead({int monthsAhead = 2}) =>
       linesByDate(forecastMonths(count: monthsAhead + 1));
 
+  // 💡 これから口座から出ていくもの（今日から [days] 日以内、日付順）。ホームの「次の引き落とし」。
+  //   予想と同じ行なので、金額・日付・確定／見込みは月末の予想と一致する。
+  List<ForecastLine> upcomingOutflows({int days = 30}) {
+    final n = clockNow();
+    final today = DateTime(n.year, n.month, n.day);
+    final until = today.add(Duration(days: days));
+    return [
+      for (final l in forecastLinesAhead())
+        if (l.amount < 0 && !l.date.isBefore(today) && l.date.isBefore(until)) l,
+    ];
+  }
+
+  // 💡 残高を書いてから何日たったか（未入力なら null）。古い残高は予想もずれるので画面で知らせる。
+  int? get daysSinceBalanceUpdate {
+    final at = balanceUpdatedAt;
+    if (at == null) return null;
+    final n = clockNow();
+    return DateTime(n.year, n.month, n.day)
+        .difference(DateTime(at.year, at.month, at.day))
+        .inDays;
+  }
+
   // 💡 今日から先で、残高がいちばん少なくなる日とそのときの残高。
   ({DateTime date, int balance})? lowestBalanceAhead({int monthsAhead = 2}) => lowestBalance(
         start: forecastStart,
@@ -4260,14 +4304,6 @@ class AppState extends ChangeNotifier {
   Map<String, int> get nextMonthBreakdown => _breakdownOf(1);
   Map<String, int> get monthAfterNextBreakdown => _breakdownOf(2);
 
-  // 残高不足アラート（マイナスになる支払い予定）
-  List<Payment> get shortagePayments {
-    final balance = thisMonthBalance;
-    return balance < 0
-        ? (payments.where((p) => !p.paid).toList()
-          ..sort((a, b) => a.paymentDate.compareTo(b.paymentDate)))
-        : [];
-  }
 
   // ════════════════ バックアップ（エクスポート/インポート）════════════════
   // 全データを1つのJSON文字列に書き出す（機種変・バックアップ用）。

@@ -122,7 +122,7 @@ class _BalanceHistoryScreenState extends State<BalanceHistoryScreen> {
                                   ),
                                   child: const Text('デビット',
                                       style: TextStyle(
-                                          fontSize: 10, color: Colors.blueGrey)),
+                                          fontSize: 12, color: Colors.blueGrey)),
                                 ),
                             ],
                           ),
@@ -171,7 +171,7 @@ class _BalanceHistoryScreenState extends State<BalanceHistoryScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(label, style: const TextStyle(fontSize: 11, color: Colors.black54)),
+          Text(label, style: const TextStyle(fontSize: 12, color: Colors.black54)),
           const SizedBox(height: 2),
           Text('$sign¥${yenNum(amount)}',
               style: TextStyle(
@@ -295,7 +295,7 @@ class _BalanceHistoryScreenState extends State<BalanceHistoryScreen> {
                 style: const TextStyle(fontSize: 12, color: Colors.black54)),
             const SizedBox(height: 4),
             const Text('元の通知は未処理に戻るので、入力し直せます。',
-                style: TextStyle(fontSize: 11, color: Colors.grey)),
+                style: TextStyle(fontSize: 12, color: Colors.grey)),
           ],
         ),
         actions: [

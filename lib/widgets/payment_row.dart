@@ -202,7 +202,7 @@ class _StatusChip extends StatelessWidget {
         color: Colors.grey.withValues(alpha: 0.15),
         borderRadius: BorderRadius.circular(6),
       ),
-      child: Text(label, style: const TextStyle(fontSize: 11, color: Colors.black54)),
+      child: Text(label, style: const TextStyle(fontSize: 12, color: Colors.black54)),
     );
   }
 }

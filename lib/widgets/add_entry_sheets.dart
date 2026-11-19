@@ -265,7 +265,7 @@ void showShiftFormDialog(
                 const Padding(
                   padding: EdgeInsets.only(top: 8),
                   child: Text('※交通費・休日/深夜/残業手当は勤務先の給料情報から自動で計算されます。',
-                      style: TextStyle(fontSize: 11, color: Colors.grey)),
+                      style: TextStyle(fontSize: 12, color: Colors.grey)),
                 ),
             ],
           ),

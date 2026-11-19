@@ -41,7 +41,7 @@ Future<void> showPlannedIncomeSheet(BuildContext context, AppState appState) asy
                 ],
               ),
               const Text('給料以外に入ってくる予定のお金（仕送り・返金など）',
-                  style: TextStyle(fontSize: 11, color: Colors.grey)),
+                  style: TextStyle(fontSize: 12, color: Colors.grey)),
               const SizedBox(height: 10),
 
               // 予定日が過ぎて未受け取りのもの
@@ -55,7 +55,7 @@ Future<void> showPlannedIncomeSheet(BuildContext context, AppState appState) asy
                         title: Text(e.income.title,
                             style: const TextStyle(fontSize: 14)),
                         subtitle: Text(DateFormat('M月d日').format(e.date),
-                            style: const TextStyle(fontSize: 11)),
+                            style: const TextStyle(fontSize: 12)),
                         trailing: Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
@@ -202,7 +202,7 @@ Future<void> _editPlanned(
                 dense: true,
                 title: const Text('毎月繰り返す', style: TextStyle(fontSize: 14)),
                 subtitle: Text('毎月${date.day}日に入る予定にする',
-                    style: const TextStyle(fontSize: 11)),
+                    style: const TextStyle(fontSize: 12)),
                 value: monthly,
                 onChanged: (v) => setLocal(() => monthly = v),
               ),

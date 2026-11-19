@@ -148,7 +148,7 @@ class _BreakdownScreenState extends State<BreakdownScreen> {
                               fontSize: 18,
                               fontWeight: FontWeight.bold,
                               color: widget.accent)),
-                      Text('${_month.year}年', style: const TextStyle(fontSize: 10, color: Colors.grey)),
+                      Text('${_month.year}年', style: const TextStyle(fontSize: 12, color: Colors.grey)),
                     ],
                   ),
                 ],
@@ -160,7 +160,7 @@ class _BreakdownScreenState extends State<BreakdownScreen> {
               const Padding(
                 padding: EdgeInsets.only(left: 4, bottom: 4),
                 child: Text('項目をタップで明細',
-                    style: TextStyle(fontSize: 11, color: Colors.grey)),
+                    style: TextStyle(fontSize: 12, color: Colors.grey)),
               ),
             ...items.map((e) {
               final pct = total > 0 ? (e.amount / total * 100) : 0;
@@ -187,7 +187,7 @@ class _BreakdownScreenState extends State<BreakdownScreen> {
                             mainAxisSize: MainAxisSize.min,
                             children: [
                               Text(e.label),
-                              Text(sub, style: const TextStyle(fontSize: 11, color: Colors.grey)),
+                              Text(sub, style: const TextStyle(fontSize: 12, color: Colors.grey)),
                             ],
                           );
                         }),

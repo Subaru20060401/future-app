@@ -144,7 +144,7 @@ Future<void> showDepositDialog(
                 transfer != null
                     ? 'PayPayの出金（${transfer.acceptedAt.month}/${transfer.acceptedAt.day}受付）の着金と見られます。金額が違えば直してください。'
                     : 'メールに金額が無いため、入金額を入力してください。',
-                style: const TextStyle(fontSize: 11, color: Colors.grey),
+                style: const TextStyle(fontSize: 12, color: Colors.grey),
               ),
               const SizedBox(height: 14),
               TextField(
@@ -238,7 +238,7 @@ Future<void> showDepositDialog(
                     padding: const EdgeInsets.only(top: 6),
                     child: Text(
                       '※ ${_workMonthLabel(appState, selectedWpId!, notice.date)}の実給料としても記録します',
-                      style: const TextStyle(fontSize: 11, color: Colors.grey),
+                      style: const TextStyle(fontSize: 12, color: Colors.grey),
                     ),
                   ),
               ],
@@ -508,7 +508,7 @@ Future<void> showDrawSheet(BuildContext context, AppState appState) async {
                                 dense: true,
                                 title: Text(d.label, style: const TextStyle(fontSize: 14)),
                                 subtitle: Text(DateFormat('M月d日').format(d.date),
-                                    style: const TextStyle(fontSize: 11)),
+                                    style: const TextStyle(fontSize: 12)),
                                 trailing: Row(
                                   mainAxisSize: MainAxisSize.min,
                                   children: [

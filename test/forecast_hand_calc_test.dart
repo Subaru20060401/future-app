@@ -119,4 +119,22 @@ void main() {
         [('旅行', 20000, DateTime(2026, 12, 5))]);
     expect(app.oneTimeExpensesIn(DateTime(2027, 1)), isEmpty);
   });
+
+  test('次の引き落とし（30日以内・今日以降・日付順）', () async {
+    final app = await build();
+    // 今日 11/19 から 12/19 まで: 11/26 カードA −10,000、11/27 スマホ −1,000、12/5 旅行 −20,000
+    final out = app.upcomingOutflows();
+    expect(out.map((l) => (l.date, l.label, l.amount)), [
+      (DateTime(2026, 11, 26), 'カードA', -10000),
+      (DateTime(2026, 11, 27), '定期: スマホ', -1000),
+      (DateTime(2026, 12, 5), '旅行', -20000),
+    ]);
+  });
+
+  test('残高を書いてからの日数（11/16 → 11/19 で 3 日）', () async {
+    final app = await build();
+    expect(app.daysSinceBalanceUpdate, 3);
+    app.balanceUpdatedAt = null;
+    expect(app.daysSinceBalanceUpdate, isNull);
+  });
 }

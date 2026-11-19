@@ -117,7 +117,7 @@ class SettingsScreen extends StatelessWidget {
                               : null,
                         ),
                         const SizedBox(height: 4),
-                        Text(t.label, style: const TextStyle(fontSize: 11)),
+                        Text(t.label, style: const TextStyle(fontSize: 12)),
                       ],
                     ),
                   );
@@ -988,25 +988,6 @@ class SettingsScreen extends StatelessWidget {
               MaterialPageRoute(builder: (_) => const MailScheduleScreen()),
             ),
           ),
-          ListTile(
-            dense: true,
-            leading: const Icon(Icons.science_outlined, color: Colors.grey),
-            title: const Text('見本の提案を入れて試す'),
-            subtitle: const Text('架空の3件（説明会・面接・単発バイト）。ホームの確認待ちに出ます'),
-            onTap: () {
-              final n = appState.addScheduleSuggestions(sampleScheduleSuggestions(DateTime.now()));
-              ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                  content: Text(n > 0 ? '見本を$n件入れました' : '見本はもう入っています')));
-            },
-          ),
-          if (appState.scheduleSuggestions.any((s) => s.sample))
-            ListTile(
-              dense: true,
-              leading: const Icon(Icons.delete_sweep_outlined, color: Colors.grey),
-              title: const Text('見本の提案を消す'),
-              subtitle: const Text('登録した予定・シフトは残ります'),
-              onTap: () => appState.removeSampleSuggestions(),
-            ),
           const Divider(),
           _SectionHeader('表示・通知'),
           ListTile(
@@ -1084,7 +1065,7 @@ class SettingsScreen extends StatelessWidget {
               child: Text(
                 'iPhoneやMacの純正カレンダーにも出したいときは、端末の設定で'
                 'Googleアカウントを追加してください（アプリ側の設定は不要です）。',
-                style: TextStyle(fontSize: 11, color: Colors.black54),
+                style: TextStyle(fontSize: 12, color: Colors.black54),
               ),
             ),
           // 💡 端末アプリ版だけ。Web版の通知はGoogleカレンダーの通知で届く（上の項目）。
@@ -1203,11 +1184,26 @@ class SettingsScreen extends StatelessWidget {
                   }
                 },
               ),
-              const ListTile(
-                leading: Icon(Icons.account_balance, color: Colors.green),
-                title: Text('三井住友銀行 連携設定'),
-                subtitle: Text('未連携'),
+              // 💡 メールから予定を探す機能の動作確認用（開発用）。普段の一覧からはここへ移した
+              ListTile(
+                dense: true,
+                leading: const Icon(Icons.science_outlined, color: Colors.grey),
+                title: const Text('見本の提案を入れて試す'),
+                subtitle: const Text('架空の3件（説明会・面接・単発バイト）。ホームの確認待ちに出ます'),
+                onTap: () {
+                  final n = appState.addScheduleSuggestions(sampleScheduleSuggestions(appState.clockNow()));
+                  ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                      content: Text(n > 0 ? '見本を$n件入れました' : '見本はもう入っています')));
+                },
               ),
+              if (appState.scheduleSuggestions.any((s) => s.sample))
+                ListTile(
+                  dense: true,
+                  leading: const Icon(Icons.delete_sweep_outlined, color: Colors.grey),
+                  title: const Text('見本の提案を消す'),
+                  subtitle: const Text('登録した予定・シフトは残ります'),
+                  onTap: () => appState.removeSampleSuggestions(),
+                ),
               ListTile(
                 leading: const Icon(Icons.bug_report, color: Colors.indigo),
                 title: const Text('🔧 楽天メールの中身を確認'),

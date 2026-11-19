@@ -111,7 +111,7 @@ class _LoginScreenState extends State<LoginScreen> {
                       'ログインせずに移したいときは、パソコン側で\n'
                       '設定 → データのバックアップ → ファイルに書き出し（JSON）\n'
                       'を保存して、この端末の「ファイルから読み込み」で取り込めます。',
-                      style: TextStyle(fontSize: 11, color: Colors.grey),
+                      style: TextStyle(fontSize: 12, color: Colors.grey),
                       textAlign: TextAlign.center,
                     ),
                   ),
@@ -119,7 +119,7 @@ class _LoginScreenState extends State<LoginScreen> {
                     Padding(
                       padding: const EdgeInsets.only(top: 8),
                       child: Text(_detail!,
-                          style: const TextStyle(fontSize: 10, color: Colors.grey),
+                          style: const TextStyle(fontSize: 12, color: Colors.grey),
                           textAlign: TextAlign.center),
                     ),
                 ],
