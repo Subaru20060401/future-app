@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/foundation.dart' show kIsWeb, visibleForTesting;
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:intl/intl.dart';
@@ -291,11 +291,11 @@ class AppState extends ChangeNotifier {
     return Platform.isIOS ? 'iPhone/iPad' : 'この端末';
   }
 
-  void markDriveSynced({required DateTime localAt, required DateTime remoteAt}) {
+  Future<void> markDriveSynced({required DateTime localAt, required DateTime remoteAt}) async {
     driveSyncedAt = localAt;
     driveKnownRemoteAt = remoteAt;
-    _saveDriveSyncState();
     notifyListeners();
+    await _saveDriveSyncState();
   }
 
   Future<void> setRequireGoogleLogin(bool on) async {
@@ -3109,6 +3109,16 @@ class AppState extends ChangeNotifier {
       for (final s in subscriptions) {
         out.add((title: s.title, subtitle: '毎月${s.payDay}日', amount: s.amount));
       }
+    } else if (label == '分割払い（カード未設定）') {
+      // 💡 合計（unassignedInstallmentTotalOf）と同じ判定で並べる
+      final now = clockNow();
+      for (final i in installments) {
+        if (i.cardName.trim().isNotEmpty) continue;
+        final amount = i.amountIn(month, now: now);
+        if (amount > 0) {
+          out.add((title: i.name, subtitle: i.countLabelIn(month), amount: amount));
+        }
+      }
     } else if (label == '分割払い') {
       // ⚠️ 合計（installmentTotalOf）と同じ判定で並べる。以前は開始日の無い旧データを
       //   合計には入れて内訳からは外していたので、内訳を足しても合計に届かなかった。
@@ -3166,10 +3176,13 @@ class AppState extends ChangeNotifier {
       }
       // 💡 このカードで組んだ分割払いの当月ぶん。カードの請求に含めて落ちるので、
       //   合計にも足してあり、明細にも出す（銀行確定済みなら確定額に含まれるので出さない）。
-      if (!cardHasBank) {
+      // 💡 このカードの請求に合算されるもの（分割払い・カード払いのローン・頭金）。
+      //   合計（expenseBreakdownOf の fold）と同じ判定で並べる。銀行確定済みなら確定額に含まれるので出さない。
+      // ⚠️ 以前は分割払いだけを出していて、ローン・頭金は合計にだけ入っていた（内訳を足しても届かない＝B5）。
+      if (!_isConfirmedIn(label, _bankConfirmedTotalsOf(month))) {
         // ⚠️ 合計（installmentTotalByCardOf）と同じ判定で並べる（開始日の無い旧データも出す）
         final now = clockNow();
-        for (final inst in installments.where((e) => e.cardName == label)) {
+        for (final inst in installments.where((e) => e.cardName.trim() == label)) {
           final amount = inst.amountIn(month, now: now);
           if (amount > 0) {
             out.add((
@@ -3178,6 +3191,26 @@ class AppState extends ChangeNotifier {
               amount: amount,
             ));
           }
+        }
+        for (final l in loans) {
+          if (!l.isCardPayment || l.method != label || !l.isActiveIn(month)) continue;
+          out.add((
+            title: 'ローン: ${l.name}',
+            subtitle: '${l.countIn(month)}/${l.totalCount}回目',
+            amount: l.amountIn(month),
+          ));
+        }
+        for (final l in loans) {
+          final d = l.downPaymentDate;
+          if (!l.hasDownPayment || l.isDownPaymentFromAccount || l.downPaymentMethod != label) {
+            continue;
+          }
+          if (d!.year != month.year || d.month != month.month) continue;
+          out.add((
+            title: '頭金: ${l.name}',
+            subtitle: '${d.month}/${d.day}',
+            amount: l.downPayment,
+          ));
         }
       }
     }
@@ -4094,8 +4127,10 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> _saveCardPaymentDays() async {
-    final prefs = await SharedPreferences.getInstance();
+  Future<void> _saveCardPaymentDays() async =>
+      _writeCardDays(await SharedPreferences.getInstance());
+
+  Future<void> _writeCardDays(SharedPreferences prefs) async {
     await prefs.setString('saved_card_payment_days', jsonEncode(cardPaymentDays));
     await prefs.setString('saved_card_closing_days', jsonEncode(cardClosingDays));
   }
@@ -4531,7 +4566,7 @@ class AppState extends ChangeNotifier {
   // バックアップファイルからリストア。
   Future<void> restoreFromBackup(File file) async {
     final text = await file.readAsString();
-    importJson(text);
+    await importJson(text);
   }
 
   Future<void> setAutoBackupEnabled(bool on) async {
@@ -4543,25 +4578,39 @@ class AppState extends ChangeNotifier {
   }
 
   // エクスポートしたJSONを取り込んで全データを置き換える。
-  void importJson(String text) {
+  // 💡 保存が終わるまで待つ（Future）。呼び出し側（ドライブの取り込み・復元）は、
+  //   保存まで成功したときだけ「同期済み」「復元しました」にする。
+  Future<void> importJson(String text) async {
     // ⚠️ _importJson は項目ごとに「消してから読む」。途中の項目が壊れていると
     //   （日付が読めない・型が違うなど）そこで例外になり、前半だけ置き換わった状態が残る。
     //   そのまま保存やドライブ同期が走ると、半端なデータで上書きしてしまう。
     //   取り込む前の状態を書き出しておき、失敗したらそれで丸ごと戻す。
-    //   復元はメモリ内だけで行い、失敗時は保存・通知・更新時刻の変更をしない。
+    //   読み込みの失敗はメモリ内だけで戻し、保存・通知・更新時刻の変更をしない。
     final before = exportJson();
     try {
       _importJson(text);
     } catch (_) {
-      _importJson(before);
+      _importJson(before, repair: false);
       rethrow;
     }
     // 💡 成功した取り込みも「この端末での編集」には数えない。
-    saveData(markModified: false);
+    try {
+      await saveData(markModified: false);
+    } catch (_) {
+      // ⚠️ 保存の途中で失敗すると、端末の保存内容は一部だけ新しい状態になりうる。
+      //   メモリを取り込む前に戻し、その内容で保存し直す（これも失敗したら元の例外を返す）。
+      _importJson(before, repair: false);
+      try {
+        await saveData(markModified: false);
+      } catch (_) {}
+      notifyListeners();
+      rethrow;
+    }
     notifyListeners();
   }
 
-  void _importJson(String text) {
+  // [repair]: 取り込んだ後に自己修復するか。⚠️ 失敗時の巻き戻しでは修復しない（元の状態にそのまま戻す）
+  void _importJson(String text, {bool repair = true}) {
     final map = jsonDecode(text) as Map<String, dynamic>;
 
     shifts.clear();
@@ -4636,7 +4685,6 @@ class AppState extends ChangeNotifier {
         .map((e) => ScheduleSuggestion.fromJson(e))
         .toList();
     _setMailEntityLinks(map['mailEntityLinks'] as List? ?? const []);
-    retireOldScheduleSuggestions();
     paidPlannedExpenseKeys
       ..clear()
       ..addAll((map['paidPlannedExpenseKeys'] as List? ?? []).map((e) => '$e'));
@@ -4704,7 +4752,7 @@ class AppState extends ChangeNotifier {
     (map['budgets'] as Map?)?.forEach((k, v) {
       if (v is int) budgets[k] = v;
     });
-    repairLoanBillingLinks();
+    if (repair) repairData(); // 起動時と同じ自己修復（B8）。保存は importJson がまとめて行う
   }
 
   // ════════════════ 保存・読込 ════════════════
@@ -4778,6 +4826,10 @@ class AppState extends ChangeNotifier {
     await prefs.setStringList('saved_deleted_dup_keys', deletedDupKeys.toList());
     await prefs.setBool('saved_calendar_autosync', calendarAutoSync);
     await prefs.setBool('saved_first_sync', gmailFirstSyncDone);
+    // ⚠️ カードの引落日・締め日も毎回書く。以前は設定画面の変更時だけ書いていたため、
+    //   ドライブの取り込み・復元のあと再読み込みすると古いカード設定に戻っていた（B1）。
+    //   空（全部外した）でもキーを書く。キーが無いと初回起動とみなして既定のカードを入れ直す。
+    await _writeCardDays(prefs);
     // 自動バックアップ（1日1回）
     final now = clockNow();
     if (autoBackupEnabled &&
@@ -5066,18 +5118,35 @@ class AppState extends ChangeNotifier {
     driveSyncedAt = readAt('saved_drive_synced_at');
     driveKnownRemoteAt = readAt('saved_drive_remote_at');
 
+    var migrated = repairData();
+    // 💡 IDの無い旧シフトに採番したIDを保存する（次の起動で別のIDにならないように）
+    //   ⚠️ legacyId は読み込んだ時点の印なので、起動時だけ見る（repairData に入れると冪等でなくなる）
+    if (shifts.values.any((l) => l.any((s) => s.legacyId))) migrated = true;
+    if (migrated) saveData();
+
+    notifyListeners();
+  }
+
+  // 💡 自己修復（古いデータの形をいまの形にそろえる）。起動時の読込と、取り込み（ドライブ・
+  //   バックアップ）の両方でここを通す。⚠️ 以前は取り込み時にローンの紐づけしか直しておらず、
+  //   古い端末が上げたデータは次の起動まで直らないまま計算されていた（B8）。
+  //   ・何度走らせても結果が同じ（2回目は何も変えず false を返す）
+  //   ・失った情報を推測で作らない（例: 消えた予定のIDは戻さない）
+  //   戻り値: 何か直したら true（呼び出し側が保存する）
+  @visibleForTesting
+  bool repairData() {
     // 💡 「三井住友」は「三井OLIVE」に統合
-    var migrated = retireOldScheduleSuggestions() > 0;
+    var changed = retireOldScheduleSuggestions() > 0;
     for (final p in payments) {
       if (p.cardName == '三井住友') {
         p.cardName = '三井OLIVE';
-        migrated = true;
+        changed = true;
       }
     }
     for (final i in installments) {
       if (i.cardName == '三井住友') {
         i.cardName = '三井OLIVE';
-        migrated = true;
+        changed = true;
       }
       // 旧データ: startDate が無ければ名前内の日付 "(2026-03-11)" から復元
       if (i.startDate == null) {
@@ -5085,19 +5154,15 @@ class AppState extends ChangeNotifier {
         if (m != null) {
           i.startDate =
               DateTime(int.parse(m.group(1)!), int.parse(m.group(2)!), int.parse(m.group(3)!));
-          migrated = true;
+          changed = true;
         }
       }
     }
-    if (_migrateWorkplaces()) migrated = true;
+    if (_migrateWorkplaces()) changed = true;
     // 分割へ移した決済がカード側に残っていたら掃除（旧バージョンの取りこぼしを自己修復）
-    if (cleanupInstallmentDuplicates() > 0) migrated = true;
-    if (repairLoanBillingLinks()) migrated = true;
-    // 💡 IDの無い旧シフトに採番したIDを保存する（次の起動で別のIDにならないように）
-    if (shifts.values.any((l) => l.any((s) => s.legacyId))) migrated = true;
-    if (migrated) saveData();
-
-    notifyListeners();
+    if (cleanupInstallmentDuplicates() > 0) changed = true;
+    if (repairLoanBillingLinks()) changed = true;
+    return changed;
   }
 
   // 💡 既存の手入力シフト（workplace文字列）から勤務先マスタを自動生成し、
@@ -5147,7 +5212,12 @@ class AppState extends ChangeNotifier {
         if (s.workplaceId != null) continue;
         final w = byName[s.workplace.trim()];
         if (w == null) continue;
+        // ⚠️ ID と予定のIDを引き継ぐ。以前は作り直しで新しいIDになり、予定IDも消えていた
+        //   （カレンダーに同じ予定が二重にでき、メールの予定提案との対応も外れる＝B2）。
         list[i] = ShiftData(
+          id: s.id,
+          legacyId: s.legacyId,
+          calendarEventId: s.calendarEventId,
           workplace: s.workplace,
           workplaceId: w.id,
           hourlyWage: s.hourlyWage,

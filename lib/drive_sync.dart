@@ -7,6 +7,8 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart' show visibleForTesting;
+
 import 'package:googleapis/drive/v3.dart' as drive;
 
 import 'app_state.dart';
@@ -34,6 +36,7 @@ enum DriveSyncState {
   localNewer, // こちらが新しい → アップロードすべき
   remoteNewer, // 向こうが新しい → 取り込むべき
   conflict, // 両方変わっている → ユーザーに選ばせる
+  localChangedSinceCheck, // 判定のあとにこの端末で変更があった → 取り込まずに止めた
   error,
 }
 
@@ -41,8 +44,11 @@ class DriveSyncResult {
   final DriveSyncState state;
   final DriveSnapshot? remote;
   final String? error;
+  // 💡 判定したときの「この端末の最終変更時刻」。取り込む直前に変わっていたら、
+  //   判定のあとにこの端末で変更があった＝黙って置き換えると消えるので取り込まない。
+  final DateTime? localAtCheck;
 
-  const DriveSyncResult(this.state, {this.remote, this.error});
+  const DriveSyncResult(this.state, {this.remote, this.error, this.localAtCheck});
 
   String get message {
     switch (state) {
@@ -60,6 +66,8 @@ class DriveSyncResult {
         return '別の端末の変更があります';
       case DriveSyncState.conflict:
         return 'この端末と別の端末の両方が変更されています';
+      case DriveSyncState.localChangedSinceCheck:
+        return 'この端末で変更があったため、取り込みを見送りました（もう一度同期すると選べます）';
       case DriveSyncState.error:
         return describeDriveError(error ?? '');
     }
@@ -114,14 +122,31 @@ String describeDriveError(String raw) {
   return '同期に失敗: $raw';
 }
 
-class DriveSync {
-  DriveSync._();
-  static final DriveSync instance = DriveSync._();
+// 💡 ドライブ上のファイルの読み書きと、認証の窓口。
+//   テストで偽物に差し替えて「送信中・認証待ち・再試行中の変更が未同期として残るか」を確かめる。
+abstract interface class DriveStore {
+  Future<GoogleAccessState> ensureAccess();
+  Future<T> withFreshToken<T>(Future<T> Function() run);
+  Future<void> invalidateRejectedToken();
+  Future<DriveSnapshot?> read();
+  Future<void> write({required DateTime updatedAt, required String device, required String dataJson});
+}
 
+class GoogleDriveStore implements DriveStore {
   static const String fileName = 'pocket_maid_backup.json';
   static const String _appFolder = 'appDataFolder';
 
   String? _fileId; // 見つけたファイルID（毎回探さないように覚える）
+
+  @override
+  Future<GoogleAccessState> ensureAccess() => GmailService.instance.ensureAccess();
+
+  @override
+  Future<T> withFreshToken<T>(Future<T> Function() run) =>
+      GmailService.instance.withFreshToken(run);
+
+  @override
+  Future<void> invalidateRejectedToken() => GmailService.instance.invalidateRejectedToken();
 
   Future<String?> _findFileId(drive.DriveApi api) async {
     if (_fileId != null) return _fileId;
@@ -137,7 +162,8 @@ class DriveSync {
   }
 
   // ドライブの中身を読む。無ければ null。
-  Future<DriveSnapshot?> fetch() async {
+  @override
+  Future<DriveSnapshot?> read() async {
     final api = await GmailService.instance.driveApi();
     if (api == null) return null;
     final id = await _findFileId(api);
@@ -164,16 +190,20 @@ class DriveSync {
     );
   }
 
-  // ドライブへ書き込む（無ければ作る）。書き込んだ更新時刻を返す。
-  Future<DateTime> upload(String exportedJson, {required String device}) async {
+  // ドライブへ書き込む（無ければ作る）。
+  @override
+  Future<void> write({
+    required DateTime updatedAt,
+    required String device,
+    required String dataJson,
+  }) async {
     final api = await GmailService.instance.driveApi();
     if (api == null) throw StateError('Googleに未連携です');
 
-    final now = DateTime.now();
     final payload = jsonEncode({
-      'updatedAt': now.toIso8601String(),
+      'updatedAt': updatedAt.toIso8601String(),
       'device': device,
-      'data': jsonDecode(exportedJson),
+      'data': jsonDecode(dataJson),
     });
     final bytes = utf8.encode(payload);
     final media = drive.Media(Stream.value(bytes), bytes.length);
@@ -191,23 +221,41 @@ class DriveSync {
     } else {
       await api.files.update(drive.File(), id, uploadMedia: media);
     }
-    return now;
   }
+}
+
+class DriveSync {
+  DriveSync._(this._store);
+  static final DriveSync instance = DriveSync._(GoogleDriveStore());
+
+  /// テスト用: ドライブの窓口を差し替えた同期
+  @visibleForTesting
+  factory DriveSync.withStore(DriveStore store) => DriveSync._(store);
+
+  static const String fileName = GoogleDriveStore.fileName;
+
+  final DriveStore _store;
+
+  // ドライブの中身を読む。無ければ null。
+  Future<DriveSnapshot?> fetch() => _store.read();
 
   // 💡 いまの状況を判定する（何もしない）。
   //   「向こうが新しい」「両方変わっている」を区別して、勝手に上書きしないための入口。
   Future<DriveSyncResult> check(AppState app) async {
     try {
       // 💡 「連携したことがある」ではなく「いま本当に叩けるか」で判定する。
-      final access = await GmailService.instance.ensureAccess();
+      final localAt = app.dataUpdatedAt;
+      final access = await _store.ensureAccess();
       if (access == GoogleAccessState.redirecting) {
         return const DriveSyncResult(DriveSyncState.restoringAuth);
       }
       if (access == GoogleAccessState.needsInteraction) {
         return const DriveSyncResult(DriveSyncState.notSignedIn);
       }
-      final remote = await GmailService.instance.withFreshToken(fetch);
-      if (remote == null) return const DriveSyncResult(DriveSyncState.noRemote);
+      final remote = await _store.withFreshToken(fetch);
+      if (remote == null) {
+        return DriveSyncResult(DriveSyncState.noRemote, localAtCheck: localAt);
+      }
 
       return DriveSyncResult(
         decideSyncState(
@@ -217,6 +265,7 @@ class DriveSync {
           syncedAt: app.driveSyncedAt,
         ),
         remote: remote,
+        localAtCheck: localAt,
       );
     } catch (e) {
       return _failure(e);
@@ -232,7 +281,7 @@ class DriveSync {
           : DriveSyncState.notSignedIn);
     }
     if (isRejectedTokenError(e)) {
-      await GmailService.instance.invalidateRejectedToken();
+      await _store.invalidateRejectedToken();
       return const DriveSyncResult(DriveSyncState.notSignedIn);
     }
     return DriveSyncResult(DriveSyncState.error, error: e.toString());
@@ -282,12 +331,19 @@ class DriveSync {
       d == null ? '—' : d.toLocal().toString().substring(0, 16);
 
   // こちらの内容でドライブを更新する
+  // ⚠️ 「送ったデータ」に対応するこの端末の状態だけを同期済みにする。
+  //   書き出すのと同じ瞬間に「この端末の最終変更時刻」と送信時刻を控え、成功したらその値で記録する。
+  //   以前は送信の途中（認証の取り直し・通信待ち）で時刻を取っていたため、その間の変更が
+  //   送られていないのに同期済み扱いになり、次の自動保存で上がらなかった（B7）。
   Future<DriveSyncResult> pushNow(AppState app) async {
     try {
-      final at = await GmailService.instance.withFreshToken(
-        () => upload(app.exportJson(), device: app.deviceLabel),
+      final sentAt = app.clockNow();
+      final localAt = app.dataUpdatedAt ?? sentAt;
+      final json = app.exportJson();
+      await _store.withFreshToken(
+        () => _store.write(updatedAt: sentAt, device: app.deviceLabel, dataJson: json),
       );
-      app.markDriveSynced(localAt: at, remoteAt: at);
+      await app.markDriveSynced(localAt: localAt, remoteAt: sentAt);
       return const DriveSyncResult(DriveSyncState.upToDate);
     } catch (e) {
       return _failure(e);
@@ -295,16 +351,23 @@ class DriveSync {
   }
 
   // ドライブの内容をこの端末へ取り込む
+  // 💡 basedOn: 判定（check）の結果を元に取り込むとき。判定のあとにこの端末で変更があれば
+  //   取り込まずに止める（置き換えでその変更が消えるため）。利用者が「置き換える」を
+  //   明示的に選んだときは渡さない。
+  // ⚠️ 取り込みの保存まで成功したときだけ同期済みにする（保存に失敗したらエラーを返す）。
   Future<DriveSyncResult> pullNow(
     AppState app, {
     DriveSnapshot? snapshot,
+    DriveSyncResult? basedOn,
   }) async {
     try {
-      final remote =
-          snapshot ?? await GmailService.instance.withFreshToken(fetch);
+      final remote = snapshot ?? await _store.withFreshToken(fetch);
       if (remote == null) return const DriveSyncResult(DriveSyncState.noRemote);
-      app.importJson(remote.json);
-      app.markDriveSynced(localAt: DateTime.now(), remoteAt: remote.updatedAt);
+      if (basedOn != null && app.dataUpdatedAt != basedOn.localAtCheck) {
+        return DriveSyncResult(DriveSyncState.localChangedSinceCheck, remote: remote);
+      }
+      await app.importJson(remote.json);
+      await app.markDriveSynced(localAt: app.clockNow(), remoteAt: remote.updatedAt);
       return DriveSyncResult(DriveSyncState.upToDate, remote: remote);
     } catch (e) {
       return _failure(e);

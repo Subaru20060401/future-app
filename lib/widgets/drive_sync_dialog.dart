@@ -42,6 +42,7 @@ Future<bool> runDriveSync(
 
     case DriveSyncState.notSignedIn:
     case DriveSyncState.error:
+    case DriveSyncState.localChangedSinceCheck: // check は返さないが、網羅のため
       toast(r.message, color: Colors.orange[800], always: true);
       return false;
 
@@ -59,18 +60,19 @@ Future<bool> runDriveSync(
 
     case DriveSyncState.remoteNewer:
       // こちらに未同期の変更が無いので、そのまま取り込んで安全
+      // ⚠️ ただし判定のあとにこの端末で変更していたら取り込まない（basedOn で確かめる）
       final down = await DriveSync.instance.pullNow(
         appState,
         snapshot: r.remote,
+        basedOn: r,
       );
+      final failed = down.state != DriveSyncState.upToDate;
       toast(
-        down.state == DriveSyncState.error
-            ? down.message
-            : '別の端末の変更を取り込みました（${r.remote?.device ?? ''}）',
-        color: down.state == DriveSyncState.error ? Colors.orange[800] : null,
-        always: down.state == DriveSyncState.error,
+        failed ? down.message : '別の端末の変更を取り込みました（${r.remote?.device ?? ''}）',
+        color: failed ? Colors.orange[800] : null,
+        always: failed,
       );
-      return down.state != DriveSyncState.error;
+      return !failed;
 
     case DriveSyncState.conflict:
       // 💡 ここを取りこぼすと「ログインしたのに何も起きない」になる。

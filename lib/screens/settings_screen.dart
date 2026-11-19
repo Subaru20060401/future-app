@@ -620,7 +620,7 @@ class SettingsScreen extends StatelessWidget {
         ),
       );
       if (ok == true) {
-        appState.importJson(text);
+        await appState.importJson(text);
         if (context.mounted) {
           ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('インポートしました')));
         }
@@ -770,13 +770,15 @@ class SettingsScreen extends StatelessWidget {
         actions: [
           TextButton(onPressed: () => Navigator.pop(context), child: const Text('キャンセル')),
           ElevatedButton(
-            onPressed: () {
+            onPressed: () async {
               try {
-                appState.importJson(ctrl.text);
+                await appState.importJson(ctrl.text);
+                if (!context.mounted) return;
                 Navigator.pop(context);
                 ScaffoldMessenger.of(context)
                     .showSnackBar(const SnackBar(content: Text('インポートしました')));
               } catch (e) {
+                if (!context.mounted) return;
                 ScaffoldMessenger.of(context)
                     .showSnackBar(SnackBar(content: Text('読み込み失敗（今のデータはそのままです）: $e')));
               }

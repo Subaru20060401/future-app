@@ -59,3 +59,16 @@ void addShift(AppState app, ShiftData s) {
   final key = dateKey(s.start);
   (app.shifts[key] ??= []).add(s);
 }
+
+/// 時計を関数で渡す版（テストの途中で時刻を進めたいとき）
+Future<AppState> clockApp(DateTime Function() clock, {Map<String, Object>? prefs}) async {
+  SharedPreferences.setMockInitialValues(prefs ?? {});
+  final app = AppState(clock: clock);
+  await app.ready;
+  if (prefs == null) app.cardPaymentDays.clear();
+  return app;
+}
+
+/// 書き出しの比較用（書き出した時刻の行だけ除く）
+String exportWithoutStamp(AppState app) =>
+    app.exportJson().replaceAll(RegExp(r'"exportedAt": "[^"]*",?\n'), '');
