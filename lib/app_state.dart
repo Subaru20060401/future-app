@@ -1451,9 +1451,18 @@ class AppState extends ChangeNotifier {
   final Set<String> deletedSourceIds = {};
   final Set<String> deletedDupKeys = {};
 
-  AppState() {
+  // 💡 時計を差し替えられるようにする（テストで「今日」を固定するため）。
+  //   ⚠️ 計算・判定は必ず clockNow() を使う。DateTime.now() を直接読むと、
+  //     テストの日付と食い違い、実行した日によって結果が変わるテストになる。
+  //     ID の採番（_id など）だけは時計と無関係に一意であればよいので DateTime.now() のまま。
+  AppState({DateTime Function()? clock}) : _clock = clock ?? DateTime.now {
     loadData();
   }
+
+  final DateTime Function() _clock;
+
+  // いまの日時（注入した時計）
+  DateTime clockNow() => _clock();
 
   // 💡 端末に保存したデータを読み終えたか。
   // ⚠️ 読み終える前の画面は初期値（残高0円・明細なし）なので、そのまま出すと
@@ -1519,7 +1528,7 @@ class AppState extends ChangeNotifier {
     try {
       do {
         _paydaySyncAgain = false;
-        await _syncPaydaysOnce(now ?? DateTime.now());
+        await _syncPaydaysOnce(now ?? clockNow());
       } while (_paydaySyncAgain);
     } finally {
       _paydaySyncRunning = false;
@@ -1586,7 +1595,7 @@ class AppState extends ChangeNotifier {
     notifyListeners();
     final sync = calendarSync;
     if (!calendarAutoSync || sync == null) return;
-    final now = DateTime.now();
+    final now = clockNow();
     for (final entry in shifts.entries) {
       final d = DateTime.tryParse(entry.key);
       if (d == null) continue;
@@ -1626,7 +1635,7 @@ class AppState extends ChangeNotifier {
     try {
       do {
         _shortfallSyncAgain = false;
-        await _syncShortfallsOnce(now ?? DateTime.now());
+        await _syncShortfallsOnce(now ?? clockNow());
       } while (_shortfallSyncAgain);
     } finally {
       _shortfallSyncRunning = false;
@@ -1764,7 +1773,7 @@ class AppState extends ChangeNotifier {
     saveData();
     notifyListeners();
     if (calendarAutoSync) {
-      final date = DateTime.tryParse(dateKey) ?? DateTime.now();
+      final date = DateTime.tryParse(dateKey) ?? clockNow();
       calendarSync?.upsertShift(date, newShift);
     }
   }
@@ -1844,7 +1853,7 @@ class AppState extends ChangeNotifier {
   }
 
   void removeWorkplace(String id) {
-    _removePaydayEventsOf(id, DateTime.now());
+    _removePaydayEventsOf(id, clockNow());
     workplaces.removeWhere((e) => e.id == id);
     // 削除した勤務先に紐づくデータも掃除（入金の選択肢や集計に残らないように）
     actualSalariesByWp.removeWhere((k, _) => k.endsWith('|$id'));
@@ -1907,7 +1916,7 @@ class AppState extends ChangeNotifier {
     // 既存idを全バケットから除去
     events.forEach((k, list) => list.removeWhere((x) => x.id == event.id));
     events.removeWhere((k, list) => list.isEmpty);
-    final d = event.start ?? DateTime.now();
+    final d = event.start ?? clockNow();
     events.putIfAbsent(_formatDate(d), () => []).add(event);
     saveData();
     notifyListeners();
@@ -2487,7 +2496,7 @@ class AppState extends ChangeNotifier {
     double interestRate = 0,
     DateTime? startDate,
   }) {
-    final start = startDate ?? DateTime.now();
+    final start = startDate ?? clockNow();
     // 💡 同一取引の二重登録を防止（カード・総額・回数・利用日が同じものは追加しない）。
     final dup = installments.any((i) =>
         i.cardName == cardName &&
@@ -2534,7 +2543,7 @@ class AppState extends ChangeNotifier {
   int remainingMonthsOf(Installment i) {
     final start = i.startDate;
     if (start == null) return i.remainingMonths; // 旧データは保存値を使用
-    final now = DateTime.now();
+    final now = clockNow();
     var paid = 0;
     for (var k = 0; k < i.installmentCount; k++) {
       // 各回の引落日を正確に算出（土日調整も各回ごと）。過ぎた回数を「支払済み」に。
@@ -2634,7 +2643,7 @@ class AppState extends ChangeNotifier {
     //   金額は動かさず「済み」とだけ記録する（引くと二重になる）。
     _markDebitsAccounted();
     currentBalance = balance;
-    balanceUpdatedAt = DateTime.now(); // #6 編集日時を記録
+    balanceUpdatedAt = clockNow(); // #6 編集日時を記録
     saveData();
     notifyListeners();
   }
@@ -2647,7 +2656,7 @@ class AppState extends ChangeNotifier {
   // 💡 いま時点までのデビットを「残高に入っている」ことにする（金額は動かさない）。
   //   手で残高を書き直したときに使う。
   void _markDebitsAccounted() {
-    final now = DateTime.now();
+    final now = clockNow();
     for (final p in payments) {
       if (!_isDebit(p.cardName)) continue;
       if (p.paymentDate.isAfter(now)) continue; // これから使うぶんは対象外
@@ -2735,7 +2744,7 @@ class AppState extends ChangeNotifier {
 
   // 予定日が過ぎて、まだ受け取っていない入金
   List<({PlannedIncome income, DateTime date})> get duePlannedIncomes {
-    final now = DateTime.now();
+    final now = clockNow();
     final today = DateTime(now.year, now.month, now.day);
     final oldest = today.subtract(const Duration(days: 62));
     final out = <({PlannedIncome income, DateTime date})>[];
@@ -2757,7 +2766,7 @@ class AppState extends ChangeNotifier {
     if (amount > 0) {
       _foldDebitsIntoBalance();
       currentBalance += amount;
-      balanceUpdatedAt = DateTime.now();
+      balanceUpdatedAt = clockNow();
       _recordBalanceEntry(
         kind: BalanceEntryKind.deposit,
         label: p.title.isEmpty ? '予定入金' : p.title,
@@ -2815,7 +2824,7 @@ class AppState extends ChangeNotifier {
         kind: kind,
         label: label,
         amount: amount,
-        at: DateTime.now(),
+        at: clockNow(),
         balanceAfter: currentBalance,
         workplaceId: workplaceId,
         sourceKey: sourceKey,
@@ -2889,7 +2898,7 @@ class AppState extends ChangeNotifier {
     final e = balanceHistory[i];
     _foldDebitsIntoBalance();
     currentBalance -= e.signedAmount; // 反映を打ち消す
-    balanceUpdatedAt = DateTime.now();
+    balanceUpdatedAt = clockNow();
     balanceHistory.removeAt(i);
     final key = e.sourceKey;
     if (key != null && key.isNotEmpty) {
@@ -2934,7 +2943,7 @@ class AppState extends ChangeNotifier {
       paypayTransfers.add(t);
       changed = true;
     }
-    final oldest = DateTime.now().subtract(const Duration(days: 120));
+    final oldest = clockNow().subtract(const Duration(days: 120));
     final before = paypayTransfers.length;
     paypayTransfers.removeWhere((t) => t.scheduledDate.isBefore(oldest));
     receivedTransfers.removeWhere((id, _) => !paypayTransfers.any((t) => t.id == id));
@@ -3006,8 +3015,8 @@ class AppState extends ChangeNotifier {
     if (amount == 0) return;
     _foldDebitsIntoBalance();
     currentBalance += amount;
-    balanceUpdatedAt = DateTime.now();
-    final d = date ?? DateTime.now();
+    balanceUpdatedAt = clockNow();
+    final d = date ?? clockNow();
     // バイトの給料として入力された場合は、その労働月の実給料にも反映する
     final w = workplaceById(workplaceId);
     if (w != null) {
@@ -3066,7 +3075,7 @@ class AppState extends ChangeNotifier {
   void applyDepositNotice(String sourceId, int amount,
       {String? workplaceId, String? transferId}) {
     final idx = pendingDeposits.indexWhere((e) => e.sourceId == sourceId);
-    final date = idx >= 0 ? pendingDeposits[idx].date : DateTime.now();
+    final date = idx >= 0 ? pendingDeposits[idx].date : clockNow();
     if (idx >= 0) pendingDeposits.removeAt(idx);
     handledDepositIds.add(sourceId);
     // 💡 PayPayの出金の着金なら「受け取り済み」にする。
@@ -3089,7 +3098,7 @@ class AppState extends ChangeNotifier {
   //   残高を編集した日より後のものだけが対象（それ以前は残高に反映済みとみなす）。
   List<({String id, String label, int amount, DateTime date})> get pendingDraws {
     final out = <({String id, String label, int amount, DateTime date})>[];
-    final now = DateTime.now();
+    final now = clockNow();
     final today = DateTime(now.year, now.month, now.day);
 
     // 💡 対象は「直近2か月以内に引き落とし日が過ぎたもの」。
@@ -3600,7 +3609,7 @@ class AppState extends ChangeNotifier {
   //   終わったものは出さない。終日の予定はその日の先頭に置く。
   List<({DateTime start, DateTime? end, String title, bool isShift, bool allDay})>
       upcomingSchedule({int days = 3, DateTime? from}) {
-    final now = from ?? DateTime.now();
+    final now = from ?? clockNow();
     final today = DateTime(now.year, now.month, now.day);
     final out = <({DateTime start, DateTime? end, String title, bool isShift, bool allDay})>[];
     for (var i = 0; i < days; i++) {
@@ -3626,7 +3635,7 @@ class AppState extends ChangeNotifier {
     if (amount != 0) {
       _foldDebitsIntoBalance();
       currentBalance -= amount;
-      balanceUpdatedAt = DateTime.now();
+      balanceUpdatedAt = clockNow();
       _recordBalanceEntry(
         kind: BalanceEntryKind.draw,
         label: label ?? '引き落とし',
@@ -3660,7 +3669,7 @@ class AppState extends ChangeNotifier {
     if (amount == 0) return;
     _foldDebitsIntoBalance();
     currentBalance -= amount;
-    balanceUpdatedAt = DateTime.now();
+    balanceUpdatedAt = clockNow();
     _recordBalanceEntry(
       kind: BalanceEntryKind.draw,
       label: label,
@@ -3802,7 +3811,7 @@ class AppState extends ChangeNotifier {
 
   // 今月に予算超過しているカテゴリ
   List<({String label, int budget, int spent, bool over})> get overBudgetThisMonth =>
-      budgetStatus(DateTime.now()).where((e) => e.over).toList();
+      budgetStatus(clockNow()).where((e) => e.over).toList();
 
   // ───── 目標貯金（目標額＋目標年月）─────
   int goalAmount = 0; // 0 = 未設定
@@ -3821,7 +3830,7 @@ class AppState extends ChangeNotifier {
   ({int goal, DateTime date, int monthsLeft, int pace, int projected, bool achievable, int requiredMonthly})?
       savingsForecast() {
     if (goalAmount <= 0 || goalDate == null) return null;
-    final now = DateTime.now();
+    final now = clockNow();
     final monthsLeft =
         ((goalDate!.year - now.year) * 12 + (goalDate!.month - now.month)).clamp(0, 600);
     final pace = monthlyNetPace;
@@ -4022,7 +4031,7 @@ class AppState extends ChangeNotifier {
   //   （引き落とし月ではなく利用月で集計。例: 4月利用→4月の支出に表示）
   int installmentTotalOf(DateTime month) {
     int total = 0;
-    final now = DateTime.now();
+    final now = clockNow();
     for (final i in installments) {
       total += i.amountIn(month, now: now);
     }
@@ -4034,7 +4043,7 @@ class AppState extends ChangeNotifier {
   //   それぞれのカードの請求に含まれて、そのカードの引き落とし日に落ちるため。
   Map<String, int> installmentTotalByCardOf(DateTime month) {
     final out = <String, int>{};
-    final now = DateTime.now();
+    final now = clockNow();
     for (final i in installments) {
       final card = i.cardName.trim();
       if (card.isEmpty) continue; // カード未設定は割り当てられない
@@ -4072,7 +4081,7 @@ class AppState extends ChangeNotifier {
   //   別枠で残して、カードを設定するよう促す。
   int unassignedInstallmentTotalOf(DateTime month) {
     var total = 0;
-    final now = DateTime.now();
+    final now = clockNow();
     for (final i in installments) {
       if (i.cardName.trim().isNotEmpty) continue;
       total += i.amountIn(month, now: now);
@@ -4172,7 +4181,7 @@ class AppState extends ChangeNotifier {
     } else if (label == '分割払い') {
       // ⚠️ 合計（installmentTotalOf）と同じ判定で並べる。以前は開始日の無い旧データを
       //   合計には入れて内訳からは外していたので、内訳を足しても合計に届かなかった。
-      final now = DateTime.now();
+      final now = clockNow();
       for (final i in installments) {
         final amount = i.amountIn(month, now: now);
         if (amount > 0) {
@@ -4228,7 +4237,7 @@ class AppState extends ChangeNotifier {
       //   合計にも足してあり、明細にも出す（銀行確定済みなら確定額に含まれるので出さない）。
       if (!cardHasBank) {
         // ⚠️ 合計（installmentTotalByCardOf）と同じ判定で並べる（開始日の無い旧データも出す）
-        final now = DateTime.now();
+        final now = clockNow();
         for (final inst in installments.where((e) => e.cardName == label)) {
           final amount = inst.amountIn(month, now: now);
           if (amount > 0) {
@@ -4358,7 +4367,7 @@ class AppState extends ChangeNotifier {
 
   // 直近 months か月の月次推移（収入＝給料見込み・支出＝支出内訳合計）。古い順。
   List<({DateTime month, int income, int expense})> monthlyTrend(int months) {
-    final now = DateTime.now();
+    final now = clockNow();
     final out = <({DateTime month, int income, int expense})>[];
     for (var i = months - 1; i >= 0; i--) {
       final m = DateTime(now.year, now.month - i);
@@ -4578,7 +4587,7 @@ class AppState extends ChangeNotifier {
   // 💡 次に来る、まだ払っていない回の予定日（今日以降。1年先まで探す）。
   //   毎月の予定支出は、今月分を払い済みにすると来月分になる。
   DateTime? nextUnpaidPlannedExpenseDate(PlannedExpense e, {DateTime? now}) {
-    final n = now ?? DateTime.now();
+    final n = now ?? clockNow();
     final today = DateTime(n.year, n.month, n.day);
     for (var dm = 0; dm <= 12; dm++) {
       final d = e.dateIn(DateTime(n.year, n.month + dm));
@@ -4880,7 +4889,7 @@ class AppState extends ChangeNotifier {
 
   // 今月末残高。起点＝デビット調整済み残高＋財布の現金、給料・引き落としは編集日より後の分のみ。
   int get thisMonthBalance {
-    final now = DateTime.now();
+    final now = clockNow();
     return effectiveBalance +
         effectiveWalletCash +
         incomeForecastIn(now) +
@@ -4897,7 +4906,7 @@ class AppState extends ChangeNotifier {
   //   同じものだけを使い、並べ替えるだけにする。ここで独自に足し引きすると
   //   月末の金額と食い違う。test/cash_flow_test.dart で月末との一致を固定している。
   List<CashEvent> cashEventsAhead({int monthsAhead = 2}) {
-    final now = DateTime.now();
+    final now = clockNow();
     final out = <CashEvent>[];
     for (var i = 0; i <= monthsAhead; i++) {
       final m = DateTime(now.year, now.month + i, 1);
@@ -4970,7 +4979,7 @@ class AppState extends ChangeNotifier {
   //   ⚠️ 残高の編集日より後なら、日付が今日より前の引き落としも「まだ落ちていない」
   //     ものとして積む（月末予想と同じ扱い）。ただし谷の候補にはしない。
   ({DateTime date, int balance})? lowestBalanceAhead({int monthsAhead = 2}) {
-    final now = DateTime.now();
+    final now = clockNow();
     final today = DateTime(now.year, now.month, now.day);
     final events = cashEventsAhead(monthsAhead: monthsAhead);
     if (events.isEmpty) return null; // 何も動かないなら出すものが無い
@@ -5004,7 +5013,7 @@ class AppState extends ChangeNotifier {
   //   どれを遅らせればいいか判断できないので、割る日を全部返す。
   List<({DateTime date, int balance, List<String> labels})> shortfallDaysAhead(
       {int monthsAhead = 2}) {
-    final now = DateTime.now();
+    final now = clockNow();
     final today = DateTime(now.year, now.month, now.day);
     final events = cashEventsAhead(monthsAhead: monthsAhead);
     var running = effectiveBalance + effectiveWalletCash;
@@ -5030,7 +5039,7 @@ class AppState extends ChangeNotifier {
 
   // 来月末残高
   int get nextMonthBalance {
-    final next = DateTime(DateTime.now().year, DateTime.now().month + 1, 1);
+    final next = DateTime(clockNow().year, clockNow().month + 1, 1);
     return thisMonthBalance +
         incomeForecastIn(next) +
         transferForecastIn(next) -
@@ -5040,7 +5049,7 @@ class AppState extends ChangeNotifier {
 
   // 翌々月末残高（#2）
   int get monthAfterNextBalance {
-    final m2 = DateTime(DateTime.now().year, DateTime.now().month + 2, 1);
+    final m2 = DateTime(clockNow().year, clockNow().month + 2, 1);
     return nextMonthBalance +
         incomeForecastIn(m2) +
         transferForecastIn(m2) -
@@ -5262,7 +5271,7 @@ class AppState extends ChangeNotifier {
   }
 
   Map<String, int> get thisMonthBreakdown {
-    final now = DateTime.now();
+    final now = clockNow();
     final out = <String, int>{'現在の残高': currentBalance};
     if (showWalletCash && walletCash != 0) out['財布の現金'] = walletCash;
     final debit = debitsAfterSnapshot();
@@ -5283,7 +5292,7 @@ class AppState extends ChangeNotifier {
 
   // 来月末残高の内訳。
   Map<String, int> get nextMonthBreakdown {
-    final next = DateTime(DateTime.now().year, DateTime.now().month + 1, 1);
+    final next = DateTime(clockNow().year, clockNow().month + 1, 1);
     final out = <String, int>{'今月末残高': thisMonthBalance};
     final income = incomeForecastIn(next);
     if (income != 0) out['給料入金'] = income;
@@ -5301,7 +5310,7 @@ class AppState extends ChangeNotifier {
 
   // 翌々月末残高の内訳。
   Map<String, int> get monthAfterNextBreakdown {
-    final m2 = DateTime(DateTime.now().year, DateTime.now().month + 2, 1);
+    final m2 = DateTime(clockNow().year, clockNow().month + 2, 1);
     final out = <String, int>{'来月末残高': nextMonthBalance};
     final income = incomeForecastIn(m2);
     if (income != 0) out['給料入金'] = income;
@@ -5331,7 +5340,7 @@ class AppState extends ChangeNotifier {
   String exportJson() {
     final map = {
       'version': 1,
-      'exportedAt': DateTime.now().toIso8601String(),
+      'exportedAt': clockNow().toIso8601String(),
       'shifts': shifts.map((k, v) => MapEntry(k, v.map((e) => e.toJson()).toList())),
       'workplaces': workplaces.map((e) => e.toJson()).toList(),
       'actualSalaries': actualSalaries,
@@ -5592,10 +5601,10 @@ class AppState extends ChangeNotifier {
       final dir = await getApplicationDocumentsDirectory();
       final backupDir = Directory('${dir.path}/backups');
       if (!await backupDir.exists()) await backupDir.create(recursive: true);
-      final ts = DateFormat('yyyyMMdd_HHmmss').format(DateTime.now());
+      final ts = DateFormat('yyyyMMdd_HHmmss').format(clockNow());
       final file = File('${backupDir.path}/pocket_maid_$ts.json');
       await file.writeAsString(exportJson());
-      lastAutoBackupAt = DateTime.now();
+      lastAutoBackupAt = clockNow();
       // 古い7件超えのバックアップを削除
       final files = (await backupDir.list().toList())
           .whereType<File>()
@@ -5811,7 +5820,7 @@ class AppState extends ChangeNotifier {
   Future<void> saveData({bool markModified = true}) async {
     final prefs = await SharedPreferences.getInstance();
     if (markModified) {
-      dataUpdatedAt = DateTime.now();
+      dataUpdatedAt = clockNow();
       await prefs.setString('saved_data_updated_at', dataUpdatedAt!.toIso8601String());
     }
     await prefs.setString('saved_shifts', jsonEncode(shifts));
@@ -5879,7 +5888,7 @@ class AppState extends ChangeNotifier {
     await prefs.setBool('saved_calendar_autosync', calendarAutoSync);
     await prefs.setBool('saved_first_sync', gmailFirstSyncDone);
     // 自動バックアップ（1日1回）
-    final now = DateTime.now();
+    final now = clockNow();
     if (autoBackupEnabled &&
         (lastAutoBackupAt == null ||
             lastAutoBackupAt!.year != now.year ||
