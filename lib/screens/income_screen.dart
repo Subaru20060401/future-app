@@ -725,11 +725,15 @@ class IncomeScreen extends StatelessWidget {
     // データの計算（新仕様の残高予測）
     final now = DateTime.now();
     // 給料は給料日に入金される前提（給料日offsetぶん前の労働月の手取り）
-    final int expectedIncome = appState.incomeForecastIn(now);
-    final int cardExpenses = appState.cardPaymentsOf(now);
-    final int subscriptions = appState.subscriptionTotal;
-    final int installments = appState.installmentTotal;
-    final int withdrawals = appState.withdrawalsOf(now);
+    // 💡 今月の入金・出金は、今月末の予想と同じ行（forecastMonths）から作る。
+    //   ⚠️ 以前は別の規則（カード名で決め打ちした引落日・今月時点の分割の合計）で計算していて、
+    //     同じ画面の予想残高と合わなかった。
+    final thisForecast = appState.forecastMonths(count: 1).first;
+    final int expectedIncome = thisForecast.incomeTotal;
+    final outgo = [
+      for (final g in thisForecast.grouped())
+        if (g.amount < 0) (label: g.group, value: -g.amount),
+    ];
     final int thisMonth = appState.thisMonthBalance;
     final int nextMonth = appState.nextMonthBalance;
     final int futureBalance = nextMonth;
@@ -738,15 +742,9 @@ class IncomeScreen extends StatelessWidget {
     final int nextMonthNum = DateTime(now.year, now.month + 1, 1).month;
     final int monthAfterNextNum = DateTime(now.year, now.month + 2, 1).month;
 
-    final cardBreakdown = appState.cardChargesOf(now);
-
-    // 💡 支出を色分けセグメントに（カード別＋定期＋分割＋ATM）
+    // 💡 支出を色分けセグメントに（今月末までに引かれるもの。予想と同じ行）
     final segments = <({String label, int value, Color color})>[
-      for (final e in cardBreakdown.entries)
-        (label: e.key, value: e.value, color: cardColorOf(e.key)),
-      if (subscriptions > 0) (label: '定期支払い', value: subscriptions, color: Colors.purple),
-      if (installments > 0) (label: '分割払い', value: installments, color: Colors.deepOrange),
-      if (withdrawals > 0) (label: 'ATM', value: withdrawals, color: Colors.brown),
+      for (final e in outgo) (label: e.label, value: e.value, color: cardColorOf(e.label)),
     ];
     final totalExpense = segments.fold<int>(0, (s, e) => s + e.value);
     // グラフに出すものが何も無いか（残高も収入も支出も0）
@@ -1208,51 +1206,16 @@ class IncomeScreen extends StatelessWidget {
             ),
             ListTile(
               leading: const Icon(Icons.work, color: Colors.green),
-              title: const Text('給料入金（今月）'),
-              subtitle: const Text('給料日に入金される見込み'),
+              title: const Text('今月の入金（見込み）'),
+              subtitle: const Text('残高を書いた日より後に入る給料・予定の入金'),
               trailing: Text('+ ¥ ${yenNum(expectedIncome)}', style: const TextStyle(fontSize: 16, color: Colors.green, fontWeight: FontWeight.bold)),
             ),
-            ListTile(
-              leading: const Icon(Icons.credit_card, color: Colors.red),
-              title: const Text('カード請求(未払い)'),
-              trailing: Text('- ¥ ${yenNum(cardExpenses)}', style: const TextStyle(fontSize: 16, color: Colors.red)),
-            ),
-            // 💡 カード別の内訳
-            if (cardBreakdown.isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.only(left: 24, right: 16, bottom: 8),
-                child: Column(
-                  children: cardBreakdown.entries.map((e) {
-                    final style = cardStyleOf(e.key);
-                    return Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 2),
-                      child: Row(
-                        children: [
-                          Container(width: 10, height: 10, decoration: BoxDecoration(color: style.color, shape: BoxShape.circle)),
-                          const SizedBox(width: 8),
-                          Expanded(child: Text(e.key, style: const TextStyle(fontSize: 13, color: Colors.black54))),
-                          Text('¥ ${yenNum(e.value)}', style: const TextStyle(fontSize: 13, color: Colors.black54)),
-                        ],
-                      ),
-                    );
-                  }).toList(),
-                ),
+            for (final e in outgo)
+              ListTile(
+                leading: Icon(Icons.credit_card, color: cardColorOf(e.label)),
+                title: Text(e.label),
+                trailing: Text('- ¥ ${yenNum(e.value)}', style: const TextStyle(fontSize: 16, color: Colors.red)),
               ),
-            ListTile(
-              leading: const Icon(Icons.subscriptions, color: Colors.purple),
-              title: const Text('定期支払い'),
-              trailing: Text('- ¥ ${yenNum(subscriptions)}', style: const TextStyle(fontSize: 16, color: Colors.red)),
-            ),
-            ListTile(
-              leading: const Icon(Icons.calendar_view_month, color: Colors.deepOrange),
-              title: const Text('分割払い(今月)'),
-              trailing: Text('- ¥ ${yenNum(installments)}', style: const TextStyle(fontSize: 16, color: Colors.red)),
-            ),
-            ListTile(
-              leading: const Icon(Icons.atm, color: Colors.brown),
-              title: const Text('ATM引き出し'),
-              trailing: Text('- ¥ ${yenNum(withdrawals)}', style: const TextStyle(fontSize: 16, color: Colors.red)),
-            ),
 
             // 💡 年間サマリー（過去2年分・年収/カード支出）
             if (appState.dataYears.isNotEmpty) ...[
@@ -1266,11 +1229,13 @@ class IncomeScreen extends StatelessWidget {
                 final estimated = appState.estimatedSalaryOfYear(year);
                 final actual = appState.actualSalaryOfYear(year);
                 final hasActual = appState.hasActualSalaryInYear(year);
-                final spending = appState.cardSpendingOfYear(year);
+                final spending = appState.expenseSummaryOfYear(year);
                 return Card(
                   child: ListTile(
                     title: Text('$year年'),
-                    subtitle: Text('カード支出 ¥${yenNum(spending)}'),
+                    subtitle: Text(spending.fromSettings > 0
+                        ? '年間支出 ¥${yenNum(spending.total)}（うち設定から計算 ¥${yenNum(spending.fromSettings)}）'
+                        : '年間支出 ¥${yenNum(spending.total)}'),
                     trailing: Column(
                       mainAxisAlignment: MainAxisAlignment.center,
                       crossAxisAlignment: CrossAxisAlignment.end,

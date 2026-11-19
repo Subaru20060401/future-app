@@ -77,10 +77,18 @@ bool isJapaneseHoliday(DateTime date) {
 }
 
 // 土日または祝日か（銀行が休みの日）
+// 💡 銀行の休業日（引き落とし・給料の振込が動かない日）＝土日・祝日・年末年始（12/31〜1/3）。
+//   ⚠️ 年末年始は「国民の祝日」ではないので isJapaneseHoliday には入れない
+//     （勤務日の祝日の表示や休日の判定に広げないため）。銀行の営業日の判定だけで使う。
+bool isBankYearEndHoliday(DateTime date) =>
+    (date.month == 12 && date.day == 31) ||
+    (date.month == 1 && date.day <= 3);
+
 bool isBankHoliday(DateTime date) =>
     date.weekday == DateTime.saturday ||
     date.weekday == DateTime.sunday ||
-    isJapaneseHoliday(date);
+    isJapaneseHoliday(date) ||
+    isBankYearEndHoliday(date);
 
 // 直前の営業日（その日が営業日ならそのまま）
 DateTime previousBusinessDay(DateTime date) {

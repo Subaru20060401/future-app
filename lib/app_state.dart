@@ -1478,8 +1478,11 @@ class AppState extends ChangeNotifier {
     final now = clockNow();
     var paid = 0;
     for (var k = 0; k < i.installmentCount; k++) {
-      // 各回の引落日を正確に算出（土日調整も各回ごと）。過ぎた回数を「支払済み」に。
-      final d = debitDateForNth(i.cardName, start, k);
+      // 各回の引落日（土日祝・年末年始の調整も各回ごと）。過ぎた回数を「支払済み」に。
+      // 💡 予想と同じ規則: k 回目は「利用開始月＋k 月」の利用ぶんとして、その翌月の
+      //   カードの引落日（設定の引落日）に落ちる。
+      // ⚠️ 以前はカード名から引落日を決め打ちしていた（楽天=27日・三井/Amazon/メル=26日）。
+      final d = cardDrawDateOf(i.cardName, DateTime(start.year, start.month + 1 + k));
       if (!d.isAfter(now)) paid++;
     }
     return (i.installmentCount - paid).clamp(0, i.installmentCount);
@@ -2052,19 +2055,25 @@ class AppState extends ChangeNotifier {
 
     // ①' 事前お知らせメールが来ていないカードは、設定した引き落とし日で知らせる。
     //   金額は前月の利用合計から見込みで出す（ダイアログで直せる）。
-    for (final e in cardPaymentDays.entries) {
-      final card = e.key;
-      for (var back = 0; back < 3; back++) {
-        final m = DateTime(now.year, now.month - back);
-        final date = cardDrawDateOf(card, m); // 土日祝は翌営業日
+    // 💡 日付・金額は予想と同じ規則（cardDrawDateOf・cardBillAmountOf）。締め日が月末以外のカードは
+    //   締め期間で集計し、分割払い・カード払いのローン・頭金も合算する（以前は暦月の利用合計だけ）。
+    //   ⚠️ 予想のゲート（残高を書いた日）はここでは使わない。確認待ちは「処理したか」で消える。
+    for (final card in cardPaymentDays.keys) {
+      if (_excludedFromDraw(card)) continue; // デビットなどは口座の引き落としではない
+      for (var back = 0; back < 4; back++) {
+        final m = DateTime(now.year, now.month - back); // 請求の月
+        final date = cardDrawDateOf(card, m); // 土日祝・年末年始は翌営業日
         if (!inWindow(date)) continue;
         final ym = DateFormat('yyyy-MM').format(date);
         if (bankDone.contains('$card|$ym')) continue; // 事前お知らせ優先
-        // 引き落とし額＝前月の利用分
-        final amount = paymentTotalsByCardOf(DateTime(m.year, m.month - 1))[card] ?? 0;
+        final amount = cardBillAmountOf(card, m);
         if (amount <= 0) continue;
-        final id = 'card:$card:$ym';
+        // ⚠️ ID は「請求の月」。休みで翌月にずれた引落（10/31→11/2 など）も、翌月分と別の ID になる。
+        //   ずれていない引落は以前と同じ ID（引落日の月＝請求の月）なので、処理済みの記録はそのまま効く。
+        //   ずれた引落は、以前の ID（引落日の月）で処理済みなら出さない（以前の記録との互換）。
+        final id = 'card:$card:${DateFormat('yyyy-MM').format(m)}';
         if (handledDrawIds.contains(id)) continue;
+        if (date.month != m.month && handledDrawIds.contains('card:$card:$ym')) continue;
         out.add((id: id, label: '$card（予定）', amount: amount, date: date));
       }
     }
@@ -2075,8 +2084,8 @@ class AppState extends ChangeNotifier {
     for (final sub in subscriptions.where((e) => !e.isCardPayment)) {
       for (var back = 0; back < 3; back++) {
         final m = DateTime(now.year, now.month - back);
-        // ⚠️ 予想（subscriptionDrawsIn）と違い、休みの翌営業日に寄せていない（段階5で揃える）
-        final date = clampedDay(m.year, m.month, sub.payDay);
+        // 💡 予想（subscriptionDrawsIn）と同じく、休みなら翌営業日（以前はそのままの日付だった）
+        final date = drawDateInMonth(sub.payDay, m);
         if (!inWindow(date)) continue;
         final id = 'sub:${sub.id}:${DateFormat('yyyy-MM').format(m)}';
         if (handledDrawIds.contains(id)) continue;
@@ -3024,9 +3033,14 @@ class AppState extends ChangeNotifier {
   List<Installment> get installmentsWithoutCard =>
       installments.where((i) => i.cardName.trim().isEmpty).toList();
 
-  List<({String label, int amount, int colorValue})> expenseBreakdownOf(DateTime month) {
-    final out = <({String label, int amount, int colorValue})>[];
+  // 💡 利用月の支出（①）。カード・定期・ローン・分割・ATM を、月 M に使ったお金として集計する。
+  //   残高のゲートは使わない（残高を書き直しても過去の支出は変わらない）。
+  //   fromSettings は「明細の記録ではなく、今の設定（定期・分割・ローン）から計算したぶん」。
+  //   定期には開始日が無いので、過去の月の定期は今の設定からの推定になる。
+  List<({String label, int amount, int colorValue, int fromSettings})> _expenseItemsOf(
+      DateTime month) {
     final totals = Map<String, int>.from(paymentTotalsByCardOf(month));
+    final settings = <String, int>{};
     final bank = _bankConfirmedTotalsOf(month);
 
     // 💡 分割払い・カード払いのローン・頭金はカードの請求に含めて落ちるので、
@@ -3036,6 +3050,7 @@ class AppState extends ChangeNotifier {
       byCard.forEach((card, amount) {
         if (_isConfirmedIn(card, bank)) return;
         totals[card] = (totals[card] ?? 0) + amount;
+        settings[card] = (settings[card] ?? 0) + amount;
       });
     }
 
@@ -3043,9 +3058,15 @@ class AppState extends ChangeNotifier {
     fold(loanTotalByCardOf(month));
     fold(downPaymentByCardOf(month));
 
+    final out = <({String label, int amount, int colorValue, int fromSettings})>[];
     totals.forEach((card, amount) {
       if (amount > 0) {
-        out.add((label: card, amount: amount, colorValue: cardColorOf(card).toARGB32()));
+        out.add((
+          label: card,
+          amount: amount,
+          colorValue: cardColorOf(card).toARGB32(),
+          fromSettings: settings[card] ?? 0,
+        ));
       }
     });
 
@@ -3060,6 +3081,7 @@ class AppState extends ChangeNotifier {
           label: '分割払い（カード未設定）',
           amount: unassigned,
           colorValue: Colors.deepOrange.toARGB32(),
+          fromSettings: unassigned,
         ));
       }
     }
@@ -3068,22 +3090,56 @@ class AppState extends ChangeNotifier {
       if (!l.isFromAccount) continue;
       // 💡 この利用月の翌月に銀行確定があれば、手動の予定額は足さない。
       if (_hasLoanBankBill(l, DateTime(month.year, month.month + 1))) continue;
+      final amount = l.amountIn(month);
       out.add((
         label: l.name,
-        amount: l.amountIn(month),
+        amount: amount,
         colorValue: Colors.indigo.toARGB32(),
+        fromSettings: amount,
       ));
     }
     final subTotal = subscriptionTotalOf(month);
     if (subTotal > 0) {
-      out.add((label: '定期支払い', amount: subTotal, colorValue: Colors.purple.toARGB32()));
+      out.add((
+        label: '定期支払い',
+        amount: subTotal,
+        colorValue: Colors.purple.toARGB32(),
+        fromSettings: subTotal,
+      ));
     }
     final atm = withdrawalsOf(month);
     if (atm > 0) {
-      out.add((label: 'ATM', amount: atm, colorValue: Colors.brown.toARGB32()));
+      out.add((label: 'ATM', amount: atm, colorValue: Colors.brown.toARGB32(), fromSettings: 0));
     }
     out.sort((a, b) => b.amount.compareTo(a.amount));
     return out;
+  }
+
+  List<({String label, int amount, int colorValue})> expenseBreakdownOf(DateTime month) => [
+        for (final e in _expenseItemsOf(month))
+          (label: e.label, amount: e.amount, colorValue: e.colorValue),
+      ];
+
+  /// 利用月の支出の合計と、そのうち今の設定から計算したぶん（推定）。
+  ({int total, int fromSettings}) expenseSummaryOf(DateTime month) {
+    var total = 0, settings = 0;
+    for (final e in _expenseItemsOf(month)) {
+      total += e.amount;
+      settings += e.fromSettings;
+    }
+    return (total: total, fromSettings: settings);
+  }
+
+  /// 年間支出（利用月の支出を 1〜12 月ぶん足したもの）と、そのうち設定から計算したぶん。
+  /// 💡 12 月の利用は翌年 1 月に引き落とされても、その年（12 月）の支出に入る。
+  ({int total, int fromSettings}) expenseSummaryOfYear(int year) {
+    var total = 0, settings = 0;
+    for (var m = 1; m <= 12; m++) {
+      final s = expenseSummaryOf(DateTime(year, m));
+      total += s.total;
+      settings += s.fromSettings;
+    }
+    return (total: total, fromSettings: settings);
   }
 
   // 支払い種別の表示名（明細詳細のサブ情報用）
@@ -3318,17 +3374,6 @@ class AppState extends ChangeNotifier {
     return false;
   }
 
-  // 指定年のカード支出合計（利用通知・確定を含む実支出）
-  int cardSpendingOfYear(int year) {
-    return payments
-        .where((p) => p.paymentDate.year == year)
-        .fold(0, (sum, p) => sum + p.amount);
-  }
-
-  // 指定月の総支出（カード＋定期＋ATM＋分割）
-  int monthlyExpenseOf(DateTime month) =>
-      cardPaymentsOf(month) + subscriptionTotal + withdrawalsOf(month) + installmentTotal;
-
   // 直近 months か月の月次推移（収入＝給料見込み・支出＝支出内訳合計）。古い順。
   List<({DateTime month, int income, int expense})> monthlyTrend(int months) {
     final now = clockNow();
@@ -3343,84 +3388,7 @@ class AppState extends ChangeNotifier {
   }
 
   // 指定年の総支出（各月の支出内訳合計を12か月ぶん。円グラフ中央の年支出用）
-  int expenseOfYear(int year) {
-    int total = 0;
-    for (var m = 1; m <= 12; m++) {
-      total += expenseBreakdownOf(DateTime(year, m)).fold(0, (s, e) => s + e.amount);
-    }
-    return total;
-  }
-
-  // 💡 引き落とし日ルール（締め＝末日）
-  //   楽天        : 利用月の翌月27日（月末締め・翌月27日払い）
-  //   三井OLIVE/Amazonマスター : 利用月の翌月26日
-  //   その他       : 利用月の翌月27日
-  //   土日は翌営業日へ（祝日は未対応）
-  ({int monthsAhead, int day}) _cardDrawRule(String cardName) {
-    if (cardName.contains('楽天')) return (monthsAhead: 1, day: 27);
-    if (cardName.contains('OLIVE') ||
-        cardName.contains('Amazon') ||
-        cardName.contains('メル') ||
-        cardName.contains('三井')) {
-      return (monthsAhead: 1, day: 26);
-    }
-    return (monthsAhead: 1, day: 27);
-  }
-
-  // 土日祝は翌営業日へ（カードの引き落としは後ろ倒し）
-  DateTime _businessDay(DateTime d) => nextBusinessDay(d);
-
-  // 利用日から1回目の引き落とし日。
-  DateTime debitDateFor(String cardName, DateTime purchaseDate) =>
-      debitDateForNth(cardName, purchaseDate, 0);
-
-  // 利用日からk回目(0始まり)の引き落とし日。分割の各回の引落日を正確に出す。
-  //   ※各回ごとに土日調整するので、1回目の土日ズレを後続へ持ち越さない。
-  DateTime debitDateForNth(String cardName, DateTime purchaseDate, int k) {
-    final r = _cardDrawRule(cardName);
-    return _businessDay(
-        DateTime(purchaseDate.year, purchaseDate.month + r.monthsAhead + k, r.day));
-  }
-
-  // 💡 指定月に引き落とされるカード請求を「カード別」に集計。
-  //   ・請求予定/銀行確定/手動 … paymentDate がその月のものを採用
-  //   ・利用通知(usage) … 引落日ルールで引落月を推定。ただし同カードに
-  //     確定/予測(explicit)があればそちらを優先（二重計上を防ぐ）
-  Map<String, int> cardChargesOf(DateTime month) {
-    bool sameYm(DateTime d) => d.year == month.year && d.month == month.month;
-    final result = <String, int>{};
-
-    for (final p in payments) {
-      if (p.paid || p.source == PaymentSource.usage) continue;
-      if (sameYm(p.paymentDate)) {
-        result[p.cardName] = (result[p.cardName] ?? 0) + p.amount;
-      }
-    }
-
-    // 利用通知 → 引落月を推定して、確定/予測が無いカードだけ予測計上。
-    // 💡 以下は将来の引落ではないため残高予測に含めない（情報のみ）:
-    //   ・Amazon発送由来(amazon#) … 支払カード不明
-    //   ・デビット … 即時に口座から引落済み
-    //   ・Vポイントペイ … プリペイド残高から支払済み
-    final usageByCard = <String, int>{};
-    for (final p in payments) {
-      if (p.paid || p.source != PaymentSource.usage) continue;
-      if (p.sourceId.startsWith('amazon#')) continue;
-      if (p.cardName.contains('デビット') || p.cardName.contains('ポイントペイ')) continue;
-      if (sameYm(debitDateFor(p.cardName, p.paymentDate))) {
-        usageByCard[p.cardName] = (usageByCard[p.cardName] ?? 0) + p.amount;
-      }
-    }
-    usageByCard.forEach((card, amt) {
-      result.putIfAbsent(card, () => amt);
-    });
-
-    return result;
-  }
-
-  // 指定月の未払いカード請求合計
-  int cardPaymentsOf(DateTime month) =>
-      cardChargesOf(month).values.fold(0, (sum, v) => sum + v);
+  int expenseOfYear(int year) => expenseSummaryOfYear(year).total;
 
   // 定期支払い（毎月固定）合計
   int get subscriptionTotal =>
@@ -3628,11 +3596,6 @@ class AppState extends ChangeNotifier {
         .fold(0, (sum, w) => sum + w.amount);
   }
 
-  // 分割払い（残回数があるもの）の今月分合計。残回数は経過に応じて動的算出。
-  int get installmentTotal => installments
-      .where((i) => remainingMonthsOf(i) > 0)
-      .fold(0, (sum, i) => sum + i.monthlyAmount);
-
   // 💡 給料日までのズレ（月）。勤務先の paydayMonthOffset の最頻値（無ければ翌月=1）。
   //   締日締め→給料日に入金、を予測へ反映するために使う。
   int get paydayOffsetMonths {
@@ -3763,8 +3726,7 @@ class AppState extends ChangeNotifier {
       // ⚠️ 締め期間で集計するのは「利用明細」だけ。分割払い・カード払いのローン・
       //   頭金は月ごとに積まれるので、ここで足さないと丸ごと消える
       //   （注記には「うち分割払い」と出るのに合計に入っていない状態になる）。
-      final amount = cardUsageInClosingPeriod(card, payMonth) +
-          cardFoldedExtrasOf(card, useMonth);
+      final amount = cardBillAmountOf(card, payMonth);
       if (amount <= 0) continue;
       out.add((label: card, amount: amount, colorValue: cardColorOf(card).toARGB32()));
     }
@@ -3786,6 +3748,21 @@ class AppState extends ChangeNotifier {
 
     out.sort((a, b) => b.amount.compareTo(a.amount));
     return out;
+  }
+
+  // 💡 そのカードの payMonth の請求額（ゲートなし）。予想（drawBreakdownOf）と確認待ち（pendingDraws）が使う。
+  //   ・締め日が月末以外 … 締め期間の利用（銀行確定があれば確定額）＋分割・カード払いのローン・頭金
+  //   ・月末締め … 前月の支出（expenseBreakdownOf）のそのカードの額（同じものを合算済み）
+  int cardBillAmountOf(String card, DateTime payMonth) {
+    final useMonth = DateTime(payMonth.year, payMonth.month - 1);
+    if (!isMonthEndClosing(card)) {
+      // ⚠️ 締め期間で集計するのは「利用明細」だけ。分割払い・カード払いのローン・
+      //   頭金は月ごとに積まれるので、ここで足さないと丸ごと消える。
+      return cardUsageInClosingPeriod(card, payMonth) + cardFoldedExtrasOf(card, useMonth);
+    }
+    return expenseBreakdownOf(useMonth)
+        .where((e) => e.label == card)
+        .fold(0, (s, e) => s + e.amount);
   }
 
   // 💡 payMonth に口座から落ちる定期支払い（1件ずつ、その引き落とし日つき）。
@@ -3849,13 +3826,44 @@ class AppState extends ChangeNotifier {
   int get forecastStart => effectiveBalance + effectiveWalletCash;
 
   /// 今月から [count] か月ぶんの予想（[0] が今月）。
+  /// 💡 行は「実際の日付の月」に入れる。引落日・給料日が休みで月をまたぐと
+  ///   （月末払いの 10/31 土 → 11/2、12/31 → 1/4、1日払いの給料が前営業日へ など）、
+  ///   元の月の月末予想ではなく、実際に動く月の予想に入る。
+  ///   ⚠️ 以前は元の月で引いていたので、日ごとの並び（谷）と月末予想が食い違っていた。
+  ///   ・前月分の行は、今月以降にずれ込んだものだけ拾う（前月中の動きは今まで通り予想に入れない）
+  ///   ・今月分で、日付が今月より前にずれたものは今月に入れる（まだ残高に入っていない可能性があるため。
+  ///     残高を書いた日より前のものは、行を作る時点でゲートが外している）
   List<MonthForecast> forecastMonths({int count = 3}) {
     final now = clockNow();
+    final first = DateTime(now.year, now.month, 1);
+    int bucketOf(DateTime d) =>
+        (d.year - first.year) * 12 + (d.month - first.month); // 0 = 今月
+    final buckets = List.generate(count, (_) => <ForecastLine>[]);
+    // 今月以降の分を先に、前月からずれ込んだ分を後に並べる（今月の並びを今までと同じにするため）
+    for (final s in [for (var i = 0; i <= count; i++) i, -1]) {
+      final source = DateTime(first.year, first.month + s, 1);
+      for (final l in _forecastLinesOf(source)) {
+        var b = bucketOf(l.date);
+        if (s >= 0 && b < 0) b = 0; // 今月以降の分が前月の日付にずれた → 今月に入れる
+        if (b < 0 || b >= count) continue;
+        // 入金のまとめ名は、入った月で決める（今月だけ「編集後」）
+        buckets[b].add(l.kind == ForecastKind.income
+            ? ForecastLine(
+                kind: l.kind,
+                label: l.label,
+                group: b == 0 ? '給料入金（編集後）' : '給料入金',
+                amount: l.amount,
+                date: l.date,
+                certainty: l.certainty,
+              )
+            : l);
+      }
+    }
     final out = <MonthForecast>[];
     var start = forecastStart;
     for (var i = 0; i < count; i++) {
-      final m = DateTime(now.year, now.month + i, 1);
-      final f = MonthForecast(month: m, start: start, lines: _forecastLinesOf(m));
+      final f = MonthForecast(
+          month: DateTime(first.year, first.month + i, 1), start: start, lines: buckets[i]);
       out.add(f);
       start = f.end;
     }
