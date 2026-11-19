@@ -8,6 +8,7 @@ import 'package:intl/intl.dart';
 import 'package:path_provider/path_provider.dart';
 import 'card_styles.dart';
 import 'finance/billing_dates.dart';
+import 'finance/forecast.dart';
 import 'japanese_holidays.dart';
 import 'workplace_styles.dart';
 import 'mail_schedule_models.dart';
@@ -21,6 +22,7 @@ export 'models/calendar_items.dart';
 export 'models/money.dart';
 export 'models/shift.dart';
 export 'models/workplace.dart';
+export 'finance/forecast.dart' show ForecastLine, MonthForecast, Certainty, CertaintyLabel, ForecastKind;
 import 'money_format.dart';
 
 // ───────────────────────── CSV取り込み用の補助 ─────────────────────────
@@ -3802,175 +3804,201 @@ class AppState extends ChangeNotifier {
   // 財布の現金（機能ONのときだけ有効）
   int get effectiveWalletCash => showWalletCash ? walletCash : 0;
 
-  // 今月末残高。起点＝デビット調整済み残高＋財布の現金、給料・引き落としは編集日より後の分のみ。
-  int get thisMonthBalance {
+  // ════════════ 残高の予想（1 つの行の並びから全部を作る） ════════════
+  // 💡 月末の金額・内訳・日ごとの並び・最低残高・足りなくなる日は、すべて forecastMonths の行から作る。
+  //   規則（何をいつ引くか）は材料の関数（incomeForecastIn と同じ分岐・transfersForecastIn・
+  //   drawBreakdownOf・subscriptionDrawsIn・oneTimeExpensesIn）にあり、ここは行に並べるだけ。
+  //   ⚠️ 以前は「起点＋入金−引き落とし−一度きり」が 7 か所に書かれていた。
+  //     足し引きを増やすときは _forecastLinesOf にだけ足す（lib/finance/forecast.dart）。
+  //   計算中に保存・通知・状態の変更はしない（読み取りだけ）。
+
+  // 今月の起点＝デビット調整済みの残高＋財布の現金
+  int get forecastStart => effectiveBalance + effectiveWalletCash;
+
+  /// 今月から [count] か月ぶんの予想（[0] が今月）。
+  List<MonthForecast> forecastMonths({int count = 3}) {
     final now = clockNow();
-    return effectiveBalance +
-        effectiveWalletCash +
-        incomeForecastIn(now) +
-        transferForecastIn(now) -
-        drawnInMonth(now) -
-        oneTimeExpenseForecastIn(now);
+    final out = <MonthForecast>[];
+    var start = forecastStart;
+    for (var i = 0; i < count; i++) {
+      final m = DateTime(now.year, now.month + i, 1);
+      final f = MonthForecast(month: m, start: start, lines: _forecastLinesOf(m));
+      out.add(f);
+      start = f.end;
+    }
+    return out;
   }
+
+  // 💡 実給料が入っていれば確定、無ければシフトからの見込み
+  Certainty _salaryCertainty(DateTime workMonth, String? wpKey) {
+    if (wpKey != null) {
+      return actualSalaryOfWorkplace(workMonth, wpKey) != null
+          ? Certainty.confirmed
+          : Certainty.estimated;
+    }
+    final keys = _salaryByWorkplaceOf(workMonth).keys;
+    final allActual = keys.isNotEmpty &&
+        keys.every((k) => actualSalariesByWp[_wpSalKey(workMonth, k)] != null);
+    final legacy = keys.every((k) => actualSalariesByWp[_wpSalKey(workMonth, k)] == null) &&
+        actualSalaries[_ymKey(workMonth)] != null;
+    return allActual || legacy ? Certainty.confirmed : Certainty.estimated;
+  }
+
+  // 💡 その月の引き落としが銀行の引落確定で決まっているか（カード・口座払いローン）
+  Certainty _drawCertainty(String label, DateTime payMonth) {
+    final useMonth = DateTime(payMonth.year, payMonth.month - 1);
+    if (cardPaymentDays.containsKey(label) || payments.any((p) => p.cardName == label)) {
+      return isCardConfirmedByBank(label, useMonth) ? Certainty.confirmed : Certainty.estimated;
+    }
+    if (label == '分割払い（カード未設定）') return Certainty.estimated;
+    return Certainty.scheduled; // 口座払いのローンなど、自分で登録したもの
+  }
+
+  // 予想の行（その月ぶん）。並び順: 入金 → 予定入金 → PayPay → 引き落とし（金額の大きい順）→ 一度きり
+  List<ForecastLine> _forecastLinesOf(DateTime m) {
+    final out = <ForecastLine>[];
+    final lastDay = DateTime(m.year, m.month + 1, 0).day;
+    final isThisMonth = () {
+      final n = clockNow();
+      return n.year == m.year && n.month == m.month;
+    }();
+    final incomeGroup = isThisMonth ? '給料入金（編集後）' : '給料入金';
+
+    // ── 入金（incomeForecastIn と同じ分岐） ──
+    if (balanceUpdatedAt == null || workplaces.isEmpty) {
+      // 💡 勤務先ごとに分けられない経路。日付は給料日に寄せる
+      //   （勤務先があればいちばん早い給料日、無ければ既定の25日）。
+      final amount = incomeArrivingIn(m);
+      if (amount != 0) {
+        final dates = [for (final w in workplaces) w.paydayIn(m)]..sort();
+        final wm = DateTime(m.year, m.month - paydayOffsetMonths);
+        out.add(ForecastLine(
+          kind: ForecastKind.income,
+          label: '給料',
+          group: incomeGroup,
+          amount: amount,
+          date: dates.isEmpty ? DateTime(m.year, m.month, 25 > lastDay ? lastDay : 25) : dates.first,
+          certainty: _salaryCertainty(wm, null),
+        ));
+      }
+    } else {
+      for (final w in workplaces) {
+        final wm = DateTime(m.year, m.month - w.paydayMonthOffset);
+        final payDate = w.paydayIn(m);
+        if (!_forecastInclude(payDate)) continue;
+        final amount = takeHomeOfWorkplace(wm, w.id);
+        if (amount == 0) continue;
+        out.add(ForecastLine(
+          kind: ForecastKind.income,
+          label: w.name,
+          group: incomeGroup,
+          amount: amount,
+          date: payDate,
+          certainty: _salaryCertainty(wm, w.id),
+        ));
+      }
+    }
+    for (final e in plannedIncomesIn(m)) {
+      if (!_forecastInclude(e.date)) continue;
+      out.add(ForecastLine(
+        kind: ForecastKind.income,
+        label: e.income.title,
+        group: incomeGroup,
+        amount: e.income.amount,
+        date: e.date,
+        certainty: Certainty.scheduled,
+      ));
+    }
+    // PayPayからの出金（振込予定日に入る）
+    for (final t in transfersForecastIn(m)) {
+      out.add(ForecastLine(
+        kind: ForecastKind.transfer,
+        label: 'PayPayからの入金',
+        group: 'PayPayからの入金（${t.scheduledDate.month}/${t.scheduledDate.day}頃）',
+        amount: t.amount,
+        date: t.scheduledDate,
+        certainty: Certainty.scheduled,
+      ));
+    }
+
+    // ── 引き落とし（drawBreakdownOf がゲート済み。日付と確からしさを付ける） ──
+    for (final e in drawBreakdownOf(m)) {
+      final group = drawLabelOf(e.label, m);
+      if (e.label == '定期支払い') {
+        // 定期は1件ずつの引き落とし日に置く（まとめた日付にすると谷の日がずれる）
+        for (final d in subscriptionDrawsIn(m)) {
+          out.add(ForecastLine(
+            kind: ForecastKind.draw,
+            label: '定期: ${d.title}',
+            group: group,
+            amount: -d.amount,
+            date: d.date,
+            certainty: Certainty.scheduled,
+          ));
+        }
+        continue;
+      }
+      out.add(ForecastLine(
+        kind: ForecastKind.draw,
+        label: e.label,
+        group: group,
+        amount: -e.amount,
+        date: drawDateOf(e.label, m), // 判定と同じ日付に置く
+        certainty: _drawCertainty(e.label, m),
+      ));
+    }
+
+    // ── 一度きりの出費（頭金・予定支出。月ズレさせず日付どおり） ──
+    for (final e in oneTimeExpensesIn(m)) {
+      if (!_forecastInclude(e.date)) continue;
+      out.add(ForecastLine(
+        kind: ForecastKind.oneTime,
+        label: e.label,
+        group: '${e.label}（${e.date.month}/${e.date.day}）',
+        amount: -e.amount,
+        date: e.date,
+        certainty: Certainty.scheduled,
+      ));
+    }
+    return out;
+  }
+
+  // 今月末・来月末・翌々月末の予想残高
+  int get thisMonthBalance => forecastMonths(count: 1)[0].end;
+  int get nextMonthBalance => forecastMonths(count: 2)[1].end;
+  int get monthAfterNextBalance => forecastMonths(count: 3)[2].end;
 
   // ────── 予想の谷（月末と月末のあいだ） ──────
   // 💡 月末の予想は「その月の引き落としを全部引いた後」なので、
   //   月末を越えてから次の給料日までに落ちるぶん（例：10日引き落としのカード）で
   //   足りなくなる谷が見えない。日付に並べ直して、いちばん減る日を出す。
-  // ⚠️ 材料は月ごとの予想（incomeForecastIn / drawBreakdownOf / oneTimeExpensesIn）と
-  //   同じものだけを使い、並べ替えるだけにする。ここで独自に足し引きすると
-  //   月末の金額と食い違う。test/cash_flow_test.dart で月末との一致を固定している。
-  List<CashEvent> cashEventsAhead({int monthsAhead = 2}) {
-    final now = clockNow();
-    final out = <CashEvent>[];
-    for (var i = 0; i <= monthsAhead; i++) {
-      final m = DateTime(now.year, now.month + i, 1);
-      final lastDay = DateTime(m.year, m.month + 1, 0).day;
+  List<CashEvent> cashEventsAhead({int monthsAhead = 2}) => [
+        for (final l in linesByDate(forecastMonths(count: monthsAhead + 1)))
+          CashEvent(date: l.date, label: l.label, amount: l.amount),
+      ];
 
-      // ── 入金（incomeForecastIn と同じ分岐にする） ──
-      if (balanceUpdatedAt == null || workplaces.isEmpty) {
-        // 💡 勤務先ごとに分けられない経路。日付は給料日に寄せる
-        //   （勤務先があればいちばん早い給料日、無ければ既定の25日）。
-        final amount = incomeArrivingIn(m);
-        if (amount != 0) {
-          final dates = [for (final w in workplaces) w.paydayIn(m)]..sort();
-          out.add(CashEvent(
-            date: dates.isEmpty
-                ? DateTime(m.year, m.month, 25 > lastDay ? lastDay : 25)
-                : dates.first,
-            label: '給料',
-            amount: amount,
-          ));
-        }
-      } else {
-        for (final w in workplaces) {
-          final wm = DateTime(m.year, m.month - w.paydayMonthOffset);
-          final payDate = w.paydayIn(m);
-          if (!_forecastInclude(payDate)) continue;
-          final amount = takeHomeOfWorkplace(wm, w.id);
-          if (amount != 0) {
-            out.add(CashEvent(date: payDate, label: w.name, amount: amount));
-          }
-        }
-      }
-      for (final e in plannedIncomesIn(m)) {
-        if (!_forecastInclude(e.date)) continue;
-        out.add(CashEvent(
-            date: e.date, label: e.income.title, amount: e.income.amount));
-      }
-      // PayPayからの出金（振込予定日に入る。月末予想と同じ transfersForecastIn を使う）
-      for (final t in transfersForecastIn(m)) {
-        out.add(CashEvent(date: t.scheduledDate, label: 'PayPayからの入金', amount: t.amount));
-      }
-
-      // ── 引き落とし（drawBreakdownOf がゲート済み。日付だけ付け直す） ──
-      for (final e in drawBreakdownOf(m)) {
-        if (e.label == '定期支払い') {
-          // 定期は1件ずつの引き落とし日に置く（まとめた日付にすると谷の日がずれる）
-          for (final d in subscriptionDrawsIn(m)) {
-            out.add(CashEvent(date: d.date, label: '定期: ${d.title}', amount: -d.amount));
-          }
-          continue;
-        }
-        out.add(CashEvent(
-          date: drawDateOf(e.label, m), // 判定と同じ日付に置く
-          label: e.label,
-          amount: -e.amount,
-        ));
-      }
-
-      // ── 一度きりの出費（頭金・予定支出。月ズレさせず日付どおり） ──
-      for (final e in oneTimeExpensesIn(m)) {
-        if (!_forecastInclude(e.date)) continue;
-        out.add(CashEvent(date: e.date, label: e.label, amount: -e.amount));
-      }
-    }
-    out.sort((a, b) => a.date.compareTo(b.date));
-    return out;
-  }
+  // 日付順の予想の行（確からしさつき）。次の引き落としの一覧などに使う
+  List<ForecastLine> forecastLinesAhead({int monthsAhead = 2}) =>
+      linesByDate(forecastMonths(count: monthsAhead + 1));
 
   // 💡 今日から先で、残高がいちばん少なくなる日とそのときの残高。
-  //   同じ日の入金と引き落としは相殺してから見る（一瞬のヘコみで騒がない）。
-  //   ⚠️ 残高の編集日より後なら、日付が今日より前の引き落としも「まだ落ちていない」
-  //     ものとして積む（月末予想と同じ扱い）。ただし谷の候補にはしない。
-  ({DateTime date, int balance})? lowestBalanceAhead({int monthsAhead = 2}) {
-    final now = clockNow();
-    final today = DateTime(now.year, now.month, now.day);
-    final events = cashEventsAhead(monthsAhead: monthsAhead);
-    if (events.isEmpty) return null; // 何も動かないなら出すものが無い
-    var running = effectiveBalance + effectiveWalletCash;
-    var i = 0;
-    // 今日より前の日付のもの（基準日より後で、まだ反映していないもの）は今の残高に織り込む
-    while (i < events.length && events[i].date.isBefore(today)) {
-      running += events[i].amount;
-      i++;
-    }
-    // ⚠️ 今この時点の残高も候補にする。入金が先に来るとき、入金後の額を
-    //   「最低残高」と出してしまっていた（実際はそれまでの今の残高の方が低い）。
-    var low = running;
-    var lowDate = today;
-    while (i < events.length) {
-      final date = events[i].date;
-      while (i < events.length && events[i].date == date) {
-        running += events[i].amount;
-        i++;
-      }
-      if (running < low) {
-        low = running;
-        lowDate = date;
-      }
-    }
-    return (date: lowDate, balance: low);
-  }
+  ({DateTime date, int balance})? lowestBalanceAhead({int monthsAhead = 2}) => lowestBalance(
+        start: forecastStart,
+        events: forecastLinesAhead(monthsAhead: monthsAhead),
+        today: clockNow(),
+      );
 
   // 💡 残高が足りなくなる日と、その日の引き落とし。
   //   最低残高（＝いちばん低い1日）だけだと「どの引き落としで割ったか」が分からず、
   //   どれを遅らせればいいか判断できないので、割る日を全部返す。
   List<({DateTime date, int balance, List<String> labels})> shortfallDaysAhead(
-      {int monthsAhead = 2}) {
-    final now = clockNow();
-    final today = DateTime(now.year, now.month, now.day);
-    final events = cashEventsAhead(monthsAhead: monthsAhead);
-    var running = effectiveBalance + effectiveWalletCash;
-    final out = <({DateTime date, int balance, List<String> labels})>[];
-    var i = 0;
-    while (i < events.length) {
-      final date = events[i].date;
-      final draws = <String>[];
-      while (i < events.length && events[i].date == date) {
-        running += events[i].amount;
-        if (events[i].amount < 0) draws.add(events[i].label);
-        i++;
-      }
-      if (date.isBefore(today)) continue; // 今の残高に織り込み済み
-      // ⚠️ 引き落としがある日だけ。入金だけの日（給料日など）はマイナスのままでも
-      //   「引き落としに足りない日」ではない（以前は「引き落とし」と出ていた）。
-      if (running < 0 && draws.isNotEmpty) {
-        out.add((date: date, balance: running, labels: draws));
-      }
-    }
-    return out;
-  }
+          {int monthsAhead = 2}) =>
+      shortfallDays(
+        start: forecastStart,
+        events: forecastLinesAhead(monthsAhead: monthsAhead),
+        today: clockNow(),
+      );
 
-  // 来月末残高
-  int get nextMonthBalance {
-    final next = DateTime(clockNow().year, clockNow().month + 1, 1);
-    return thisMonthBalance +
-        incomeForecastIn(next) +
-        transferForecastIn(next) -
-        drawnInMonth(next) -
-        oneTimeExpenseForecastIn(next);
-  }
-
-  // 翌々月末残高（#2）
-  int get monthAfterNextBalance {
-    final m2 = DateTime(clockNow().year, clockNow().month + 2, 1);
-    return nextMonthBalance +
-        incomeForecastIn(m2) +
-        transferForecastIn(m2) -
-        drawnInMonth(m2) -
-        oneTimeExpenseForecastIn(m2);
-  }
 
   Future<void> setShowMonthAfterNext(bool on) async {
     showMonthAfterNext = on;
@@ -4165,70 +4193,29 @@ class AppState extends ChangeNotifier {
     return total;
   }
 
-  // 今月末残高の内訳（タップ詳細用）。現在の残高→デビット調整(#5#6)→給料入金→引き落とし。
-  // 💡 内訳に「PayPayからの入金（10/15頃）」を足す。同じ日が2件あれば合算する。
-  void _addTransferLines(Map<String, int> out, DateTime month) {
-    for (final t in transfersForecastIn(month)) {
-      final key = 'PayPayからの入金（${t.scheduledDate.month}/${t.scheduledDate.day}頃）';
-      out[key] = (out[key] ?? 0) + t.amount;
+  // 💡 月末の予想の内訳（タップ詳細用）。forecastMonths と同じ行を group ごとにまとめる。
+  //   今月は起点を「現在の残高・財布・デビット」に分けて見せ、翌月以降は前月末から始める。
+  Map<String, int> _breakdownOf(int offset) {
+    final months = forecastMonths(count: offset + 1);
+    final f = months[offset];
+    final out = <String, int>{};
+    if (offset == 0) {
+      out['現在の残高'] = currentBalance;
+      if (showWalletCash && walletCash != 0) out['財布の現金'] = walletCash;
+      final debit = debitsAfterSnapshot();
+      if (debit > 0) out['デビット利用（編集後・即時引落）'] = -debit;
+    } else {
+      out[offset == 1 ? '今月末残高' : '来月末残高'] = f.start;
     }
-  }
-
-  Map<String, int> get thisMonthBreakdown {
-    final now = clockNow();
-    final out = <String, int>{'現在の残高': currentBalance};
-    if (showWalletCash && walletCash != 0) out['財布の現金'] = walletCash;
-    final debit = debitsAfterSnapshot();
-    if (debit > 0) out['デビット利用（編集後・即時引落）'] = -debit;
-    final income = incomeForecastIn(now);
-    if (income != 0) out['給料入金（編集後）'] = income;
-    _addTransferLines(out, now);
-    for (final e in drawBreakdownOf(now)) {
-      out[drawLabelOf(e.label, now)] = -e.amount;
-    }
-    // 一度だけ出ていくお金（頭金・予定支出）は、その日付の月にそのまま引く
-    for (final e in oneTimeExpensesIn(now)) {
-      if (!_forecastInclude(e.date)) continue;
-      out['${e.label}（${e.date.month}/${e.date.day}）'] = -e.amount;
+    for (final g in f.grouped()) {
+      out[g.group] = (out[g.group] ?? 0) + g.amount;
     }
     return out;
   }
 
-  // 来月末残高の内訳。
-  Map<String, int> get nextMonthBreakdown {
-    final next = DateTime(clockNow().year, clockNow().month + 1, 1);
-    final out = <String, int>{'今月末残高': thisMonthBalance};
-    final income = incomeForecastIn(next);
-    if (income != 0) out['給料入金'] = income;
-    _addTransferLines(out, next);
-    for (final e in drawBreakdownOf(next)) {
-      out[drawLabelOf(e.label, next)] = -e.amount;
-    }
-    // 一度だけ出ていくお金（頭金・予定支出）は、その日付の月にそのまま引く
-    for (final e in oneTimeExpensesIn(next)) {
-      if (!_forecastInclude(e.date)) continue;
-      out['${e.label}（${e.date.month}/${e.date.day}）'] = -e.amount;
-    }
-    return out;
-  }
-
-  // 翌々月末残高の内訳。
-  Map<String, int> get monthAfterNextBreakdown {
-    final m2 = DateTime(clockNow().year, clockNow().month + 2, 1);
-    final out = <String, int>{'来月末残高': nextMonthBalance};
-    final income = incomeForecastIn(m2);
-    if (income != 0) out['給料入金'] = income;
-    _addTransferLines(out, m2);
-    for (final e in drawBreakdownOf(m2)) {
-      out[drawLabelOf(e.label, m2)] = -e.amount;
-    }
-    // 一度だけ出ていくお金（頭金・予定支出）は、その日付の月にそのまま引く
-    for (final e in oneTimeExpensesIn(m2)) {
-      if (!_forecastInclude(e.date)) continue;
-      out['${e.label}（${e.date.month}/${e.date.day}）'] = -e.amount;
-    }
-    return out;
-  }
+  Map<String, int> get thisMonthBreakdown => _breakdownOf(0);
+  Map<String, int> get nextMonthBreakdown => _breakdownOf(1);
+  Map<String, int> get monthAfterNextBreakdown => _breakdownOf(2);
 
   // 残高不足アラート（マイナスになる支払い予定）
   List<Payment> get shortagePayments {
