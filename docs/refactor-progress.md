@@ -21,20 +21,27 @@
 
 | 段階 | 状態 | メモ |
 |---|---|---|
-| 0 調査・設計 | 済み（GPT レビュー待ち） | `docs/survey.md`・`docs/architecture-plan.md` |
-| 1 時刻の注入・特性テスト | 未着手 | |
-| 2 日付規則・データ型の分離 | 未着手 | |
-| 3 月の予想の一本化 | 未着手 | |
-| 4 不具合の修正（B1・B2・B5〜B8） | 未着手 | |
-| 5 確認済みの仕様修正（Q1〜Q3・Q6） | 未着手（回答待ち） | |
-| 6 UI | 未着手 | |
-| 7 検証・引き継ぎ文書 | 未着手 | |
+| 0 調査・設計 | 済み | `docs/survey.md`・`docs/architecture-plan.md`（GPT レビューへの採否も記載） |
+| 1 時刻の注入・特性テスト | 済み `afde9ea` | 手計算 `test/forecast_hand_calc_test.dart`、回帰 `test/regression/` |
+| 2 日付規則・データ型の分離 | 済み `e3db900` | `lib/finance/billing_dates.dart`、`lib/models/`、`test/architecture_test.dart` |
+| 3 月の予想の一本化 | 済み `bbe4179` | `lib/finance/forecast.dart`、`AppState.forecastMonths` |
+| 4 不具合の修正（B1・B2・B5〜B8） | 済み `049936d` | `test/persistence_test.dart`・`drive_push_pull_test.dart`・`expense_detail_sum_test.dart` |
+| 5 確認済みの仕様修正（Q1〜Q3・Q6） | 済み `a75463d` | `expense_meaning_test.dart`・`pending_draws_rules_test.dart`・`bank_holiday_test.dart`。予想の行を実際の日付の月へ |
+| 6 UI | 済み `89d8aa3` | `lib/ui/`・`lib/widgets/home_sections.dart`・`test/home_screen_test.dart` |
+| 7 検証・引き継ぎ文書 | 済み | `docs/review-handoff.md`、CLAUDE.md 更新 |
+
+## 変更後の検証（最終）
+
+- `flutter test`: 656 成功・2 スキップ（スキップは変更前と同じ）
+- `flutter analyze lib/`: 49 件（すべて非推奨予告の info。新しく作った 3 ファイルの import の分が増えた）
+- `flutter build web --release --base-href /future-app/`: 成功
+- ブラウザ（Chromium）: 全タブ・ホームの根拠シート・残高の書き直し・引き落としの反映シートを確認。コンソールエラー 0 件
 
 ## 次の作業
 
-1. ユーザーから GPT のレビュー結果と §9 の質問への回答を受け取る
-2. 指摘をコードと照合し、`architecture-plan.md` の「レビュー対応」に採用・不採用と根拠を書く
-3. 段階 1 から実装
+1. GPT の実装レビュー（`docs/review-handoff.md` を案内として使う）を受け、指摘をコードと照合する
+2. 実環境の確認（Google ドライブの実際の読み書き、iOS/Android、実データでの見え方）
+3. 残っている課題は `docs/review-handoff.md` §9
 
 ## UI 確認の手順（再現用）
 
