@@ -4811,11 +4811,41 @@ class AppState extends ChangeNotifier {
     for (final e in expenseBreakdownOf(useMonth)) {
       if (byPeriod.contains(e.label)) continue; // 締め期間で集計済み
       if (_excludedFromDraw(e.label)) continue;
+      if (e.label == '定期支払い') {
+        // ⚠️ 定期はまとめて1行だが、支払日は1件ずつ違う。まとめた行の日付（いちばん早い支払日）で
+        //   判断すると、早い定期が過ぎただけで、まだ落ちていない月末の定期まで消えていた。
+        //   1件ずつの引き落とし日で、残高を書き直した日より後のものだけ足す。
+        final amount = subscriptionDrawsIn(payMonth).fold(0, (s, d) => s + d.amount);
+        if (amount > 0) out.add((label: e.label, amount: amount, colorValue: e.colorValue));
+        continue;
+      }
       if (!afterEdit(e.label)) continue;
       out.add(e);
     }
 
     out.sort((a, b) => b.amount.compareTo(a.amount));
+    return out;
+  }
+
+  // 💡 payMonth に口座から落ちる定期支払い（1件ずつ、その引き落とし日つき）。
+  //   ・口座振替・手動払い … 定期の支払日（休みなら翌営業日）
+  //   ・カード払い … そのカードの引き落とし日（カードの請求として落ちるため）
+  //   どれを含めるかは subscriptionTotalOf と同じ（カード払いで銀行確定済みのカードは、
+  //   確定額に含まれるので除く）。残高を書き直した日より前に落ちたものも除く（二重計上ゲート）。
+  List<({String title, int amount, DateTime date})> subscriptionDrawsIn(DateTime payMonth) {
+    final useMonth = DateTime(payMonth.year, payMonth.month - 1);
+    final bank = _bankConfirmedTotalsOf(useMonth);
+    final lastDay = DateTime(payMonth.year, payMonth.month + 1, 0).day;
+    final out = <({String title, int amount, DateTime date})>[];
+    for (final s in subscriptions) {
+      if (s.isCardPayment && _isConfirmedIn(s.method, bank)) continue;
+      final date = s.isCardPayment
+          ? cardDrawDateOf(s.method, payMonth)
+          : nextBusinessDay(DateTime(payMonth.year, payMonth.month,
+              s.payDay > lastDay ? lastDay : s.payDay));
+      if (!_forecastInclude(date)) continue;
+      out.add((title: s.title, amount: s.amount, date: date));
+    }
     return out;
   }
 
@@ -4911,6 +4941,13 @@ class AppState extends ChangeNotifier {
 
       // ── 引き落とし（drawBreakdownOf がゲート済み。日付だけ付け直す） ──
       for (final e in drawBreakdownOf(m)) {
+        if (e.label == '定期支払い') {
+          // 定期は1件ずつの引き落とし日に置く（まとめた日付にすると谷の日がずれる）
+          for (final d in subscriptionDrawsIn(m)) {
+            out.add(CashEvent(date: d.date, label: '定期: ${d.title}', amount: -d.amount));
+          }
+          continue;
+        }
         out.add(CashEvent(
           date: drawDateOf(e.label, m), // 判定と同じ日付に置く
           label: e.label,
