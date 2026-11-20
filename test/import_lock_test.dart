@@ -261,6 +261,99 @@ void main() {
       expect(cal.upserts.last, 'remote-ev', reason: 'やり直しで、取り込んだ予定を新しい内容に書き直す');
     });
 
+    // ⚠️ GPT 再レビュー（f8a716c）: 給料日の通知を作っている間に、勤務先を消したデータを取り込むと、
+    //   消した勤務先の payday キーと通知が残っていた（給料日には「やり直しの片付け」が無いため）。
+    group('給料日の通知を作っている間に取り込む', () {
+      final now = DateTime(2026, 10, 15, 12);
+      const key = 'payday_w1_202610'; // 勤務先 A（w1）の 10 月に働いた分 → 11/25 の給料日
+      Workplace cafe() => Workplace(
+          id: 'w1', name: 'A', paydayDay: 25, paydayMonthOffset: 1, paydayAdjust: PaydayAdjust.none);
+      ShiftData work() => ShiftData(
+          workplace: 'A',
+          workplaceId: 'w1',
+          hourlyWage: 1100,
+          start: DateTime(2026, 10, 5, 9),
+          end: DateTime(2026, 10, 5, 17));
+
+      Future<(AppState, _GatedCalendar, Future<void>)> startSync() async {
+        final a = await fixedApp(now);
+        final cal = _GatedCalendar();
+        a.calendarSync = cal;
+        a.calendarAutoSync = true;
+        a.workplaces.add(cafe());
+        a.shifts['2026-10-05'] = [work()];
+        await a.saveData();
+        final syncing = a.syncPaydaysToCalendar(now: now);
+        await cal.entered.future; // 給料日の予定を作っている途中
+        return (a, cal, syncing);
+      }
+
+      Future<void> importAndResume(AppState a, _GatedCalendar cal, Future<void> syncing,
+          void Function(Map<String, dynamic>) edit) async {
+        final data = jsonDecode(a.exportJson()) as Map<String, dynamic>;
+        edit(data);
+        await a.importJson(jsonEncode(data));
+        cal.release.complete();
+        await syncing;
+        await settle();
+      }
+
+      test('取り込んだ中身では要らない（勤務先が消えた）→ 作った通知を消し、記録を残さない', () async {
+        final (a, cal, syncing) = await startSync();
+        await importAndResume(a, cal, syncing, (d) {
+          d['workplaces'] = [];
+          d['shifts'] = {};
+          d['specialCalendarIds'] = {};
+          d['specialCalendarSigs'] = {};
+        });
+        expect(cal.deleted, ['new-ev']);
+        expect(a.specialCalendarIds, isEmpty);
+        expect(a.specialCalendarSigs, isEmpty);
+        final b = await reloadApp(now);
+        expect(b.specialCalendarIds, isEmpty, reason: '保存にも残らない');
+      });
+
+      test('取り込んだ中身でも要る → 作った通知を残し、新しい中身の内容で書き直す', () async {
+        final (a, cal, syncing) = await startSync();
+        await importAndResume(a, cal, syncing, (d) {
+          d['specialCalendarIds'] = {};
+          d['specialCalendarSigs'] = {};
+        });
+        expect(cal.deleted, isEmpty);
+        expect(a.specialCalendarIds[key], 'new-ev');
+        expect(a.specialCalendarSigs[key], isNotNull, reason: 'やり直しで内容を記録し直す');
+        expect(cal.upserts.last, 'new-ev', reason: '重複を作らず、作った予定を書き直す');
+      });
+
+      test('取り込んだ別の通知（別の勤務先の給料日・不足の通知）は消さない', () async {
+        final (a, cal, syncing) = await startSync();
+        final others = {'payday_w9_202610': 'remote-pay', 'shortfall_20261110': 'remote-short'};
+        final otherSigs = {
+          'payday_w9_202610': '2026-11-25|💰 給料日（B）|10月分 ¥1,000',
+          'shortfall_20261110': '2026-11-10|⚠️ 引き落としで残高が足りない見込み|説明',
+        };
+        await importAndResume(a, cal, syncing, (d) {
+          d['workplaces'] = [];
+          d['shifts'] = {};
+          d['specialCalendarIds'] = others;
+          d['specialCalendarSigs'] = otherSigs;
+        });
+        expect(cal.deleted, ['new-ev'], reason: '消すのは、こちらで作った要らない予定だけ');
+        expect(a.specialCalendarIds, others);
+        expect(a.specialCalendarSigs, otherSigs);
+      });
+
+      test('取り込んだ中身に同じキーの予定がある → 取り込んだ方を残し、作った方を消す', () async {
+        final (a, cal, syncing) = await startSync();
+        await importAndResume(a, cal, syncing, (d) {
+          d['specialCalendarIds'] = {key: 'remote-ev'};
+          d['specialCalendarSigs'] = {key: '2026-11-25|💰 給料日（A）|古い内容'};
+        });
+        expect(cal.deleted, ['new-ev']);
+        expect(a.specialCalendarIds[key], 'remote-ev');
+      });
+    });
+
     test('確認と変更は同じ同期区間: 鍵が外れた直後に次の取り込みが始まったら、それも待つ', () async {
       final a = await fixedApp(day);
       final l1 = a.acquireDataLock('1 回目');

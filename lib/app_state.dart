@@ -564,7 +564,9 @@ class AppState extends ChangeNotifier {
           remind: true, // 給料日の当日に通知する
         );
         // 💡 作った予定の ID は、取り込み中なら終わるまで待ってから記録する（捨てると次に重複して作る）
-        if (calId != null && !await _recordSpecialEvent(key, calId, sig, gen)) {
+        if (calId != null &&
+            !await _recordSpecialEvent(key, calId, sig, gen,
+                stillWanted: () => _paydayKeysOf(now).contains(key))) {
           _paydaySyncAgain = true; // 取り込みで中身が変わった → 新しい中身でやり直す
           return;
         }
@@ -573,21 +575,36 @@ class AppState extends ChangeNotifier {
     if (gen != _dataGeneration) _paydaySyncAgain = true;
   }
 
+  // いまの中身で給料日の通知を置くキー（勤務先×労働月。_syncPaydaysOnce と同じ範囲）
+  Set<String> _paydayKeysOf(DateTime now) => {
+        for (var dm = -1; dm <= 3; dm++)
+          for (final entry in paydaysInMonth(DateTime(now.year, now.month + dm)))
+            'payday_${entry.workplace.id}_${DateFormat('yyyyMM').format(DateTime(now.year, now.month + dm))}',
+      };
+
   // 自動の処理（カレンダーへの書き出し）の記録。取り込み中は終わるまで待つ（runWhenEditable）。
   // 戻り値: この回の中身のまま記録できたら true。取り込みで中身が変わっていたら false（呼び出し側はやり直す）。
   // ⚠️ 中身が変わっていたら、作った予定の扱いは取り込んだ中身で決める:
-  //   ・取り込んだ中身に同じキーの別の予定がある → こちらで作った予定を消す（二重にしない）
-  //   ・無い → 記録する（捨てると予定だけが残る。要らなければ、やり直しの片付けで消える）
-  Future<bool> _recordSpecialEvent(String key, String calId, String sig, int gen) =>
+  //   ・取り込んだ中身に同じキーの別の予定がある → こちらで作った予定を消す（二重にしない。取り込んだ方は残す）
+  //   ・無い、かつ取り込んだ中身でもそのキーの通知が要る（stillWanted） → 記録する（内容はやり直しで決め直す）
+  //   ・無い、かつ要らない（勤務先が消えた・足りるようになった など） → 作った予定を消し、記録しない
+  //   ⚠️ 以前は「無ければ記録し、やり直しで片付ける」だったが、給料日にはその片付けが無く、
+  //     消した勤務先のキーと通知が残っていた（GPT 再レビュー f8a716c）。片付けに頼らず、ここで判定する。
+  Future<bool> _recordSpecialEvent(String key, String calId, String sig, int gen,
+          {required bool Function() stillWanted}) =>
       runWhenEditable(() {
         if (gen != _dataGeneration) {
           final existing = specialCalendarIds[key] ?? '';
           if (existing.isNotEmpty && existing != calId) {
             calendarSync?.deleteEvent(calId);
           } else if (existing.isEmpty) {
-            specialCalendarIds[key] = calId;
-            specialCalendarSigs.remove(key); // 内容は新しい中身で決め直す（やり直しで書き直される）
-            saveData();
+            if (stillWanted()) {
+              specialCalendarIds[key] = calId;
+              specialCalendarSigs.remove(key); // 内容は新しい中身で決め直す（やり直しで書き直される）
+              saveData();
+            } else {
+              calendarSync?.deleteEvent(calId);
+            }
           }
           return false;
         }
@@ -673,6 +690,13 @@ class AppState extends ChangeNotifier {
 
   static const _shortfallPrefix = 'shortfall_';
 
+  // いまの中身で不足の通知を置くキー（_syncShortfallsOnce と同じ）
+  Set<String> _shortfallKeysOf() => {
+        if (shortfallAlerts)
+          for (final day in shortfallDaysAhead())
+            '$_shortfallPrefix${DateFormat('yyyyMMdd').format(day.date)}',
+      };
+
   Future<void> _syncShortfallsOnce(DateTime now) async {
     final today = DateTime(now.year, now.month, now.day);
     final gen = _dataGeneration; // 💡 この回が見ている中身（取り込みで置き換わったら、やり直す）
@@ -695,7 +719,9 @@ class AppState extends ChangeNotifier {
           description: desc,
           reminderMinutes: kShortfallReminderMinutes,
         );
-        if (calId != null && !await _recordSpecialEvent(key, calId, sig, gen)) {
+        if (calId != null &&
+            !await _recordSpecialEvent(key, calId, sig, gen,
+                stillWanted: () => _shortfallKeysOf().contains(key))) {
           _shortfallSyncAgain = true; // 取り込みで中身が変わった → 新しい中身でやり直す
           return;
         }
