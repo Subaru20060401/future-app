@@ -87,7 +87,7 @@ void main() {
 
       final store = await useFailingStore();
       store.failAfter = store.writes + 3; // 保存の途中で失敗する
-      await expectLater(app.importJson(json), throwsA(isA<StateError>()));
+      await expectLater(app.importJson(json), throwsA(isA<StorageWriteFailure>()));
       expect(exportWithoutStamp(app), before); // メモリは元の内容
     });
   });

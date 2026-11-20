@@ -616,3 +616,68 @@ class DriveSyncBanner extends StatelessWidget {
     );
   }
 }
+
+/// 保存の状態（失敗・回復待ち・回復不能・起動時に戻したこと）と、次にする操作。
+class StorageStatusBanner extends StatelessWidget {
+  const StorageStatusBanner({super.key, required this.appState});
+  final AppState appState;
+
+  Future<void> _retry(BuildContext context) async {
+    final ok = await appState.retryStorage();
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(ok ? '保存しました' : 'まだ保存できません。空き容量を確認してください')));
+  }
+
+  Future<void> _pullFromDrive(BuildContext context) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (c) => AlertDialog(
+        title: const Text('ドライブから取り込み直しますか？'),
+        content: const Text('この端末のデータを、ドライブに保存されている内容で置き換えます。'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('やめる')),
+          ElevatedButton(onPressed: () => Navigator.pop(c, true), child: const Text('取り込む')),
+        ],
+      ),
+    );
+    if (ok != true || !context.mounted) return;
+    final r = await DriveSync.instance.pullNow(appState);
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(r.state == DriveSyncState.upToDate ? 'ドライブの内容にしました' : r.message)));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return switch (appState.storageIssue) {
+      StorageIssue.saveFailed => StatusBanner(
+          kind: BannerKind.error,
+          message: '保存できませんでした',
+          detail: 'いまの画面の内容は、まだこの端末に保存されていません。空き容量を確認してから、もう一度保存してください',
+          actionLabel: 'もう一度保存',
+          onAction: () => _retry(context),
+        ),
+      StorageIssue.recoveryPending => StatusBanner(
+          kind: BannerKind.error,
+          message: '前回止まった保存を、まだ元に戻せていません',
+          detail: '表示中のデータは記録から読んだ整った状態です。戻せるまで、ドライブへの保存と自動バックアップを止めています',
+          actionLabel: 'もう一度保存',
+          onAction: () => _retry(context),
+        ),
+      StorageIssue.unrecoverable => StatusBanner(
+          kind: BannerKind.error,
+          message: '保存データが途中で混ざっている可能性があります',
+          detail: 'ドライブから取り込み直すか、設定の「バックアップから復元」で戻してください。それまでドライブへの保存と自動バックアップを止めています',
+          actionLabel: 'ドライブから取り込む',
+          onAction: () => _pullFromDrive(context),
+        ),
+      null => appState.recoveredOnStartup
+          ? const StatusBanner(
+              kind: BannerKind.info,
+              message: '前回の保存が途中で止まっていたため、整った状態に戻しました',
+            )
+          : const SizedBox.shrink(),
+    };
+  }
+}

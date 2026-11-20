@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart' show kIsWeb, visibleForTesting;
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:crypto/crypto.dart';
 import 'package:intl/intl.dart';
 import 'package:path_provider/path_provider.dart';
 import 'card_styles.dart';
@@ -195,6 +196,36 @@ enum DrawReflection {
   maybeIncluded, // 含まれている可能性がある（引落日が残高を入力した日より前）
   likelyNotIncluded, // まだ含まれていない見込み（引落日が残高を入力した日より後）
   unknown, // 判断できない（同じ日・残高を入力した記録が無い）
+}
+
+// 保存の状態（null＝正常）
+enum StorageIssue {
+  saveFailed, // 直近の保存に失敗した（端末には前の整った状態か、次の起動で戻せる一時保存がある）
+  recoveryPending, // 途中で止まった保存を戻せていない（中身は記録から読んだ整った状態。端末の保存は混ざっている）
+  unrecoverable, // 戻すための記録が壊れていた（端末の保存が混ざっている可能性。取り込み直しが必要）
+}
+
+class StorageWriteFailure implements Exception {
+  StorageWriteFailure(this.stage, this.cause);
+  final String stage; // どの段階で失敗したか（一時保存・復旧点・保存）
+  final Object cause;
+  @override
+  String toString() => '$stageに失敗しました: $cause';
+}
+
+// 💡 起動時の読み込み用: 戻すべき記録（一時保存・復旧点）を端末に書き戻せなかったときは、
+//   その記録の値を優先して読む（混ざった保存を正常なデータとして読まない）。
+class _PrefsView {
+  _PrefsView(this.prefs, this.overlay);
+  final SharedPreferences prefs;
+  final Map<String, Object>? overlay;
+  Object? _o(String k) => overlay?[k];
+  String? getString(String k) => overlay != null && overlay!.containsKey(k) ? _o(k) as String? : prefs.getString(k);
+  int? getInt(String k) => overlay != null && overlay!.containsKey(k) ? _o(k) as int? : prefs.getInt(k);
+  bool? getBool(String k) => overlay != null && overlay!.containsKey(k) ? _o(k) as bool? : prefs.getBool(k);
+  List<String>? getStringList(String k) => overlay != null && overlay!.containsKey(k)
+      ? [for (final e in (_o(k) as List)) '$e']
+      : prefs.getStringList(k);
 }
 
 // 引き落としの請求の月の決まり方
@@ -4802,32 +4833,59 @@ class AppState extends ChangeNotifier {
   // エクスポートしたJSONを取り込んで全データを置き換える。
   // 💡 保存が終わるまで待つ（Future）。呼び出し側（ドライブの取り込み・復元）は、
   //   保存まで成功したときだけ「同期済み」「復元しました」にする。
+  //   手順:
+  //   1) メモリで読み込む（壊れていたらメモリを戻して終わり。端末には何も書かない）
+  //   2) 取り込む前の全キーを「復旧点」に書く。⚠️ 書けなければ上書きを始めない（メモリを戻して例外）
+  //   3) 取り込んだ状態を保存（一時保存 → 全キー）。成功で一時保存と復旧点を消す
+  //   4) 3 が失敗したら、メモリを戻し、復旧点の値で端末も戻す。それも失敗したら「回復待ち」にして、
+  //      次の起動で復旧点から戻す（復旧点は消さずに残る）
   Future<void> importJson(String text) async {
-    // ⚠️ _importJson は項目ごとに「消してから読む」。途中の項目が壊れていると
-    //   （日付が読めない・型が違うなど）そこで例外になり、前半だけ置き換わった状態が残る。
-    //   そのまま保存やドライブ同期が走ると、半端なデータで上書きしてしまう。
-    //   取り込む前の状態を書き出しておき、失敗したらそれで丸ごと戻す。
-    //   読み込みの失敗はメモリ内だけで戻し、保存・通知・更新時刻の変更をしない。
-    final before = exportJson();
+    final beforeJson = exportJson();
+    final beforeValues = _persistedValues(includeUpdatedAt: true);
     try {
       _importJson(text);
     } catch (_) {
-      _importJson(before, repair: false);
+      _importJson(beforeJson, repair: false);
       rethrow;
     }
-    // 💡 成功した取り込みも「この端末での編集」には数えない。
+    // 💡 成功した取り込みも「この端末での編集」には数えない（更新時刻は変えない）
+    final afterValues = _persistedValues(includeUpdatedAt: false);
+    final prefs = await SharedPreferences.getInstance();
+    try {
+      await _putRecord(
+          prefs,
+          kRestorePointKey,
+          jsonEncode({
+            'v': 1,
+            'before': beforeValues,
+            'afterKeys': afterValues.keys.toList(),
+            'afterHash': _fingerprint(afterValues),
+          }));
+    } catch (e) {
+      _importJson(beforeJson, repair: false);
+      notifyListeners();
+      throw StorageWriteFailure('復旧点の保存', e);
+    }
     try {
       await saveData(markModified: false);
     } catch (_) {
-      // ⚠️ 保存の途中で失敗すると、端末の保存内容は一部だけ新しい状態になりうる。
-      //   メモリを取り込む前に戻し、その内容で保存し直す（これも失敗したら元の例外を返す）。
-      _importJson(before, repair: false);
+      final wasUnrecoverable = storageIssue == StorageIssue.unrecoverable;
+      _importJson(beforeJson, repair: false);
       try {
-        await saveData(markModified: false);
-      } catch (_) {}
+        if (wasUnrecoverable) rethrow; // 元が混ざっている可能性 → 書き戻さず、そのまま
+        for (final e in beforeValues.entries) {
+          await _putValue(prefs, e.key, e.value);
+        }
+        await prefs.remove(kPendingWriteKey);
+        await prefs.remove(kRestorePointKey);
+        storageIssue = null;
+      } catch (_) {
+        if (!wasUnrecoverable) storageIssue = StorageIssue.recoveryPending; // 復旧点が残る → 次の起動で戻す
+      }
       notifyListeners();
       rethrow;
     }
+    storageIssue = null; // 💡 取り込み直し・復元が保存まで成功した＝整った状態になった
     notifyListeners();
   }
 
@@ -4985,82 +5043,209 @@ class AppState extends ChangeNotifier {
   }
 
   // ════════════════ 保存・読込 ════════════════
-  Future<void> saveData({bool markModified = true}) async {
-    final prefs = await SharedPreferences.getInstance();
-    if (markModified) {
-      dataUpdatedAt = clockNow();
-      await prefs.setString('saved_data_updated_at', dataUpdatedAt!.toIso8601String());
+  // 💡 保存は「全部そろったときだけ有効」にする（保存キーと JSON の形は以前のまま）。
+  //   1) 書く値を同じ瞬間にまとめて作る（途中で状態が変わっても混ざらない）
+  //   2) その全部を一時保存（saved_pending_write）に書く。⚠️ 書けなければ既存のキーの上書きを始めない
+  //   3) 各キーを書く → 4) 一時保存を消す
+  //   途中で失敗・アプリ終了しても、次の起動で一時保存から全キーを書き直す（_recoverInterruptedWrite）。
+  //   ⚠️ 以前は各キーを順に書くだけで、途中で失敗し続けると新旧のキーが混ざったまま残った
+  //     （docs/prepublish-review-plan.md §3）。
+  static const String kPendingWriteKey = 'saved_pending_write';
+  // 💡 取り込み（ドライブ・バックアップ・貼り付け）の前の状態。取り込みの保存が終わる前に止まったら、
+  //   次の起動でこの状態に戻す（取り込みは「失敗」と伝えているので、その前の状態が正しい）。
+  static const String kRestorePointKey = 'saved_restore_point';
+
+  // 💡 保存の状態（null＝正常）。正常でない間は、ドライブへの保存・自動バックアップを止める（uploadsBlocked）。
+  StorageIssue? storageIssue;
+  // 前回の保存が途中で止まっていて、起動時に整った状態へ戻したか（ホームで一度知らせる）
+  bool recoveredOnStartup = false;
+
+  // 💡 容量が足りないときに、作り直せるもの（Gmail の解析キャッシュなど）を消す。main.dart から渡す。
+  //   ⚠️ 補助策。空きができる保証は無いので、これに頼らず「書けなければ上書きしない」で守る。
+  Future<void> Function()? freeStorageSpace;
+
+  /// 保存データが整っていない可能性がある間は、正常なコピー（ドライブ・バックアップ）を上書きしない
+  bool get uploadsBlocked =>
+      storageIssue == StorageIssue.recoveryPending || storageIssue == StorageIssue.unrecoverable;
+
+  // 保存する全キーと値（この瞬間の状態）。キー・型は以前の saveData と同じ。
+  Map<String, Object> _persistedValues({required bool includeUpdatedAt}) => {
+        if (includeUpdatedAt && dataUpdatedAt != null)
+          'saved_data_updated_at': dataUpdatedAt!.toIso8601String(),
+      'saved_shifts': jsonEncode(shifts),
+      'saved_payment_notes': jsonEncode(paymentNotes),
+      'saved_amazon_overrides': jsonEncode(amazonCardOverrides),
+      'saved_card_aliases': jsonEncode(cardAliases),
+      'saved_bank_bill_months': jsonEncode(bankBillMonths),
+      'saved_special_calendar_ids': jsonEncode(specialCalendarIds),
+      'saved_special_calendar_sigs': jsonEncode(specialCalendarSigs),
+      'saved_actual_salaries': jsonEncode(actualSalaries),
+      'saved_actual_salaries_by_wp': jsonEncode(actualSalariesByWp),
+      'saved_balance_updated_at': balanceUpdatedAt?.toIso8601String() ?? '',
+      'saved_balance_entered_at': balanceEnteredAt?.toIso8601String() ?? '',
+      'saved_goal_amount': goalAmount,
+      'saved_goal_date': goalDate?.toIso8601String() ?? '',
+      'saved_budgets': jsonEncode(budgets),
+      'saved_workplaces': jsonEncode(workplaces.map((e) => e.toJson()).toList()),
+      'saved_events': jsonEncode(events),
+      'saved_todos': jsonEncode(todos.map( (k, v) => MapEntry(k, v.map((t) => t.toJson()).toList()))),
+      'saved_payments': jsonEncode(payments.map((e) => e.toJson()).toList()),
+      'saved_installments': jsonEncode(installments.map((e) => e.toJson()).toList()),
+      'saved_subscriptions': jsonEncode(subscriptions.map((e) => e.toJson()).toList()),
+      'saved_loans': jsonEncode(loans.map((e) => e.toJson()).toList()),
+      'saved_planned_expenses': jsonEncode(plannedExpenses.map((e) => e.toJson()).toList()),
+      'saved_schedule_suggestions': jsonEncode(scheduleSuggestions.map((e) => e.toJson()).toList()),
+      'saved_mail_entity_links': jsonEncode(mailEntityLinks.values.map((e) => e.toJson()).toList()),
+      'saved_paid_planned_expenses': paidPlannedExpenseKeys.toList(),
+      'saved_withdrawals': jsonEncode(withdrawals.map((e) => e.toJson()).toList()),
+      'saved_balance': currentBalance,
+      'saved_wallet_cash': walletCash,
+      'saved_pending_deposits': jsonEncode(pendingDeposits.map((e) => e.toJson()).toList()),
+      'saved_handled_deposit_ids': handledDepositIds.toList(),
+      'saved_paypay_transfers': jsonEncode(paypayTransfers.map((e) => e.toJson()).toList()),
+      'saved_received_transfers': jsonEncode(receivedTransfers),
+      'saved_handled_draw_ids': handledDrawIds.toList(),
+      'saved_balance_history': jsonEncode(balanceHistory.map((e) => e.toJson()).toList()),
+      'saved_paid_salary_keys': paidSalaryKeys.toList(),
+      'saved_planned_incomes': jsonEncode(plannedIncomes.map((e) => e.toJson()).toList()),
+      'saved_received_planned_keys': receivedPlannedKeys.toList(),
+      'saved_salary_paid_through': salaryPaidThroughMonth?.toIso8601String() ?? '',
+      'saved_card_rates': jsonEncode(cardInterestRates),
+      'saved_converted_keys': convertedPaymentKeys.toList(),
+      'saved_folded_debit_keys': foldedDebitKeys.toList(),
+      'saved_converted_source_ids': convertedSourceIds.toList(),
+      'saved_trashed_payments': jsonEncode(trashedPayments.map((e) => e.toJson()).toList()),
+      'saved_deleted_source_ids': deletedSourceIds.toList(),
+      'saved_deleted_dup_keys': deletedDupKeys.toList(),
+      'saved_calendar_autosync': calendarAutoSync,
+      'saved_first_sync': gmailFirstSyncDone,
+        // ⚠️ カードの引落日・締め日も毎回書く（B1）。空でもキーを書く（無いと初回起動とみなされる）
+        'saved_card_payment_days': jsonEncode(cardPaymentDays),
+        'saved_card_closing_days': jsonEncode(cardClosingDays),
+      };
+
+  static Future<void> _putValue(SharedPreferences prefs, String key, Object value) async {
+    if (value is int) {
+      await prefs.setInt(key, value);
+    } else if (value is bool) {
+      await prefs.setBool(key, value);
+    } else if (value is List) {
+      await prefs.setStringList(key, [for (final e in value) '$e']);
+    } else {
+      await prefs.setString(key, value as String);
     }
-    await prefs.setString('saved_shifts', jsonEncode(shifts));
-    await prefs.setString('saved_payment_notes', jsonEncode(paymentNotes));
-    await prefs.setString('saved_amazon_overrides', jsonEncode(amazonCardOverrides));
-    await prefs.setString('saved_card_aliases', jsonEncode(cardAliases));
-    await prefs.setString('saved_bank_bill_months', jsonEncode(bankBillMonths));
-    await prefs.setString('saved_special_calendar_ids', jsonEncode(specialCalendarIds));
-    await prefs.setString('saved_special_calendar_sigs', jsonEncode(specialCalendarSigs));
-    await prefs.setString('saved_actual_salaries', jsonEncode(actualSalaries));
-    await prefs.setString('saved_actual_salaries_by_wp', jsonEncode(actualSalariesByWp));
-    await prefs.setString('saved_balance_updated_at', balanceUpdatedAt?.toIso8601String() ?? '');
-    await prefs.setString('saved_balance_entered_at', balanceEnteredAt?.toIso8601String() ?? '');
-    await prefs.setInt('saved_goal_amount', goalAmount);
-    await prefs.setString('saved_goal_date', goalDate?.toIso8601String() ?? '');
-    await prefs.setString('saved_budgets', jsonEncode(budgets));
-    await prefs.setString('saved_workplaces',
-        jsonEncode(workplaces.map((e) => e.toJson()).toList()));
-    await prefs.setString('saved_events', jsonEncode(events));
-    await prefs.setString(
-        'saved_todos',
-        jsonEncode(todos.map(
-            (k, v) => MapEntry(k, v.map((t) => t.toJson()).toList()))));
-    await prefs.setString(
-        'saved_payments', jsonEncode(payments.map((e) => e.toJson()).toList()));
-    await prefs.setString('saved_installments',
-        jsonEncode(installments.map((e) => e.toJson()).toList()));
-    await prefs.setString('saved_subscriptions',
-        jsonEncode(subscriptions.map((e) => e.toJson()).toList()));
-    await prefs.setString(
-        'saved_loans', jsonEncode(loans.map((e) => e.toJson()).toList()));
-    await prefs.setString('saved_planned_expenses',
-        jsonEncode(plannedExpenses.map((e) => e.toJson()).toList()));
-    await prefs.setString('saved_schedule_suggestions',
-        jsonEncode(scheduleSuggestions.map((e) => e.toJson()).toList()));
-    await prefs.setString('saved_mail_entity_links',
-        jsonEncode(mailEntityLinks.values.map((e) => e.toJson()).toList()));
-    await prefs.setStringList(
-        'saved_paid_planned_expenses', paidPlannedExpenseKeys.toList());
-    await prefs.setString('saved_withdrawals',
-        jsonEncode(withdrawals.map((e) => e.toJson()).toList()));
-    await prefs.setInt('saved_balance', currentBalance);
-    await prefs.setInt('saved_wallet_cash', walletCash);
-    await prefs.setString(
-        'saved_pending_deposits', jsonEncode(pendingDeposits.map((e) => e.toJson()).toList()));
-    await prefs.setStringList('saved_handled_deposit_ids', handledDepositIds.toList());
-    await prefs.setString('saved_paypay_transfers',
-        jsonEncode(paypayTransfers.map((e) => e.toJson()).toList()));
-    await prefs.setString('saved_received_transfers', jsonEncode(receivedTransfers));
-    await prefs.setStringList('saved_handled_draw_ids', handledDrawIds.toList());
-    await prefs.setString(
-        'saved_balance_history', jsonEncode(balanceHistory.map((e) => e.toJson()).toList()));
-    await prefs.setStringList('saved_paid_salary_keys', paidSalaryKeys.toList());
-    await prefs.setString(
-        'saved_planned_incomes', jsonEncode(plannedIncomes.map((e) => e.toJson()).toList()));
-    await prefs.setStringList('saved_received_planned_keys', receivedPlannedKeys.toList());
-    await prefs.setString(
-        'saved_salary_paid_through', salaryPaidThroughMonth?.toIso8601String() ?? '');
-    await prefs.setString('saved_card_rates', jsonEncode(cardInterestRates));
-    await prefs.setStringList('saved_converted_keys', convertedPaymentKeys.toList());
-    await prefs.setStringList('saved_folded_debit_keys', foldedDebitKeys.toList());
-    await prefs.setStringList('saved_converted_source_ids', convertedSourceIds.toList());
-    await prefs.setString(
-        'saved_trashed_payments', jsonEncode(trashedPayments.map((e) => e.toJson()).toList()));
-    await prefs.setStringList('saved_deleted_source_ids', deletedSourceIds.toList());
-    await prefs.setStringList('saved_deleted_dup_keys', deletedDupKeys.toList());
-    await prefs.setBool('saved_calendar_autosync', calendarAutoSync);
-    await prefs.setBool('saved_first_sync', gmailFirstSyncDone);
-    // ⚠️ カードの引落日・締め日も毎回書く。以前は設定画面の変更時だけ書いていたため、
-    //   ドライブの取り込み・復元のあと再読み込みすると古いカード設定に戻っていた（B1）。
-    //   空（全部外した）でもキーを書く。キーが無いと初回起動とみなして既定のカードを入れ直す。
-    await _writeCardDays(prefs);
+  }
+
+  // 1つのキーに全部を書く（一時保存・復旧点）。書けなければ空きを作って一度だけやり直す。
+  Future<void> _putRecord(SharedPreferences prefs, String key, String json) async {
+    try {
+      await prefs.setString(key, json);
+    } catch (_) {
+      final free = freeStorageSpace;
+      if (free == null) rethrow;
+      try {
+        await free();
+      } catch (_) {}
+      await prefs.setString(key, json);
+    }
+  }
+
+  // 一時保存 → 全キー → 一時保存を消す。成功したら、残っていた復旧点も消す（端末の保存＝いまの状態になったため）。
+  Future<void> _writeValues(Map<String, Object> values) async {
+    final prefs = await SharedPreferences.getInstance();
+    try {
+      await _putRecord(prefs, kPendingWriteKey, jsonEncode({'v': 1, 'values': values}));
+    } catch (e) {
+      throw StorageWriteFailure('一時保存', e); // ⚠️ 既存のキーは何も書き換えていない
+    }
+    try {
+      for (final e in values.entries) {
+        await _putValue(prefs, e.key, e.value);
+      }
+      await prefs.remove(kPendingWriteKey);
+      await prefs.remove(kRestorePointKey);
+    } catch (e) {
+      throw StorageWriteFailure('保存', e); // 一時保存が残るので、次の起動で書き直せる
+    }
+  }
+
+  // 💡 保存は1つずつ順に行い、待っている間に頼まれた分は1回にまとめる（書く値は新しい方）。
+  Map<String, Object>? _queuedValues;
+  Completer<void>? _queuedDone;
+  Future<void>? _runningWrite;
+
+  Future<void> _enqueueWrite(Map<String, Object> values) {
+    final queued = _queuedValues;
+    if (queued != null) {
+      _queuedValues = {...queued, ...values};
+      return _queuedDone!.future;
+    }
+    _queuedValues = values;
+    final done = _queuedDone = Completer<void>();
+    () async {
+      while (_runningWrite != null) {
+        try {
+          await _runningWrite;
+        } catch (_) {}
+      }
+      final v = _queuedValues!;
+      _queuedValues = null;
+      _queuedDone = null;
+      final f = _writeValues(v);
+      _runningWrite = f;
+      try {
+        await f;
+        _onWriteSucceeded();
+        done.complete();
+      } catch (e, st) {
+        _onWriteFailed();
+        done.completeError(e, st);
+      } finally {
+        if (identical(_runningWrite, f)) _runningWrite = null;
+      }
+    }();
+    return done.future;
+  }
+
+  void _onWriteSucceeded() {
+    // ⚠️ 回復不能（混ざっている可能性）は、ふつうの保存が成功しても解消しない。
+    //   取り込み直し・復元（importJson の成功）でだけ解消する。
+    if (storageIssue != null && storageIssue != StorageIssue.unrecoverable) {
+      storageIssue = null;
+      notifyListeners();
+    }
+  }
+
+  void _onWriteFailed() {
+    // 回復待ち・回復不能のときはそのまま（保存の失敗より重い状態）
+    if (storageIssue == null) {
+      storageIssue = StorageIssue.saveFailed;
+      notifyListeners();
+    }
+  }
+
+  Future<void> saveData({bool markModified = true}) {
+    if (markModified) dataUpdatedAt = clockNow();
+    final f = _enqueueWrite(_persistedValues(includeUpdatedAt: markModified));
+    // ⚠️ 呼び出し側の多くは待たない。失敗は storageIssue で画面に出すので、未処理の例外にしない
+    //   （待っている呼び出し側には、そのまま例外が届く）。
+    f.catchError((_) {});
+    f.then((_) => _maybeAutoBackup(), onError: (_) {});
+    return f;
+  }
+
+  /// 保存をやり直す（保存に失敗・回復待ちのとき、画面のボタンから）。成功したら true。
+  Future<bool> retryStorage() async {
+    try {
+      await saveData(markModified: false);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  void _maybeAutoBackup() {
+    if (uploadsBlocked) return; // ⚠️ 整っていない状態で、正常なバックアップを押し出さない
     // 自動バックアップ（1日1回）
     final now = clockNow();
     if (autoBackupEnabled &&
@@ -5084,43 +5269,105 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  static Map<String, Object> _decodeValues(Object? raw) {
+    final m = (raw as Map).cast<String, Object?>();
+    return {
+      for (final e in m.entries)
+        if (e.value != null) e.key: e.value is List ? [for (final x in e.value as List) '$x'] : e.value!,
+    };
+  }
+
+  static String _fingerprint(Map<String, Object> values) =>
+      sha256.convert(utf8.encode(jsonEncode(values))).toString();
+
+  // 今の端末の保存から、指定したキーの値を読み直す（復旧点の照合用）
+  static Map<String, Object> _currentValues(SharedPreferences prefs, Iterable<String> keys) => {
+        for (final k in keys)
+          if (prefs.get(k) != null) k: prefs.get(k) is List ? [for (final x in prefs.get(k) as List) '$x'] : prefs.get(k)!,
+      };
+
+  // 💡 起動時に、途中で止まった保存・取り込みを整った状態へ戻す。
+  //   ・復旧点があり、取り込み後の保存が最後まで終わっていない → 取り込む前の状態へ戻す
+  //   ・復旧点があるが、端末の保存が取り込み後の状態と一致 → 取り込みは終わっていた（記録を消すだけ）
+  //   ・一時保存だけがある → その状態（最後に保存しようとした状態）を書き直す
+  //   書き戻せなかったら、記録を残したまま「回復待ち」にし、記録の値で読む（戻り値）。
+  Future<Map<String, Object>?> _recoverInterruptedWrite(SharedPreferences prefs) async {
+    final rpRaw = prefs.getString(kRestorePointKey);
+    final walRaw = prefs.getString(kPendingWriteKey);
+    if (rpRaw == null && walRaw == null) return null;
+    Map<String, Object> target;
+    try {
+      if (rpRaw != null) {
+        final rp = jsonDecode(rpRaw) as Map<String, dynamic>;
+        final afterKeys = [for (final k in (rp['afterKeys'] as List)) '$k'];
+        final done = walRaw == null &&
+            _fingerprint(_currentValues(prefs, afterKeys)) == rp['afterHash'];
+        if (done) {
+          await prefs.remove(kRestorePointKey);
+          return null;
+        }
+        target = _decodeValues(rp['before']);
+      } else {
+        target = _decodeValues((jsonDecode(walRaw!) as Map<String, dynamic>)['values']);
+      }
+    } catch (_) {
+      // ⚠️ 記録が壊れている。端末の保存は混ざっている可能性がある（正常なデータとして扱わない）
+      storageIssue = StorageIssue.unrecoverable;
+      return null;
+    }
+    try {
+      for (final e in target.entries) {
+        await _putValue(prefs, e.key, e.value);
+      }
+      await prefs.remove(kPendingWriteKey);
+      await prefs.remove(kRestorePointKey);
+      recoveredOnStartup = true;
+      return null;
+    } catch (_) {
+      storageIssue = StorageIssue.recoveryPending;
+      return target;
+    }
+  }
+
   Future<void> _loadDataInner() async {
     final prefs = await SharedPreferences.getInstance();
+    // 💡 前回の保存・取り込みが途中で止まっていたら、まず整った状態へ戻す
+    final pv = _PrefsView(prefs, await _recoverInterruptedWrite(prefs));
 
-    final shiftsStr = prefs.getString('saved_shifts');
+    final shiftsStr = pv.getString('saved_shifts');
     if (shiftsStr != null) {
       (jsonDecode(shiftsStr) as Map<String, dynamic>).forEach((k, v) {
         shifts[k] = (v as List).map((e) => ShiftData.fromJson(e)).toList();
       });
     }
 
-    final actualSalStr = prefs.getString('saved_actual_salaries');
+    final actualSalStr = pv.getString('saved_actual_salaries');
     if (actualSalStr != null) {
       (jsonDecode(actualSalStr) as Map<String, dynamic>).forEach((k, v) {
         if (v is int) actualSalaries[k] = v;
       });
     }
-    final actualSalWpStr = prefs.getString('saved_actual_salaries_by_wp');
+    final actualSalWpStr = pv.getString('saved_actual_salaries_by_wp');
     if (actualSalWpStr != null) {
       (jsonDecode(actualSalWpStr) as Map<String, dynamic>).forEach((k, v) {
         if (v is int) actualSalariesByWp[k] = v;
       });
     }
-    final buaStr = prefs.getString('saved_balance_updated_at');
+    final buaStr = pv.getString('saved_balance_updated_at');
     balanceUpdatedAt = (buaStr != null && buaStr.isNotEmpty) ? DateTime.tryParse(buaStr) : null;
-    final beaStr = prefs.getString('saved_balance_entered_at');
+    final beaStr = pv.getString('saved_balance_entered_at');
     balanceEnteredAt = (beaStr != null && beaStr.isNotEmpty) ? DateTime.tryParse(beaStr) : null;
-    goalAmount = prefs.getInt('saved_goal_amount') ?? 0;
-    final goalStr = prefs.getString('saved_goal_date');
+    goalAmount = pv.getInt('saved_goal_amount') ?? 0;
+    final goalStr = pv.getString('saved_goal_date');
     goalDate = (goalStr != null && goalStr.isNotEmpty) ? DateTime.tryParse(goalStr) : null;
-    final budgetsStr = prefs.getString('saved_budgets');
+    final budgetsStr = pv.getString('saved_budgets');
     if (budgetsStr != null) {
       (jsonDecode(budgetsStr) as Map<String, dynamic>).forEach((k, v) {
         if (v is int) budgets[k] = v;
       });
     }
 
-    final workplacesStr = prefs.getString('saved_workplaces');
+    final workplacesStr = pv.getString('saved_workplaces');
     if (workplacesStr != null) {
       workplaces
         ..clear()
@@ -5128,21 +5375,21 @@ class AppState extends ChangeNotifier {
             .map((e) => Workplace.fromJson(e)));
     }
 
-    final eventsStr = prefs.getString('saved_events');
+    final eventsStr = pv.getString('saved_events');
     if (eventsStr != null) {
       (jsonDecode(eventsStr) as Map<String, dynamic>).forEach((k, v) {
         events[k] = (v as List).map((e) => EventData.fromJson(e)).toList();
       });
     }
 
-    final todosStr = prefs.getString('saved_todos');
+    final todosStr = pv.getString('saved_todos');
     if (todosStr != null) {
       (jsonDecode(todosStr) as Map<String, dynamic>).forEach((k, v) {
         todos[k] = (v as List).map((e) => TodoData.fromJson(e)).toList();
       });
     }
 
-    final paymentsStr = prefs.getString('saved_payments');
+    final paymentsStr = pv.getString('saved_payments');
     if (paymentsStr != null) {
       payments = (jsonDecode(paymentsStr) as List)
           .map((e) => Payment.fromJson(e))
@@ -5159,96 +5406,96 @@ class AppState extends ChangeNotifier {
       if (dedupped) saveData();
     }
 
-    final installStr = prefs.getString('saved_installments');
+    final installStr = pv.getString('saved_installments');
     if (installStr != null) {
       installments = (jsonDecode(installStr) as List)
           .map((e) => Installment.fromJson(e))
           .toList();
     }
 
-    final subsStr = prefs.getString('saved_subscriptions');
+    final subsStr = pv.getString('saved_subscriptions');
     if (subsStr != null) {
       subscriptions = (jsonDecode(subsStr) as List)
           .map((e) => Subscription.fromJson(e))
           .toList();
     }
 
-    final loanStr = prefs.getString('saved_loans');
+    final loanStr = pv.getString('saved_loans');
     if (loanStr != null) {
       loans = (jsonDecode(loanStr) as List).map((e) => Loan.fromJson(e)).toList();
     }
 
-    final peStr = prefs.getString('saved_planned_expenses');
+    final peStr = pv.getString('saved_planned_expenses');
     if (peStr != null) {
       plannedExpenses = (jsonDecode(peStr) as List)
           .map((e) => PlannedExpense.fromJson(e))
           .toList();
     }
-    final sgStr = prefs.getString('saved_schedule_suggestions');
+    final sgStr = pv.getString('saved_schedule_suggestions');
     if (sgStr != null) {
       scheduleSuggestions = (jsonDecode(sgStr) as List)
           .map((e) => ScheduleSuggestion.fromJson(e))
           .toList();
     }
-    final mlStr = prefs.getString('saved_mail_entity_links');
+    final mlStr = pv.getString('saved_mail_entity_links');
     if (mlStr != null) _setMailEntityLinks(jsonDecode(mlStr) as List);
     paidPlannedExpenseKeys
       ..clear()
-      ..addAll(prefs.getStringList('saved_paid_planned_expenses') ?? []);
+      ..addAll(pv.getStringList('saved_paid_planned_expenses') ?? []);
 
-    final wdStr = prefs.getString('saved_withdrawals');
+    final wdStr = pv.getString('saved_withdrawals');
     if (wdStr != null) {
       withdrawals = (jsonDecode(wdStr) as List)
           .map((e) => Withdrawal.fromJson(e))
           .toList();
     }
 
-    currentBalance = prefs.getInt('saved_balance') ?? 0;
-    walletCash = prefs.getInt('saved_wallet_cash') ?? 0;
-    final ptStr = prefs.getString('saved_paypay_transfers');
-    final rtStr = prefs.getString('saved_received_transfers');
+    currentBalance = pv.getInt('saved_balance') ?? 0;
+    walletCash = pv.getInt('saved_wallet_cash') ?? 0;
+    final ptStr = pv.getString('saved_paypay_transfers');
+    final rtStr = pv.getString('saved_received_transfers');
     _loadTransfers(ptStr == null ? null : jsonDecode(ptStr),
         rtStr == null ? null : jsonDecode(rtStr));
-    final pdStr = prefs.getString('saved_pending_deposits');
+    final pdStr = pv.getString('saved_pending_deposits');
     if (pdStr != null) {
       pendingDeposits =
           (jsonDecode(pdStr) as List).map((e) => DepositNotice.fromJson(e)).toList();
     }
     handledDepositIds
       ..clear()
-      ..addAll(prefs.getStringList('saved_handled_deposit_ids') ?? const []);
+      ..addAll(pv.getStringList('saved_handled_deposit_ids') ?? const []);
     handledDrawIds
       ..clear()
-      ..addAll(prefs.getStringList('saved_handled_draw_ids') ?? const []);
-    final histStr = prefs.getString('saved_balance_history');
+      ..addAll(pv.getStringList('saved_handled_draw_ids') ?? const []);
+    final histStr = pv.getString('saved_balance_history');
     if (histStr != null) {
       balanceHistory =
           (jsonDecode(histStr) as List).map((e) => BalanceEntry.fromJson(e)).toList();
     }
     paidSalaryKeys
       ..clear()
-      ..addAll(prefs.getStringList('saved_paid_salary_keys') ?? const []);
-    final planStr = prefs.getString('saved_planned_incomes');
+      ..addAll(pv.getStringList('saved_paid_salary_keys') ?? const []);
+    final planStr = pv.getString('saved_planned_incomes');
     if (planStr != null) {
       plannedIncomes =
           (jsonDecode(planStr) as List).map((e) => PlannedIncome.fromJson(e)).toList();
     }
     receivedPlannedKeys
       ..clear()
-      ..addAll(prefs.getStringList('saved_received_planned_keys') ?? const []);
-    final sptStr = prefs.getString('saved_salary_paid_through');
+      ..addAll(pv.getStringList('saved_received_planned_keys') ?? const []);
+    final sptStr = pv.getString('saved_salary_paid_through');
     salaryPaidThroughMonth =
         (sptStr != null && sptStr.isNotEmpty) ? DateTime.tryParse(sptStr) : null;
     // 💡 一度だけの移行: 2026年8月までの給料は受け取り済みとして扱う
     //   （既存ユーザーは8月分まで入金済みのため、9月分から選択肢に出す）
-    if (!(prefs.getBool('migrated_salary_paid_through_202608') ?? false)) {
+    if (!(pv.getBool('migrated_salary_paid_through_202608') ?? false)) {
       salaryPaidThroughMonth ??= DateTime(2026, 8);
       await prefs.setString(
           'saved_salary_paid_through', salaryPaidThroughMonth!.toIso8601String());
       await prefs.setBool('migrated_salary_paid_through_202608', true);
     }
 
-    final ratesStr = prefs.getString('saved_card_rates');
+    final ratesStr = pv.getString('saved_card_rates');
     if (ratesStr != null) {
       (jsonDecode(ratesStr) as Map<String, dynamic>).forEach((k, v) {
         cardInterestRates[k] = (v as num).toDouble();
@@ -5256,38 +5503,38 @@ class AppState extends ChangeNotifier {
     }
     convertedPaymentKeys
       ..clear()
-      ..addAll(prefs.getStringList('saved_converted_keys') ?? const []);
+      ..addAll(pv.getStringList('saved_converted_keys') ?? const []);
     foldedDebitKeys
       ..clear()
-      ..addAll(prefs.getStringList('saved_folded_debit_keys') ?? const []);
+      ..addAll(pv.getStringList('saved_folded_debit_keys') ?? const []);
     convertedSourceIds
       ..clear()
-      ..addAll(prefs.getStringList('saved_converted_source_ids') ?? const []);
+      ..addAll(pv.getStringList('saved_converted_source_ids') ?? const []);
 
-    final trashStr = prefs.getString('saved_trashed_payments');
+    final trashStr = pv.getString('saved_trashed_payments');
     if (trashStr != null) {
       trashedPayments =
           (jsonDecode(trashStr) as List).map((e) => Payment.fromJson(e)).toList();
     }
     deletedSourceIds
       ..clear()
-      ..addAll(prefs.getStringList('saved_deleted_source_ids') ?? const []);
+      ..addAll(pv.getStringList('saved_deleted_source_ids') ?? const []);
     deletedDupKeys
       ..clear()
-      ..addAll(prefs.getStringList('saved_deleted_dup_keys') ?? const []);
-    calendarAutoSync = prefs.getBool('saved_calendar_autosync') ?? false;
-    final reminderIdx = prefs.getInt('saved_shift_reminder');
+      ..addAll(pv.getStringList('saved_deleted_dup_keys') ?? const []);
+    calendarAutoSync = pv.getBool('saved_calendar_autosync') ?? false;
+    final reminderIdx = pv.getInt('saved_shift_reminder');
     shiftReminder = reminderIdx != null &&
             reminderIdx >= 0 &&
             reminderIdx < ShiftReminder.values.length
         ? ShiftReminder.values[reminderIdx]
         : ShiftReminder.calendarDefault;
-    shortfallAlerts = prefs.getBool('saved_shortfall_alerts') ?? true;
-    autoBackupEnabled = prefs.getBool('saved_auto_backup_enabled') ?? true;
-    showMonthAfterNext = prefs.getBool('saved_show_month_after_next') ?? true;
-    showWalletCash = prefs.getBool('saved_show_wallet_cash') ?? true;
-    backgroundTheme = prefs.getString('saved_background_theme') ?? 'pink';
-    final cpdStr = prefs.getString('saved_card_payment_days');
+    shortfallAlerts = pv.getBool('saved_shortfall_alerts') ?? true;
+    autoBackupEnabled = pv.getBool('saved_auto_backup_enabled') ?? true;
+    showMonthAfterNext = pv.getBool('saved_show_month_after_next') ?? true;
+    showWalletCash = pv.getBool('saved_show_wallet_cash') ?? true;
+    backgroundTheme = pv.getString('saved_background_theme') ?? 'pink';
+    final cpdStr = pv.getString('saved_card_payment_days');
     if (cpdStr == null) {
       // 初回起動：種をデータとして書き込む（以後はここを通らない）
       cardPaymentDays = Map<String, int>.from(kSeedCardPaymentDays);
@@ -5301,13 +5548,13 @@ class AppState extends ChangeNotifier {
             if (e.value is int) e.key: e.value as int
         });
     }
-    final bbmStr = prefs.getString('saved_bank_bill_months');
+    final bbmStr = pv.getString('saved_bank_bill_months');
     if (bbmStr != null) {
       (jsonDecode(bbmStr) as Map<String, dynamic>).forEach((k, v) {
         if (v is String) bankBillMonths[k] = v;
       });
     }
-    final caStr = prefs.getString('saved_card_aliases');
+    final caStr = pv.getString('saved_card_aliases');
     if (caStr != null) {
       (jsonDecode(caStr) as Map<String, dynamic>).forEach((k, v) {
         if (v is String) cardAliases[k] = v;
@@ -5317,39 +5564,39 @@ class AppState extends ChangeNotifier {
       ('saved_special_calendar_ids', specialCalendarIds),
       ('saved_special_calendar_sigs', specialCalendarSigs),
     ]) {
-      final s = prefs.getString(key);
+      final s = pv.getString(key);
       if (s == null) continue;
       (jsonDecode(s) as Map<String, dynamic>).forEach((k, v) {
         if (v is String) target[k] = v;
       });
     }
-    final aoStr = prefs.getString('saved_amazon_overrides');
+    final aoStr = pv.getString('saved_amazon_overrides');
     if (aoStr != null) {
       (jsonDecode(aoStr) as Map<String, dynamic>).forEach((k, v) {
         if (v is String) amazonCardOverrides[k] = v;
       });
     }
-    final pnStr = prefs.getString('saved_payment_notes');
+    final pnStr = pv.getString('saved_payment_notes');
     if (pnStr != null) {
       (jsonDecode(pnStr) as Map<String, dynamic>).forEach((k, v) {
         if (v is String) paymentNotes[k] = v;
       });
     }
-    final ccdStr = prefs.getString('saved_card_closing_days');
+    final ccdStr = pv.getString('saved_card_closing_days');
     if (ccdStr != null) {
       (jsonDecode(ccdStr) as Map<String, dynamic>).forEach((k, v) {
         if (v is int) cardClosingDays[k] = v;
       });
     }
-    final lbaStr = prefs.getString('saved_last_backup_at');
+    final lbaStr = pv.getString('saved_last_backup_at');
     if (lbaStr != null && lbaStr.isNotEmpty) lastAutoBackupAt = DateTime.tryParse(lbaStr);
 
-    gmailFirstSyncDone = prefs.getBool('saved_first_sync') ?? false;
+    gmailFirstSyncDone = pv.getBool('saved_first_sync') ?? false;
 
-    driveSyncEnabled = prefs.getBool('saved_drive_sync_enabled') ?? false;
-    requireGoogleLogin = prefs.getBool('saved_require_google_login') ?? false;
+    driveSyncEnabled = pv.getBool('saved_drive_sync_enabled') ?? false;
+    requireGoogleLogin = pv.getBool('saved_require_google_login') ?? false;
     DateTime? readAt(String key) {
-      final s = prefs.getString(key);
+      final s = pv.getString(key);
       return (s == null || s.isEmpty) ? null : DateTime.tryParse(s);
     }
 

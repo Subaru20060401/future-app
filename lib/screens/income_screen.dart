@@ -642,6 +642,8 @@ class IncomeScreen extends StatelessWidget {
         final head = <Widget>[
           // 💡 メール更新の結果（一行。失敗・見送りなら再試行を出す）
           const SyncStatusBar(),
+          // 💡 保存の失敗・回復待ち（端末の保存が整っていない間は、ここで知らせる）
+          StorageStatusBanner(appState: appState),
           // 💡 ドライブ同期の競合・失敗（自動保存が止まっているとき）
           DriveSyncBanner(appState: appState),
           if (isEmpty) _homeEmptyGuide(context, appState),

@@ -100,4 +100,18 @@ void main() {
     await tester.pump();
     expect(find.text('選ぶ'), findsNothing);
   });
+
+  testWidgets('保存が回復待ちなら、止めていることと次の操作を出す', (tester) async {
+    final app = await _pump(tester, const Size(390, 844));
+    app.storageIssue = StorageIssue.recoveryPending;
+    app.notifyListeners();
+    await tester.pump();
+    expect(find.text('前回止まった保存を、まだ元に戻せていません'), findsOneWidget);
+    expect(find.text('もう一度保存'), findsOneWidget);
+    app.storageIssue = StorageIssue.unrecoverable;
+    app.notifyListeners();
+    await tester.pump();
+    expect(find.text('保存データが途中で混ざっている可能性があります'), findsOneWidget);
+    expect(find.text('ドライブから取り込む'), findsOneWidget);
+  });
 }

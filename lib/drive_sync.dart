@@ -347,6 +347,14 @@ class DriveSync {
   //   以前は送信の途中（認証の取り直し・通信待ち）で時刻を取っていたため、その間の変更が
   //   送られていないのに同期済み扱いになり、次の自動保存で上がらなかった（B7）。
   Future<DriveSyncResult> pushNow(AppState app) async {
+    // ⚠️ 端末の保存が整っていない可能性がある間は、ドライブの正常なコピーを上書きしない
+    //   （自動の保存・「この端末の内容で上書き」・競合で「この端末を残す」のすべてがここを通る）。
+    //   取り込み（pullNow）と診断は使える。
+    if (app.uploadsBlocked) {
+      return const DriveSyncResult(DriveSyncState.error,
+          error: 'この端末の保存データが整っていないため、ドライブへの保存を止めています。'
+              'ドライブから取り込み直すか、保存をやり直してください');
+    }
     try {
       final sentAt = app.clockNow();
       final localAt = app.dataUpdatedAt ?? sentAt;

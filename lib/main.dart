@@ -64,6 +64,8 @@ void main() async {
   //   端末アプリ専用だった device_calendar と違い、Web版でも動く。
   //   ⚠️ 両方つなぐと同じ予定が二重に出るので、Apple側は繋がない。
   appState.calendarSync = GoogleCalendarSync(appState);
+  // 💡 保存の容量が足りないとき、作り直せる Gmail の解析キャッシュを消して空きを作る（補助策）
+  appState.freeStorageSpace = GmailService.instance.clearCache;
   if (!kIsWeb) {
     // 💡 データが変わるたびに通知を組み立て直す
     appState.addListener(() {
