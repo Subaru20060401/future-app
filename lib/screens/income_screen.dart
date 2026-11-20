@@ -509,8 +509,6 @@ class IncomeScreen extends StatelessWidget {
             ),
             const SizedBox(height: 12),
             row('現在の残高', appState.effectiveBalance),
-            if (appState.effectiveWalletCash != 0)
-              row('財布の現金', appState.effectiveWalletCash),
             ...events.map((e) => row(
                   e.label,
                   e.amount,

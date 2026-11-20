@@ -78,8 +78,22 @@ void main() {
 
   testWidgets('並びと「引落確定も表示」は、選んでいる状態が文字で読める', (t) async {
     await pumpScreen(t);
-    expect(find.text('並び：日付が古い順 ▾'), findsOneWidget);
+    // 💡 カード明細は最初から日付が新しい順（2026-11 変更。以前は古い順）
+    expect(find.text('並び：日付が新しい順 ▾'), findsOneWidget);
     expect(find.widgetWithText(FilterChip, '引落確定も表示'), findsOneWidget);
+  });
+
+  testWidgets('カード明細は最初から日付が新しい順で、古い順にも切り替えられる', (t) async {
+    await pumpScreen(t, width: 600);
+    double y(String text) => t.getTopLeft(find.text(text).first).dy;
+    // 4日（¥800）が 3日（¥1,234,567）より上
+    expect(y('¥800'), lessThan(y('¥1,234,567')));
+    await t.tap(find.text('並び：日付が新しい順 ▾'));
+    await t.pumpAndSettle();
+    await t.tap(find.text('日付が古い順').last);
+    await t.pumpAndSettle();
+    expect(find.text('並び：日付が古い順 ▾'), findsOneWidget);
+    expect(y('¥1,234,567'), lessThan(y('¥800')));
   });
 
   group('メール更新の結果', () {

@@ -365,6 +365,10 @@ class Subscription {
   //   '手動' = 自分で払う（振込・現金など。払ったら記録して残高から引く）
   //   カード名 = そのカード払い（カードの引き落とし額に含まれるので口座からは別途引かない）
   String method;
+  // 💡 開始月＝最初の利用月（その月の 1 日）。この月より前の支出・引き落としには載せない。
+  //   カード払いで翌月に引き落とすなら、最初に口座から落ちるのは開始月の翌月。
+  //   ⚠️ null＝未設定（以前の版のデータ）。従来どおり、どの月にも載せる（勝手に今月にしない）。
+  DateTime? startMonth;
 
   Subscription({
     required this.id,
@@ -372,7 +376,14 @@ class Subscription {
     required this.amount,
     required this.payDay,
     this.method = '',
-  });
+    DateTime? startMonth,
+  }) : startMonth = startMonth == null ? null : DateTime(startMonth.year, startMonth.month);
+
+  /// [month] の利用として載せるか（開始月が未設定なら常に載せる）
+  bool isUsedIn(DateTime month) {
+    final s = startMonth;
+    return s == null || !DateTime(month.year, month.month).isBefore(s);
+  }
 
   // 口座振替（自動引き落とし）か
   bool get isFromAccount => method.isEmpty;
@@ -389,6 +400,9 @@ class Subscription {
         'amount': amount,
         'payDay': payDay,
         'method': method,
+        // 未設定のときはキーを書かない（以前の版のデータと同じ形）
+        if (startMonth != null)
+          'startMonth': '${startMonth!.year.toString().padLeft(4, '0')}-${startMonth!.month.toString().padLeft(2, '0')}',
       };
 
   factory Subscription.fromJson(Map<String, dynamic> json) => Subscription(
@@ -397,7 +411,18 @@ class Subscription {
         amount: json['amount'],
         payDay: json['payDay'],
         method: json['method'] ?? '',
+        startMonth: _parseYearMonth(json['startMonth']),
       );
+
+  // "2026-12" を 2026-12-01 に。読めなければ未設定（null）として扱う
+  static DateTime? _parseYearMonth(Object? v) {
+    if (v is! String) return null;
+    final m = RegExp(r'^(\d{4})-(\d{1,2})').firstMatch(v);
+    if (m == null) return null;
+    final month = int.parse(m.group(2)!);
+    if (month < 1 || month > 12) return null;
+    return DateTime(int.parse(m.group(1)!), month);
+  }
 }
 
 // ───────────────────────── ATM引き出し ─────────────────────────
@@ -406,12 +431,17 @@ class Withdrawal {
   DateTime date;
   int amount;
   String memo;
+  // 💡 登録したときに「口座から引いて財布に足した」か。
+  //   ⚠️ 以前の版で登録した引き出しは記録だけで、口座も財布も動かしていない（false のまま読む）。
+  //     取り消すときに、動かしていないお金を戻さないための印。
+  bool movedToWallet;
 
   Withdrawal({
     required this.id,
     required this.date,
     required this.amount,
     this.memo = '',
+    this.movedToWallet = false,
   });
 
   Map<String, dynamic> toJson() => {
@@ -419,6 +449,7 @@ class Withdrawal {
         'date': date.toIso8601String(),
         'amount': amount,
         'memo': memo,
+        if (movedToWallet) 'movedToWallet': true,
       };
 
   factory Withdrawal.fromJson(Map<String, dynamic> json) => Withdrawal(
@@ -426,6 +457,7 @@ class Withdrawal {
         date: DateTime.parse(json['date']),
         amount: json['amount'],
         memo: json['memo'] ?? '',
+        movedToWallet: json['movedToWallet'] == true,
       );
 }
 

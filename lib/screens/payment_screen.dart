@@ -11,6 +11,8 @@ import '../widgets/payment_row.dart';
 import '../money_format.dart';
 import '../ui/tokens.dart';
 import '../widgets/billing_link_sheet.dart';
+import '../widgets/month_picker_field.dart';
+import '../ui/card_icon.dart';
 
 class PaymentScreen extends StatefulWidget {
   const PaymentScreen({super.key});
@@ -30,7 +32,8 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
   late final TabController _tab = TabController(length: _paymentTabs.length, vsync: this);
   String? _filterCard; // カード絞り込み（nullは全件）
   late DateTime _filterMonth = DateTime(DateTime.now().year, DateTime.now().month); // 初期=今月
-  _SortMode _sortMode = _SortMode.dateAsc; // 並べ替え
+  // 💡 カード明細は最初から日付が新しい順（最近の利用を上に）。古い順・金額順へは手で切り替えられる
+  _SortMode _sortMode = _SortMode.dateDesc; // 並べ替え
   bool _showBank = false; // 銀行確定(過去)を表示するか（既定は非表示）
   String _search = ''; // 文字・金額での検索
   final _searchCtrl = TextEditingController();
@@ -565,7 +568,9 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
             runSpacing: 4,
             children: [
               ActionChip(
-                avatar: const Icon(Icons.credit_card, size: 16),
+                avatar: _filterCard == null
+                    ? const Icon(Icons.credit_card, size: 16)
+                    : CardIcon(_filterCard!, size: 18),
                 label: Text(
                   'カード：${_filterCard ?? 'すべて'} ▾',
                   overflow: TextOverflow.ellipsis,
@@ -715,7 +720,7 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
               ),
               for (final c in cards)
                 ListTile(
-                  leading: Icon(cardStyleOf(c).icon, color: cardStyleOf(c).color),
+                  leading: CardIcon(c, size: 28),
                   title: Text(c), // 全名称（切らない）
                   subtitle: Text(cardKindLabel(c), style: const TextStyle(fontSize: 12)),
                   trailing: _filterCard == c ? const Icon(Icons.check, color: Colors.pink) : null,
@@ -894,9 +899,8 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
             ),
             const Divider(),
             ...cards.map((c) {
-              final style = cardStyleOf(c);
               return ListTile(
-                leading: Icon(style.icon, color: style.color),
+                leading: CardIcon(c, size: 28),
                 title: Text(c),
                 onTap: () => Navigator.pop(context, c),
               );
@@ -1265,7 +1269,8 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
                   child: ListTile(
                     leading: const Icon(Icons.subscriptions, color: Colors.purple),
                     title: Text(s.title),
-                    subtitle: Text('毎月${s.payDay}日 ・ ${s.methodLabel}'),
+                    subtitle: Text('毎月${s.payDay}日 ・ ${s.methodLabel}'
+                        '${s.startMonth != null ? ' ・ ${yearMonthLabel(s.startMonth)}から' : ''}'),
                     trailing: Text(yen(s.amount), style: const TextStyle(fontWeight: FontWeight.bold)),
                     onTap: () => _editSubscriptionMethod(appState, s),
                   ),
@@ -1280,6 +1285,8 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
     final amountCtrl = TextEditingController();
     final dayCtrl = TextEditingController(text: '1');
     String method = ''; // '' = 口座振替
+    final now = appState.clockNow();
+    DateTime? startMonth = DateTime(now.year, now.month); // 💡 新規は今月を初期値にする
     showDialog(
       context: context,
       builder: (context) => StatefulBuilder(
@@ -1322,6 +1329,14 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
                   _methodHint(method),
                   style: const TextStyle(fontSize: 12, color: AppColors.subtle),
                 ),
+                const SizedBox(height: 12),
+                MonthPickerField(
+                  label: '開始月（最初に使う月）',
+                  value: startMonth,
+                  fallback: DateTime(now.year, now.month),
+                  onChanged: (m) => setLocal(() => startMonth = m),
+                ),
+                _firstDrawHint(appState, method, startMonth),
               ],
             ),
           ),
@@ -1334,6 +1349,7 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
                   amount: int.tryParse(amountCtrl.text) ?? 0,
                   payDay: int.tryParse(dayCtrl.text) ?? 1,
                   method: method,
+                  startMonth: startMonth,
                 );
                 Navigator.pop(context);
               },
@@ -1354,18 +1370,35 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
     return 'カードの請求に含まれます（口座からは別途引きません）';
   }
 
-  // 既存の定期支払いの支払い方法を変更
+  // 最初に口座から落ちる月の説明（開始月と支払い方法から。計算は AppState）
+  Widget _firstDrawHint(AppState appState, String method, DateTime? startMonth) {
+    final first = appState.subscriptionFirstDrawMonth(method, startMonth);
+    if (first == null) return const SizedBox.shrink();
+    final isCard = method.isNotEmpty && method != kManualPayMethod;
+    return Text(
+      '${yearMonthLabel(startMonth)}の利用から支出に載せます。'
+      '口座から最初に落ちるのは${yearMonthLabel(first)}${isCard ? '（カードの引き落とし日）' : ''}です',
+      style: const TextStyle(fontSize: 12, color: AppColors.subtle),
+    );
+  }
+
+  // 既存の定期支払いの支払い方法・開始月を変更
   void _editSubscriptionMethod(AppState appState, Subscription sub) {
     String method = sub.method;
+    DateTime? startMonth = sub.startMonth;
+    final now = appState.clockNow();
     showDialog(
       context: context,
       builder: (context) => StatefulBuilder(
         builder: (context, setLocal) => AlertDialog(
-          title: Text('${sub.title} の支払い方法'),
-          content: Column(
+          title: Text('${sub.title} の設定'),
+          content: SingleChildScrollView(
+            child: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              const Text('支払い方法', style: TextStyle(fontSize: 12, color: AppColors.subtle)),
+              const SizedBox(height: 4),
               Wrap(
                 spacing: 6,
                 runSpacing: 4,
@@ -1392,13 +1425,24 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
                 _methodHint(method),
                 style: const TextStyle(fontSize: 12, color: AppColors.subtle),
               ),
+              const SizedBox(height: 12),
+              MonthPickerField(
+                label: '開始月（最初に使う月）',
+                value: startMonth,
+                fallback: DateTime(now.year, now.month),
+                allowUnset: true,
+                unsetHint: '未設定です。これまでどおり、どの月の支出にも載せます',
+                onChanged: (m) => setLocal(() => startMonth = m),
+              ),
+              _firstDrawHint(appState, method, startMonth),
             ],
+            ),
           ),
           actions: [
             TextButton(onPressed: () => Navigator.pop(context), child: const Text('キャンセル')),
             ElevatedButton(
               onPressed: () {
-                appState.setSubscriptionMethod(sub.id, method);
+                appState.editSubscription(sub.id, method: method, startMonth: startMonth);
                 Navigator.pop(context);
               },
               child: const Text('保存'),
@@ -1444,6 +1488,12 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
             children: [
               TextField(controller: amountCtrl, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: '金額(円)')),
               TextField(controller: memoCtrl, decoration: const InputDecoration(labelText: 'メモ')),
+              // 💡 引き出し＝口座のお金が財布へ移る（AppState.addWithdrawal）
+              const Padding(
+                padding: EdgeInsets.only(top: 8),
+                child: Text('保存すると、口座の残高から引いて財布の現金に足します（消すと元に戻ります）',
+                    style: TextStyle(fontSize: 12, color: AppColors.subtle)),
+              ),
               ListTile(
                 contentPadding: EdgeInsets.zero,
                 title: const Text('日付'),

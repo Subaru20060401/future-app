@@ -388,6 +388,9 @@ class AppState extends ChangeNotifier {
   //   締め日を月末以外にすると、その月の引き落としは
   //   「前々月の締め日の翌日 〜 前月の締め日」の利用ぶんになる。
   Map<String, int> cardClosingDays = {};
+  // 💡 カードごとの自分の画像（アイコン用に縮小した PNG を base64 で）。無いカードは既定のマーク。
+  //   キーはカード名（名前を変える・まとめると付け替わる）。書き出し・ドライブ同期にも入る。
+  Map<String, String> cardIcons = {};
 
   final Map<String, List<TodoData>> todos = {};
   List<Payment> payments = [];
@@ -1345,6 +1348,10 @@ class AppState extends ChangeNotifier {
     _renameInDupKeys(deletedDupKeys, from, target);
     _renameInDupKeys(convertedPaymentKeys, from, target);
 
+    // 自分の画像: まとめ先に画像が無ければ持って行く（まとめ先の画像があればそれを使う）
+    final icon = cardIcons.remove(from);
+    if (icon != null) cardIcons.putIfAbsent(target, () => icon);
+
     // 設定側にも残っていたら消す（まとめ先へ寄せる）
     cardPaymentDays.remove(from);
     cardClosingDays.remove(from);
@@ -1793,17 +1800,43 @@ class AppState extends ChangeNotifier {
   }
 
   // ───── 定期支払い ─────
+  // 💡 startMonth: 最初の利用月。登録画面は今月を初期値にする（null＝未設定は以前の版のデータ用）
   void addSubscription({
     required String title,
     required int amount,
     required int payDay,
     String method = '',
+    DateTime? startMonth,
   }) {
     _ensureEditable();
     subscriptions.add(Subscription(
-        id: _id(), title: title, amount: amount, payDay: payDay, method: method));
+        id: _id(), title: title, amount: amount, payDay: payDay, method: method, startMonth: startMonth));
     saveData();
     notifyListeners();
+  }
+
+  // 定期支払いの開始月を変える（null で未設定に戻す＝どの月にも載せる）
+  void setSubscriptionStartMonth(String id, DateTime? startMonth) =>
+      editSubscription(id, method: subscriptions.firstWhere((e) => e.id == id).method, startMonth: startMonth);
+
+  // 定期支払いの編集画面の保存（支払い方法と開始月を 1 回で保存する）
+  void editSubscription(String id, {required String method, required DateTime? startMonth}) {
+    _ensureEditable();
+    final i = subscriptions.indexWhere((e) => e.id == id);
+    if (i < 0) return;
+    subscriptions[i].method = method;
+    subscriptions[i].startMonth =
+        startMonth == null ? null : DateTime(startMonth.year, startMonth.month);
+    saveData();
+    notifyListeners();
+  }
+
+  /// 開始月から、最初に口座から落ちる月（画面の説明用）。
+  /// 口座振替・手動払いは開始月そのもの、カード払いは翌月（カードの請求として落ちる）。
+  DateTime? subscriptionFirstDrawMonth(String method, DateTime? startMonth) {
+    if (startMonth == null) return null;
+    final card = method.isNotEmpty && method != kManualPayMethod;
+    return DateTime(startMonth.year, startMonth.month + (card ? 1 : 0));
   }
 
   // 定期支払いの支払い方法を変更（口座振替 / カード名）
@@ -1824,16 +1857,44 @@ class AppState extends ChangeNotifier {
   }
 
   // ───── ATM引き出し ─────
+  // 💡 ATM で引き出した＝口座のお金が財布へ移る。口座残高から引き、財布に足す（入出金の履歴にも残す）。
+  //   支出の内訳の「ATM」には、これまでどおり引き出した月の支出として出す。
+  //   ⚠️ 財布の現金は口座の予想に入らないので、口座の見込みは引き出した分だけ減る。
   void addWithdrawal({required DateTime date, required int amount, String memo = ''}) {
     _ensureEditable();
-    withdrawals.add(Withdrawal(id: _id(), date: date, amount: amount, memo: memo));
+    final w = Withdrawal(id: _id(), date: date, amount: amount, memo: memo, movedToWallet: amount > 0);
+    withdrawals.add(w);
+    if (amount > 0) {
+      _foldDebitsIntoBalance();
+      currentBalance -= amount;
+      walletCash += amount;
+      balanceUpdatedAt = clockNow();
+      _recordBalanceEntry(
+        kind: BalanceEntryKind.draw,
+        label: 'ATM引き出し',
+        amount: amount,
+        sourceKey: _atmKey(w.id),
+      );
+    }
     saveData();
     notifyListeners();
   }
 
+  static String _atmKey(String withdrawalId) => 'atm:$withdrawalId';
+
+  // 💡 引き出しを消したら、口座と財布も元に戻す（登録したときに動かした分だけ）。
   void removeWithdrawal(String id) {
     _ensureEditable();
-    withdrawals.removeWhere((e) => e.id == id);
+    final i = withdrawals.indexWhere((e) => e.id == id);
+    if (i < 0) return;
+    final w = withdrawals.removeAt(i);
+    if (w.movedToWallet) {
+      _foldDebitsIntoBalance();
+      currentBalance += w.amount;
+      walletCash -= w.amount;
+      balanceUpdatedAt = clockNow();
+      balanceHistory.removeWhere((e) => e.sourceKey == _atmKey(w.id));
+    }
     saveData();
     notifyListeners();
   }
@@ -2111,6 +2172,14 @@ class AppState extends ChangeNotifier {
     balanceUpdatedAt = clockNow();
     balanceHistory.removeAt(i);
     final key = e.sourceKey;
+    // 💡 ATM 引き出しの取り消し: 財布に足した分も戻し、引き出しの記録も消す（口座だけ戻ると二重になる）
+    if (key != null && key.startsWith('atm:')) {
+      final wi = withdrawals.indexWhere((w) => _atmKey(w.id) == key);
+      if (wi >= 0) {
+        final w = withdrawals.removeAt(wi);
+        if (w.movedToWallet) walletCash -= w.amount;
+      }
+    }
     if (key != null && key.isNotEmpty) {
       handledDrawIds.remove(key);
       handledDepositIds.remove(key);
@@ -2366,6 +2435,8 @@ class AppState extends ChangeNotifier {
     for (final sub in subscriptions.where((e) => !e.isCardPayment)) {
       for (var back = 0; back < 3; back++) {
         final m = DateTime(now.year, now.month - back);
+        // 💡 開始月より前の月は払っていない（口座振替・手動払いは、利用した月に払う）
+        if (!sub.isUsedIn(m)) continue;
         // 💡 予想（subscriptionDrawsIn）と同じく、休みなら翌営業日（以前はそのままの日付だった）
         final date = drawDateInMonth(sub.payDay, m);
         if (!inWindow(date)) continue;
@@ -2687,13 +2758,15 @@ class AppState extends ChangeNotifier {
     return removed;
   }
 
-  // 見本の提案をまとめて消す（登録済みの予定・シフトは残す）
-  void removeSampleSuggestions() {
-    _ensureEditable();
-    scheduleSuggestions
-        .removeWhere((s) => s.sample && s.status != SuggestionStatus.approved);
-    saveData();
-    notifyListeners();
+  // 💡 見本の提案（架空の説明会・面接・単発バイト）を入れる機能は 2026-11 に削除した。
+  //   残っている未承認の見本は、起動時と取り込み時に片付ける（repairData → _removeSampleSuggestions）。
+  //   ⚠️ 見本かどうかは sample の印だけで決める。「面接」などのタイトルで消すと、本物の予定まで消える。
+  //     承認済みの見本（本人が登録した予定・シフトにつながっている）は、記録として残す。
+  //   保存はしない（呼び出し側がまとめて保存する）。何度走らせても同じ結果。
+  int _removeSampleSuggestions() {
+    final before = scheduleSuggestions.length;
+    scheduleSuggestions.removeWhere((s) => s.sample && s.status != SuggestionStatus.approved);
+    return before - scheduleSuggestions.length;
   }
 
   ({String dateKey, int index})? _findShiftById(String id) {
@@ -3531,7 +3604,8 @@ class AppState extends ChangeNotifier {
     bool sameYm(DateTime d, DateTime m) => d.year == m.year && d.month == m.month;
 
     if (label == '定期支払い') {
-      for (final s in subscriptions) {
+      // 💡 合計（subscriptionTotalOf）と同じ判定で並べる（開始月・銀行確定済みのカード）
+      for (final s in subscriptionsUsedIn(month)) {
         out.add((title: s.title, subtitle: '毎月${s.payDay}日', amount: s.amount));
       }
     } else if (label == '分割払い（カード未設定）') {
@@ -3766,13 +3840,19 @@ class AppState extends ChangeNotifier {
   // 💡 指定月の支出に載せる定期支払いの合計。
   //   カード払いの定期は、その月が銀行確定していればカードの引き落とし額に既に含まれるので除く
   //   （分割払いと同じ二重計上対策）。口座振替の定期は常に計上する。
-  int subscriptionTotalOf(DateTime month) {
+  //   開始月より前の月には載せない（開始月が未設定なら、従来どおりどの月にも載せる）。
+  int subscriptionTotalOf(DateTime month) =>
+      subscriptionsUsedIn(month).fold(0, (sum, s) => sum + s.amount);
+
+  // 指定月の支出（利用月）に載せる定期支払い。subscriptionTotalOf と支出の明細で同じものを使う。
+  List<Subscription> subscriptionsUsedIn(DateTime month) {
     // ⚠️ 判定は定期ごとの支払いカード単位。どれか1枚の確定で全部止めると、
     //   まだ確定していないカードで払っている定期まで予想から消える。
     final bank = _bankConfirmedTotalsOf(month);
     return subscriptions
+        .where((s) => s.isUsedIn(month))
         .where((s) => !s.isCardPayment || !_isConfirmedIn(s.method, bank))
-        .fold(0, (sum, s) => sum + s.amount);
+        .toList();
   }
 
   // ───── ローン ─────
@@ -4111,16 +4191,20 @@ class AppState extends ChangeNotifier {
     for (final e in expenseBreakdownOf(useMonth)) {
       if (byPeriod.contains(e.label)) continue; // 締め期間で集計済み
       if (_excludedFromDraw(e.label)) continue;
-      if (e.label == '定期支払い') {
-        // ⚠️ 定期はまとめて1行だが、支払日は1件ずつ違う。まとめた行の日付（いちばん早い支払日）で
-        //   判断すると、早い定期が過ぎただけで、まだ落ちていない月末の定期まで消えていた。
-        //   1件ずつの引き落とし日で、残高を書き直した日より後のものだけ足す。
-        final amount = subscriptionDrawsIn(payMonth).fold(0, (s, d) => s + d.amount);
-        if (amount > 0) out.add((label: e.label, amount: amount, colorValue: e.colorValue));
-        continue;
-      }
+      if (e.label == '定期支払い') continue; // 下で 1 件ずつ足す
       if (!afterEdit(e.label)) continue;
       out.add(e);
+    }
+    // ⚠️ 定期はまとめて1行だが、支払日は1件ずつ違う。まとめた行の日付（いちばん早い支払日）で
+    //   判断すると、早い定期が過ぎただけで、まだ落ちていない月末の定期まで消えていた。
+    //   1件ずつの引き落とし日で、残高を書き直した日より後のものだけ足す。
+    // ⚠️ 前月の支出に「定期支払い」が有るかでは決めない。口座振替の定期は利用した月に落ちるので、
+    //   開始月（その月が最初の利用）の引き落としが、前月に定期が無いせいで消えていた。
+    if (!_excludedFromDraw('定期支払い')) {
+      final subAmount = subscriptionDrawsIn(payMonth).fold(0, (s, d) => s + d.amount);
+      if (subAmount > 0) {
+        out.add((label: '定期支払い', amount: subAmount, colorValue: Colors.purple.toARGB32()));
+      }
     }
 
     out.sort((a, b) => b.amount.compareTo(a.amount));
@@ -4146,13 +4230,15 @@ class AppState extends ChangeNotifier {
   //   ・口座振替・手動払い … 定期の支払日（休みなら翌営業日）
   //   ・カード払い … そのカードの引き落とし日（カードの請求として落ちるため）
   //   どれを含めるかは subscriptionTotalOf と同じ（カード払いで銀行確定済みのカードは、
-  //   確定額に含まれるので除く）。残高を書き直した日より前に落ちたものも除く（二重計上ゲート）。
+  //   確定額に含まれるので除く。開始月より前の利用は載せない）。残高を書き直した日より前に落ちたものも除く（二重計上ゲート）。
   List<({String title, int amount, DateTime date})> subscriptionDrawsIn(DateTime payMonth) {
     final useMonth = DateTime(payMonth.year, payMonth.month - 1);
     final bank = _bankConfirmedTotalsOf(useMonth);
     final out = <({String title, int amount, DateTime date})>[];
     for (final s in subscriptions) {
       if (s.isCardPayment && _isConfirmedIn(s.method, bank)) continue;
+      // 💡 開始月＝最初の利用月。口座振替・手動払いは利用した月に、カード払いは翌月に口座から落ちる
+      if (!s.isUsedIn(s.isCardPayment ? useMonth : payMonth)) continue;
       final date = s.isCardPayment
           ? cardDrawDateOf(s.method, payMonth)
           : drawDateInMonth(s.payDay, payMonth);
@@ -4188,7 +4274,8 @@ class AppState extends ChangeNotifier {
     return total;
   }
 
-  // 財布の現金（機能ONのときだけ有効）
+  // 財布の現金（機能ONのときだけ表示する）。
+  // ⚠️ 口座の予想には入れない（財布のお金は口座の引き落としに使えないため）。表示だけに使う。
   int get effectiveWalletCash => showWalletCash ? walletCash : 0;
 
   // ════════════ 残高の予想（1 つの行の並びから全部を作る） ════════════
@@ -4199,8 +4286,10 @@ class AppState extends ChangeNotifier {
   //     足し引きを増やすときは _forecastLinesOf にだけ足す（lib/finance/forecast.dart）。
   //   計算中に保存・通知・状態の変更はしない（読み取りだけ）。
 
-  // 今月の起点＝デビット調整済みの残高＋財布の現金
-  int get forecastStart => effectiveBalance + effectiveWalletCash;
+  // 今月の起点＝デビット調整済みの口座残高。
+  // ⚠️ 財布の現金は足さない（口座の残高の予想なので。以前は財布を足していて、財布の表示を切り替えると
+  //   月末・最低残高・足りない日・不足の通知まで変わっていた）。
+  int get forecastStart => effectiveBalance;
 
   /// 今月から [count] か月ぶんの予想（[0] が今月）。
   /// 💡 行は「実際の日付の月」に入れる。引落日・給料日が休みで月をまたぐと
@@ -4589,6 +4678,39 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// カードのアイコン（自分の画像）。null なら既定のマーク。
+  String? cardIconOf(String cardName) => cardIcons[cardName];
+
+  /// 自分の画像を設定する（[pngBase64] が null なら既定のマークに戻す）。保存まで成功したら true。
+  /// ⚠️ 保存に失敗したら（容量不足など）、メモリを前のアイコンに戻して false を返す。
+  ///   保存は「全部そろったときだけ有効」なので、端末の家計データ・元のアイコンは壊れない。
+  Future<bool> setCardIcon(String cardName, String? pngBase64) async {
+    _ensureEditable();
+    final before = cardIcons[cardName];
+    if (pngBase64 == null || pngBase64.isEmpty) {
+      cardIcons.remove(cardName);
+    } else {
+      cardIcons[cardName] = pngBase64;
+    }
+    notifyListeners();
+    try {
+      await saveData();
+      return true;
+    } catch (_) {
+      if (before == null) {
+        cardIcons.remove(cardName);
+      } else {
+        cardIcons[cardName] = before;
+      }
+      notifyListeners();
+      // 💡 戻した状態で保存し直す（これも失敗したら storageIssue のまま。前の整った保存は残っている）
+      try {
+        await saveData();
+      } catch (_) {}
+      return false;
+    }
+  }
+
   void setCardClosingDay(String cardName, int day) {
     _ensureEditable();
     cardClosingDays[cardName] = day.clamp(1, 31);
@@ -4639,14 +4761,13 @@ class AppState extends ChangeNotifier {
   }
 
   // 💡 月末の予想の内訳（タップ詳細用）。forecastMonths と同じ行を group ごとにまとめる。
-  //   今月は起点を「現在の残高・財布・デビット」に分けて見せ、翌月以降は前月末から始める。
+  //   今月は起点を「現在の残高・デビット」に分けて見せ、翌月以降は前月末から始める（財布は口座の予想に入れない）。
   Map<String, int> _breakdownOf(int offset) {
     final months = forecastMonths(count: offset + 1);
     final f = months[offset];
     final out = <String, int>{};
     if (offset == 0) {
       out['現在の残高'] = currentBalance;
-      if (showWalletCash && walletCash != 0) out['財布の現金'] = walletCash;
       final debit = debitsAfterSnapshot();
       if (debit > 0) out['デビット利用（編集後・即時引落）'] = -debit;
     } else {
@@ -4685,6 +4806,7 @@ class AppState extends ChangeNotifier {
       'specialCalendarSigs': specialCalendarSigs,
       'cardPaymentDays': cardPaymentDays,
       'cardClosingDays': cardClosingDays,
+      'cardIcons': cardIcons,
       'events': events.map((k, v) => MapEntry(k, v.map((e) => e.toJson()).toList())),
       'todos': todos.map((k, v) => MapEntry(k, v.map((e) => e.toJson()).toList())),
       'payments': payments.map((e) => e.toJson()).toList(),
@@ -5220,6 +5342,10 @@ class AppState extends ChangeNotifier {
     (map['cardClosingDays'] as Map?)?.forEach((k, v) {
       if (v is int) cardClosingDays[k] = v;
     });
+    cardIcons.clear();
+    (map['cardIcons'] as Map?)?.forEach((k, v) {
+      if (v is String && v.isNotEmpty) cardIcons['$k'] = v;
+    });
 
     events.clear();
     (map['events'] as Map?)?.forEach((k, v) =>
@@ -5392,6 +5518,7 @@ class AppState extends ChangeNotifier {
         // ⚠️ カードの引落日・締め日も毎回書く（B1）。空でもキーを書く（無いと初回起動とみなされる）
         'saved_card_payment_days': jsonEncode(cardPaymentDays),
         'saved_card_closing_days': jsonEncode(cardClosingDays),
+        'saved_card_icons': jsonEncode(cardIcons),
       };
 
   // ⚠️ SharedPreferences の保存・削除は、失敗を例外ではなく false で返すことがある（API の約束）。
@@ -5902,6 +6029,12 @@ class AppState extends ChangeNotifier {
         if (v is String) paymentNotes[k] = v;
       });
     }
+    final iconStr = pv.getString('saved_card_icons');
+    if (iconStr != null) {
+      (jsonDecode(iconStr) as Map<String, dynamic>).forEach((k, v) {
+        if (v is String && v.isNotEmpty) cardIcons[k] = v;
+      });
+    }
     final ccdStr = pv.getString('saved_card_closing_days');
     if (ccdStr != null) {
       (jsonDecode(ccdStr) as Map<String, dynamic>).forEach((k, v) {
@@ -5943,6 +6076,7 @@ class AppState extends ChangeNotifier {
   bool repairData() {
     // 💡 「三井住友」は「三井OLIVE」に統合
     var changed = retireOldScheduleSuggestions() > 0;
+    if (_removeSampleSuggestions() > 0) changed = true; // 削除した「見本の提案」の残り
     for (final p in payments) {
       if (p.cardName == '三井住友') {
         p.cardName = '三井OLIVE';

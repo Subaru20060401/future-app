@@ -75,10 +75,12 @@ void main() {
     expect(app.thisMonthBalance, 99000);
   });
 
-  test('財布の現金は起点に足す。表示をOFFにすると足さない', () async {
+  // 💡 2026-11 仕様変更: 財布の現金は口座の予想に入れない（以前は起点に足していた）。
+  //   詳しい手計算は test/wallet_forecast_test.dart。
+  test('財布の現金は口座の予想に足さない。表示を切り替えても同じ', () async {
     final app = await build();
     app.walletCash = 3000;
-    expect(app.thisMonthBalance, 97000); // 94,000 + 3,000
+    expect(app.thisMonthBalance, 94000); // 財布の 3,000 は足さない
     app.showWalletCash = false;
     expect(app.thisMonthBalance, 94000);
   });

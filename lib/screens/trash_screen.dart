@@ -2,8 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 import '../app_state.dart';
-import '../card_styles.dart';
 import '../money_format.dart';
+import '../ui/card_icon.dart';
 
 // 削除した支払いのゴミ箱。復元・完全削除ができる（PCのゴミ箱と同じ）。
 class TrashScreen extends StatelessWidget {
@@ -53,10 +53,9 @@ class TrashScreen extends StatelessWidget {
                 Expanded(
                   child: ListView(
                     children: trash.map((p) {
-                      final style = cardStyleOf(p.cardName);
                       return Card(
                         child: ListTile(
-                          leading: Icon(style.icon, color: style.color),
+                          leading: CardIcon(p.cardName, size: 28),
                           title: Text(p.cardName),
                           subtitle: Text(p.note.isNotEmpty
                               ? '${DateFormat('yyyy/M/d').format(p.paymentDate)} ・ ${p.note}'
