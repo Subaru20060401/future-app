@@ -11,6 +11,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -19,6 +20,7 @@ import 'package:my_counter_app/drive_sync.dart';
 import 'package:my_counter_app/gmail_sync.dart';
 import 'package:my_counter_app/widgets/data_lock_overlay.dart';
 
+import 'calendar_alerts_test.dart' show FakeCalendar;
 import 'drive_push_pull_test.dart' show FakeDriveStore;
 import 'gmail_sync_safety_test.dart' show FakeGmail, mail;
 import 'save_paths_test.dart' show ProbeStore, install, restart, f, day;
@@ -198,6 +200,67 @@ void main() {
       expect(b.payments.map((p) => p.sourceId), ['m1']);
     });
 
+    // ⚠️ GPT 再レビュー（6880887）: 不足の見込みの「要らない日」を待つ前の中身で決めていたため、
+    //   取り込みのあと、取り込んだ中身では必要な通知（別の端末が置いたもの）を消していた。
+    test('不足の通知の片付けは、取り込んだ中身で決め直す（取り込み後に必要な通知を消さない）', () async {
+      // 別の端末: 三菱（12/10 引落）と B カード（12/20 → 12/21 引落）の 2 日とも足りない → 通知を 2 つ置いてドライブへ
+      final r = await fixedApp(day);
+      r.calendarSync = FakeCalendar();
+      r.calendarAutoSync = true;
+      r.currentBalance = 0;
+      r.cardPaymentDays.addAll({'三菱カード': 10, 'B': 20});
+      r.payments
+        ..add(usage('三菱カード', 60000, DateTime(2026, 11, 1)))
+        ..add(usage('B', 60000, DateTime(2026, 11, 2)));
+      await r.syncShortfallsToCalendar();
+      expect(r.specialCalendarIds, hasLength(2));
+      final remoteJson = r.exportJson();
+      final remoteIds = Map.of(r.specialCalendarIds);
+
+      // この端末: 三菱だけ → この中身では「12/21 の通知は要らない」。12/10 の予定を作っている途中で取り込みが始まる
+      final a = await fixedApp(day);
+      final cal = _GatedCalendar();
+      a.calendarSync = cal;
+      a.calendarAutoSync = true;
+      a.currentBalance = 0;
+      a.cardPaymentDays['三菱カード'] = 10;
+      a.payments.add(usage('三菱カード', 60000, DateTime(2026, 11, 1)));
+      final syncing = a.syncShortfallsToCalendar();
+      await cal.entered.future;
+      final importing = a.importJson(remoteJson);
+      cal.release.complete();
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+      await importing;
+      await syncing;
+      expect(a.specialCalendarIds, remoteIds, reason: '取り込んだ中身で必要な 2 つの通知は残る');
+      expect(cal.deleted, ['new-ev'], reason: '消すのは、こちらで作った重複の予定だけ');
+    });
+
+    test('取り込みで中身が変わったら、作った予定は取り込んだ中身に合わせる（同じキーの予定があれば二重にしない）', () async {
+      final a = await fixedApp(day);
+      final cal = _GatedCalendar();
+      a.calendarSync = cal;
+      a.calendarAutoSync = true;
+      a.currentBalance = 0;
+      a.cardPaymentDays['三菱カード'] = 10;
+      a.payments.add(usage('三菱カード', 60000, DateTime(day.year, day.month, 1)));
+      final syncing = a.syncShortfallsToCalendar();
+      await cal.entered.future; // 予定を作っている途中で
+      final key = 'shortfall_${a.shortfallDaysAhead().single.date.toIso8601String().substring(0, 10).replaceAll('-', '')}';
+      final data = jsonDecode(a.exportJson()) as Map<String, dynamic>;
+      data['specialCalendarIds'] = {key: 'remote-ev'};
+      data['specialCalendarSigs'] = {key: 'old'};
+      final lock = a.acquireDataLock('取り込みテスト');
+      await a.importJson(jsonEncode(data), lock: lock);
+      cal.release.complete();
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+      a.releaseDataLock(lock);
+      await syncing;
+      expect(cal.deleted, contains('new-ev'), reason: '取り込んだ中身に同じキーの予定があるので、作った方を消す');
+      expect(a.specialCalendarIds[key], 'remote-ev');
+      expect(cal.upserts.last, 'remote-ev', reason: 'やり直しで、取り込んだ予定を新しい内容に書き直す');
+    });
+
     test('確認と変更は同じ同期区間: 鍵が外れた直後に次の取り込みが始まったら、それも待つ', () async {
       final a = await fixedApp(day);
       final l1 = a.acquireDataLock('1 回目');
@@ -231,6 +294,62 @@ void main() {
           ),
         );
 
+    // ⚠️ GPT 再レビュー（6880887）: 覆いはタップだけを止め、キーボードのフォーカスは背後に残っていた
+    testWidgets('取り込み中は、背後のボタンにフォーカスがあっても Enter・Space で押せない', (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      late AppState app;
+      await tester.runAsync(() async {
+        app = AppState(clock: () => day);
+        await app.ready;
+      });
+      var taps = 0;
+      final focus = FocusNode();
+      addTearDown(focus.dispose);
+      final input = TextEditingController(text: '入力中');
+      addTearDown(input.dispose);
+      await tester.pumpWidget(ChangeNotifierProvider.value(
+        value: app,
+        child: MaterialApp(
+          builder: (context, child) => DataLockOverlay(child: child!),
+          home: Scaffold(
+            body: Column(children: [
+              TextField(controller: input),
+              ElevatedButton(focusNode: focus, onPressed: () => taps++, child: const Text('押す')),
+            ]),
+          ),
+        ),
+      ));
+      focus.requestFocus();
+      await tester.pump();
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.pump();
+      expect(taps, 1, reason: '取り込み中でなければ Enter で押せる（前提の確認）');
+
+      final gate = Completer<void>();
+      final running = app.runWithDataLock('ドライブから取り込んでいます', (_) => gate.future);
+      await tester.pump();
+      expect(focus.hasFocus, isFalse);
+      for (final key in [LogicalKeyboardKey.enter, LogicalKeyboardKey.space, LogicalKeyboardKey.numpadEnter]) {
+        await tester.sendKeyEvent(key);
+        await tester.pump();
+      }
+      focus.requestFocus(); // フォーカスを戻そうとしても入らない
+      await tester.pump();
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.pump();
+      expect(taps, 1, reason: '取り込み中は押せない');
+
+      gate.complete();
+      await running;
+      await tester.pump();
+      expect(input.text, '入力中', reason: '覆いを外しても下の画面は作り直されない');
+      focus.requestFocus();
+      await tester.pump();
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.pump();
+      expect(taps, 2, reason: '終われば、また押せる');
+    });
+
     testWidgets('取り込み中は覆って操作できず、成功・失敗のどちらでも元に戻る', (tester) async {
       SharedPreferences.setMockInitialValues({});
       late AppState app;
@@ -263,4 +382,39 @@ void main() {
       }
     });
   });
+}
+
+/// 予定を作る途中で止められるカレンダー（作った予定の ID は new-ev）
+class _GatedCalendar implements CalendarSyncHook {
+  final entered = Completer<void>();
+  final release = Completer<void>();
+  final upserts = <String>[];
+  final deleted = <String>[];
+  @override
+  Future<String?> upsertSpecialEvent({
+    required String existingCalId,
+    required String title,
+    required DateTime date,
+    required String description,
+    bool remind = false,
+    List<int>? reminderMinutes,
+  }) async {
+    upserts.add(existingCalId);
+    if (!entered.isCompleted) {
+      entered.complete();
+      await release.future;
+    }
+    return existingCalId.isNotEmpty ? existingCalId : 'new-ev';
+  }
+
+  @override
+  void deleteEvent(String calendarEventId) => deleted.add(calendarEventId);
+  @override
+  Future<bool> enableAndSyncAll() async => true;
+  @override
+  void upsertShift(DateTime date, ShiftData shift) {}
+  @override
+  Future<void> syncShiftNow(DateTime date, ShiftData shift) async {}
+  @override
+  void upsertEvent(EventData event) {}
 }

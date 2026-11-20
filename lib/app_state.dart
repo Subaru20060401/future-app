@@ -542,6 +542,7 @@ class AppState extends ChangeNotifier {
 
   Future<void> _syncPaydaysOnce(DateTime now) async {
     final today = DateTime(now.year, now.month, now.day);
+    final gen = _dataGeneration; // 💡 この回が見ている中身（取り込みで置き換わったら、やり直す）
     // 先月〜3か月先の労働月ぶん（給料日はそれぞれの入金月に来る）
     for (var dm = -1; dm <= 3; dm++) {
       final m = DateTime(now.year, now.month + dm);
@@ -563,16 +564,37 @@ class AppState extends ChangeNotifier {
           remind: true, // 給料日の当日に通知する
         );
         // 💡 作った予定の ID は、取り込み中なら終わるまで待ってから記録する（捨てると次に重複して作る）
-        if (calId != null) await _recordSpecialEvent(key, calId, sig);
+        if (calId != null && !await _recordSpecialEvent(key, calId, sig, gen)) {
+          _paydaySyncAgain = true; // 取り込みで中身が変わった → 新しい中身でやり直す
+          return;
+        }
       }
     }
+    if (gen != _dataGeneration) _paydaySyncAgain = true;
   }
 
   // 自動の処理（カレンダーへの書き出し）の記録。取り込み中は終わるまで待つ（runWhenEditable）。
-  Future<void> _recordSpecialEvent(String key, String calId, String sig) => runWhenEditable(() {
+  // 戻り値: この回の中身のまま記録できたら true。取り込みで中身が変わっていたら false（呼び出し側はやり直す）。
+  // ⚠️ 中身が変わっていたら、作った予定の扱いは取り込んだ中身で決める:
+  //   ・取り込んだ中身に同じキーの別の予定がある → こちらで作った予定を消す（二重にしない）
+  //   ・無い → 記録する（捨てると予定だけが残る。要らなければ、やり直しの片付けで消える）
+  Future<bool> _recordSpecialEvent(String key, String calId, String sig, int gen) =>
+      runWhenEditable(() {
+        if (gen != _dataGeneration) {
+          final existing = specialCalendarIds[key] ?? '';
+          if (existing.isNotEmpty && existing != calId) {
+            calendarSync?.deleteEvent(calId);
+          } else if (existing.isEmpty) {
+            specialCalendarIds[key] = calId;
+            specialCalendarSigs.remove(key); // 内容は新しい中身で決め直す（やり直しで書き直される）
+            saveData();
+          }
+          return false;
+        }
         specialCalendarIds[key] = calId;
         specialCalendarSigs[key] = sig;
         saveData();
+        return true;
       });
 
   // 💡 勤務先を消したら、まだ来ていない給料日のイベントも消す（通知が残らないように）
@@ -653,6 +675,7 @@ class AppState extends ChangeNotifier {
 
   Future<void> _syncShortfallsOnce(DateTime now) async {
     final today = DateTime(now.year, now.month, now.day);
+    final gen = _dataGeneration; // 💡 この回が見ている中身（取り込みで置き換わったら、やり直す）
     final wanted = <String>{};
     if (shortfallAlerts) {
       for (final day in shortfallDaysAhead()) {
@@ -672,12 +695,20 @@ class AppState extends ChangeNotifier {
           description: desc,
           reminderMinutes: kShortfallReminderMinutes,
         );
-        if (calId != null) await _recordSpecialEvent(key, calId, sig);
+        if (calId != null && !await _recordSpecialEvent(key, calId, sig, gen)) {
+          _shortfallSyncAgain = true; // 取り込みで中身が変わった → 新しい中身でやり直す
+          return;
+        }
       }
     }
-    // 見込みが無くなった日を片付ける（取り込み中なら終わってから。取り込んだ中身で判断し直さず、
-    //   この回で求めた「要らない日」だけを外す）
+    // 見込みが無くなった日を片付ける（取り込み中なら終わってから）
+    // ⚠️ 「要らない日」はこの回の中身で求めたもの。待っている間に取り込みで中身が変わったら、
+    //   取り込んだ中身では必要な通知を消してしまうので片付けず、新しい中身でやり直す（GPT 再レビュー 6880887）。
     await runWhenEditable(() {
+      if (gen != _dataGeneration) {
+        _shortfallSyncAgain = true;
+        return;
+      }
       var changed = false;
       for (final key in specialCalendarIds.keys
           .where((k) => k.startsWith(_shortfallPrefix) && !wanted.contains(k))
@@ -5025,6 +5056,8 @@ class AppState extends ChangeNotifier {
   //   ・二重の取り込み: 後から来た方を断る
   //   ⚠️ 変更を受け付けてから巻き戻すと、入力した内容が黙って消える（GPT 再レビューの残件）。
   DataLock? _dataLock;
+  // 💡 取り込みの始まりと終わりで増える。自動の処理は、始めたときの値と比べて「中身が置き換わったか」を知る
+  int _dataGeneration = 0;
   String? _lockSnapshot; // 鍵を持っている間の正しい中身（安全網の巻き戻し用）
   bool _importSucceededUnderLock = false;
   Completer<void>? _unlocked;
@@ -5040,6 +5073,7 @@ class AppState extends ChangeNotifier {
     final held = _dataLock;
     if (held != null) throw DataLockedException(held.label);
     final lock = _dataLock = DataLock._(label);
+    _dataGeneration++;
     _lockSnapshot = exportJson();
     _importSucceededUnderLock = false;
     _unlocked = Completer<void>();
@@ -5051,6 +5085,7 @@ class AppState extends ChangeNotifier {
   void releaseDataLock(DataLock lock) {
     if (!identical(lock, _dataLock)) return;
     _dataLock = null;
+    _dataGeneration++; // 失敗で巻き戻した場合も、中身の物は作り直されている
     _lockSnapshot = null;
     final waiting = _unlocked;
     _unlocked = null;

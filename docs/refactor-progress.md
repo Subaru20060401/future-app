@@ -52,9 +52,14 @@ GPT の完了報告レビューの 4 点を再現し（`0e6398b`）、ユーザ�
 取り込み中は家計データの変更を止める（画面の覆い・AppState で断る・自動の処理は保留・二重の取り込みを断る・
 先に走っていた保存を待つ）。詳細は `docs/review-handoff.md` §1.6、テストは `test/import_lock_test.dart`。
 
+## GPT 再レビュー（6880887）の 2 件への対応（2026-11-20）
+
+取り込み後の不足の通知を待つ前の判定で消さない（`_dataGeneration` で中身の置き換わりを知り、やり直す）、
+取り込み中は背後の画面からフォーカスを外す（`ExcludeFocus`）。詳細は `docs/review-handoff.md` §1.7。
+
 ## 変更後の検証（最終）
 
-- `flutter test`: 727 成功・2 スキップ（スキップは開始時と同じ）
+- `flutter test`: 730 成功・2 スキップ（スキップは開始時と同じ）
 - `flutter analyze lib/`: 50 件（すべて非推奨予告の info）
 - `flutter build web --release --base-href /future-app/`: 成功
 - ブラウザ（Chromium）: 全タブ・根拠シート・残高の書き直し・引き落としの反映シート・推移・カレンダーの印。コンソールエラー 0 件

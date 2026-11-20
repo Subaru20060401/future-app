@@ -94,7 +94,9 @@ iOS のビルドは macOS + Xcode でしかできない。Windows では Web と
 - 保存が整っていない間（`uploadsBlocked`）は、ドライブへの保存・自動バックアップをしない。取り込みと診断は使える
 - **取り込み中（`dataLocked`）は家計データの変更を受け付けない**（受け付けてから失敗の巻き戻しで消すと、入力が黙って消える）。
   保存する公開メソッドは先頭で `_ensureEditable()`（付け忘れると `architecture_test` が落ちる）。自動の処理は `runWhenEditable` で
-  終わるまで待つ。画面は `DataLockOverlay` が覆う。ドライブの取り込みは取得の前から鍵を持つ（`runWithDataLock`）
+  終わるまで待つ。待つ前に求めた判定は、取り込みで中身が変わったら使わない（`_dataGeneration` を比べてやり直す）。
+  画面は `DataLockOverlay` が覆い、背後からフォーカスも外す（タップだけ止めると Enter で押せる）。
+  ドライブの取り込みは取得の前から鍵を持つ（`runWithDataLock`）
 - **家計データのキーを書く入口は `saveData` だけ**（カード設定も含む）。SharedPreferences に直接書くと保存の列を飛ばして、
   古い値で上書きされる。保存・削除の戻り値 false も失敗として扱う（`_checked`）
 - 変更時刻・同期の基準時刻は `issueStamp()`（必ず増える）。Drive の取り込みは、取り込みを始める前の時刻までを同期済みにする

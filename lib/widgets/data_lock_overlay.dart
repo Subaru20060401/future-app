@@ -20,7 +20,11 @@ class DataLockOverlay extends StatelessWidget {
       child: child,
       builder: (context, label, inner) => Stack(
         children: [
-          inner!,
+          // ⚠️ 覆い（ModalBarrier）が止めるのはタップだけ。キーボードのフォーカスは下に残るので、
+          //   Enter・Space で背後のボタンが押せてしまう（GPT 再レビュー 6880887）。
+          //   取り込み中は下の画面からフォーカスを外し、キー操作も届かないようにする。
+          //   ⚠️ ExcludeFocus は鍵の有無にかかわらず常に置く（入れ替えると下の画面が作り直され、入力中の内容が消える）
+          ExcludeFocus(excluding: label != null, child: inner!),
           if (label != null) Positioned.fill(child: _LockedCover(label: label)),
         ],
       ),
