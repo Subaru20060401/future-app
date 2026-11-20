@@ -86,10 +86,14 @@ void main() {
       expect(a.pendingDraws.map((e) => e.id), ['card:B:2026-11']);
     });
 
-    test('以前のID（引落日の月）で処理済みの、ずれた引落は出さない（以前の記録との互換）', () async {
+    test('以前のID（引落日の月）の処理済み記録で、別の請求を隠さない', () async {
+      // 💡 以前の版は、ずれた10月請求（11/2）を「card:B:2026-11」で記録していた。
+      //   この文字列は今の11月請求（11/30）の ID と同じなので、11月請求は処理済みに見える（区別できない）。
+      //   ただし、ずれた10月請求まで隠すと正当な請求が消えるので、10月請求は出す。
+      //   二重に引かないよう、確認画面では「入力した残高に含まれている可能性」を出し、基本は「残高はそのまま」。
       final a = await app();
-      a.handledDrawIds.add('card:B:2026-11'); // 以前の版で 11/2 の引落を処理した記録
-      expect(a.pendingDraws.map((e) => e.id), isNot(contains('card:B:2026-10')));
+      a.handledDrawIds.add('card:B:2026-11');
+      expect(a.pendingDraws.map((e) => e.id), contains('card:B:2026-10'));
     });
   });
 }

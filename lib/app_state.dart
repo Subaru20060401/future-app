@@ -190,6 +190,13 @@ String dateKey(DateTime d) => DateFormat('yyyy-MM-dd').format(d);
 // 💡 ホームの「確認待ち」に並べる1件。
 //   保存はしない。開くたびに未処理の入出金などから組み立てる
 //   （金額や状態を二重に持つと、元のデータと食い違うため）。
+// 確認待ちの引き落としが、入力した残高に含まれているか（推定）
+enum DrawReflection {
+  maybeIncluded, // 含まれている可能性がある（引落日が残高を入力した日より前）
+  likelyNotIncluded, // まだ含まれていない見込み（引落日が残高を入力した日より後）
+  unknown, // 判断できない（同じ日・残高を入力した記録が無い）
+}
+
 enum HomeNoticeKind {
   draw, // 引き落としの反映待ち
   deposit, // 入金の反映待ち（メールに金額が無いので入力が要る）
@@ -343,6 +350,12 @@ class AppState extends ChangeNotifier {
   // #6 残高を最後に編集した日時。これより後のイベント（デビット/引き落とし/給料）だけ
   //    予測に反映する（編集時点の残高には過去分が既に含まれているため二重計上を防ぐ）。
   DateTime? balanceUpdatedAt;
+  // 💡 利用者が通帳・アプリの残高を見て「残高そのもの」を入力した時刻。
+  //   balanceUpdatedAt（予想のゲート）は入金・引き落としの反映でも進むので、
+  //   「この引き落としは入力した残高に含まれているか」の判断には使えない
+  //   （1件引いただけで、他の引き落としまで含まれているように見えてしまう）。
+  //   旧データには無い（null＝判断できない）。
+  DateTime? balanceEnteredAt;
 
   // カードごとの分割金利（年率%）
   final Map<String, double> cardInterestRates = {};
@@ -1579,6 +1592,7 @@ class AppState extends ChangeNotifier {
     _markDebitsAccounted();
     currentBalance = balance;
     balanceUpdatedAt = clockNow(); // #6 編集日時を記録
+    balanceEnteredAt = balanceUpdatedAt;
     saveData();
     notifyListeners();
   }
@@ -2070,10 +2084,12 @@ class AppState extends ChangeNotifier {
         if (amount <= 0) continue;
         // ⚠️ ID は「請求の月」。休みで翌月にずれた引落（10/31→11/2 など）も、翌月分と別の ID になる。
         //   ずれていない引落は以前と同じ ID（引落日の月＝請求の月）なので、処理済みの記録はそのまま効く。
-        //   ずれた引落は、以前の ID（引落日の月）で処理済みなら出さない（以前の記録との互換）。
+        //   ⚠️ 以前の版で「ずれた引落」を処理した記録（引落日の月の ID）は、翌月の別の請求と同じ文字列なので
+        //     ここでは使わない（使うと翌月の正当な請求まで処理済みに見える）。そのため、ずれた引落が
+        //     一度だけ再び出ることがあるが、「入力した残高に含まれている可能性」が表示され、
+        //     基本の操作は「残高はそのまま確認」なので二重には引かれにくい。
         final id = 'card:$card:${DateFormat('yyyy-MM').format(m)}';
         if (handledDrawIds.contains(id)) continue;
-        if (date.month != m.month && handledDrawIds.contains('card:$card:$ym')) continue;
         out.add((id: id, label: '$card（予定）', amount: amount, date: date));
       }
     }
@@ -2114,8 +2130,12 @@ class AppState extends ChangeNotifier {
     for (final d in pendingDraws) {
       out.add(HomeNotice(
         kind: HomeNoticeKind.draw,
-        title: '引き落としの反映待ち：${d.label}',
-        detail: '${d.date.month}/${d.date.day} に口座から引かれています',
+        title: '引き落としの確認：${d.label}',
+        detail: '${d.date.month}/${d.date.day} の引き落とし・${switch (drawReflectionOf(d.date)) {
+          DrawReflection.maybeIncluded => '入力した残高に含まれている可能性があります',
+          DrawReflection.likelyNotIncluded => 'まだ残高に入っていない見込みです',
+          DrawReflection.unknown => '残高に入っているか確かめてください',
+        }}',
         date: d.date,
         amount: d.amount,
         draw: d,
@@ -2571,7 +2591,11 @@ class AppState extends ChangeNotifier {
   }
 
   // 💡 引き落としを口座残高から引く（残高の編集日時も更新するので二重計上しない）
-  void applyDraw(String id, int amount, {String? label}) {
+  // 💡 確認待ちの引き落としを残高から引く。戻り値: 実際に引いたら true。
+  // ⚠️ 同じ引き落とし（同じ ID）は一度だけ。処理済みなら何もしない（連打・古い画面からの再操作・
+  //   再起動後の再操作で二重に引かない）。判定は画面ではなくここで行う。
+  bool applyDraw(String id, int amount, {String? label}) {
+    if (handledDrawIds.contains(id)) return false;
     if (amount != 0) {
       _foldDebitsIntoBalance();
       currentBalance -= amount;
@@ -2586,13 +2610,45 @@ class AppState extends ChangeNotifier {
     handledDrawIds.add(id);
     saveData();
     notifyListeners();
+    return true;
   }
 
-  // 引き落としをスキップ（残高は変えない。同じものは二度と出さない）
-  void skipDraw(String id) {
-    handledDrawIds.add(id);
+  // 引き落としを「確認した」にする（残高は変えない。同じものは二度と出さない）。
+  // 💡 入力した残高に含まれている可能性があるときの基本の操作。戻り値: 状態を変えたら true。
+  bool skipDraw(String id) {
+    if (!handledDrawIds.add(id)) return false;
     saveData();
     notifyListeners();
+    return true;
+  }
+
+  // 💡 確認待ちの引き落としが、利用者が入力した残高に含まれているか（推定）。
+  //   ⚠️ 前後関係だけで「反映済み」とは断定しない。表示も「可能性」「見込み」と言う。
+  //   ・引落日が、残高を入力した日より前 → 含まれている可能性がある（基本は「残高はそのまま確認」）
+  //   ・引落日が、残高を入力した日より後 → まだ含まれていない見込み
+  //   ・同じ日・残高を入力した記録が無い → 判断できない（利用者に聞く）
+  DrawReflection drawReflectionOf(DateTime drawDate) {
+    final at = balanceEnteredAt;
+    if (at == null) return DrawReflection.unknown;
+    final d = DateTime(drawDate.year, drawDate.month, drawDate.day);
+    final b = DateTime(at.year, at.month, at.day);
+    if (d.isBefore(b)) return DrawReflection.maybeIncluded;
+    if (d.isAfter(b)) return DrawReflection.likelyNotIncluded;
+    return DrawReflection.unknown;
+  }
+
+  // 💡 未反映の見込みの引き落としだけをまとめて引く（含まれている可能性があるもの・判断できないものは引かない）。
+  //   戻り値: 引いた件数と金額。
+  ({int count, int amount}) applyLikelyNotIncludedDraws() {
+    var count = 0, amount = 0;
+    for (final d in List.of(pendingDraws)) {
+      if (drawReflectionOf(d.date) != DrawReflection.likelyNotIncluded) continue;
+      if (applyDraw(d.id, d.amount, label: d.label)) {
+        count++;
+        amount += d.amount;
+      }
+    }
+    return (count: count, amount: amount);
   }
 
   // 未反映の引き落としをまとめてスキップ（過去分の一括整理用）
@@ -4316,6 +4372,7 @@ class AppState extends ChangeNotifier {
       'actualSalaries': actualSalaries,
       'actualSalariesByWp': actualSalariesByWp,
       'balanceUpdatedAt': balanceUpdatedAt?.toIso8601String(),
+      'balanceEnteredAt': balanceEnteredAt?.toIso8601String(),
       'paymentNotes': paymentNotes,
       'amazonCardOverrides': amazonCardOverrides,
       'cardAliases': cardAliases,
@@ -4675,6 +4732,9 @@ class AppState extends ChangeNotifier {
     });
     final buaStr = map['balanceUpdatedAt'] as String?;
     balanceUpdatedAt = (buaStr != null && buaStr.isNotEmpty) ? DateTime.tryParse(buaStr) : null;
+    // 💡 旧版の書き出しには無い → null（含まれているか判断できない＝利用者に聞く）
+    final beaStr = map['balanceEnteredAt'] as String?;
+    balanceEnteredAt = (beaStr != null && beaStr.isNotEmpty) ? DateTime.tryParse(beaStr) : null;
     paymentNotes.clear();
     (map['paymentNotes'] as Map?)?.forEach((k, v) {
       if (v is String) paymentNotes['$k'] = v;
@@ -4815,6 +4875,7 @@ class AppState extends ChangeNotifier {
     await prefs.setString('saved_actual_salaries', jsonEncode(actualSalaries));
     await prefs.setString('saved_actual_salaries_by_wp', jsonEncode(actualSalariesByWp));
     await prefs.setString('saved_balance_updated_at', balanceUpdatedAt?.toIso8601String() ?? '');
+    await prefs.setString('saved_balance_entered_at', balanceEnteredAt?.toIso8601String() ?? '');
     await prefs.setInt('saved_goal_amount', goalAmount);
     await prefs.setString('saved_goal_date', goalDate?.toIso8601String() ?? '');
     await prefs.setString('saved_budgets', jsonEncode(budgets));
@@ -4921,6 +4982,8 @@ class AppState extends ChangeNotifier {
     }
     final buaStr = prefs.getString('saved_balance_updated_at');
     balanceUpdatedAt = (buaStr != null && buaStr.isNotEmpty) ? DateTime.tryParse(buaStr) : null;
+    final beaStr = prefs.getString('saved_balance_entered_at');
+    balanceEnteredAt = (beaStr != null && beaStr.isNotEmpty) ? DateTime.tryParse(beaStr) : null;
     goalAmount = prefs.getInt('saved_goal_amount') ?? 0;
     final goalStr = prefs.getString('saved_goal_date');
     goalDate = (goalStr != null && goalStr.isNotEmpty) ? DateTime.tryParse(goalStr) : null;
