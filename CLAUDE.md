@@ -39,6 +39,8 @@ iOS のビルドは macOS + Xcode でしかできない。Windows では Web と
     （`test/architecture_test.dart` で固定）
 - 「今日」は `AppState.clockNow()`。計算・判定で `DateTime.now()` を直接読まない（テストで時刻を固定するため）
 - 見た目の決まりと共通部品は `lib/ui/`（`tokens.dart`・`components.dart`）。色だけで区別しない
+  （金額は +/− と言葉、状態は「確定」「見込み」「要確認」の文字、カレンダーの印は形も変える）。
+  金額の表記は `money_format.dart` の `yen()` 1 か所（¥85,000 ／ −¥5,000 ／ +¥5,000）
 - Google 連携（Gmail・Drive・Calendar）は `lib/gmail_service.dart` に集約。同じトークンを使う
 - カレンダーは Google カレンダーの専用カレンダー「ポケットメイド」へ一方向で書き出す
   （`lib/google_calendar_sync.dart`）。iOS/Mac の純正カレンダーには端末側で Google アカウントを
@@ -58,6 +60,13 @@ iOS のビルドは macOS + Xcode でしかできない。Windows では Web と
 - 銀行の休業日は土日祝＋年末年始（12/31〜1/3）。年末年始は `isBankHoliday` だけで、祝日（`isJapaneseHoliday`）には入れない
 - 確認待ちの引き落とし（`pendingDraws`）は予想と同じ日付・金額の規則（`cardBillAmountOf`）。
   ただし予想のゲートでは消さない（処理したときだけ消える）
+- **確認待ちは二重に引かない**: `applyDraw`・`skipDraw` は処理済みなら何もしない（判定は AppState）。
+  「入力した残高に含まれているか」は `drawReflectionOf` の推定で、断定しない（同じ日は判断できない）。
+  判断には `balanceEnteredAt`（残高そのものを入力した時刻）を使い、入金・引落の反映で進む `balanceUpdatedAt` は使わない
+- **請求の月と実際の引落日は別**: 銀行確定・請求予定が何月の請求かは `billMonthOf` 1 か所で決める（金額では決めない）。
+  設定の引落日から一意に決まらなければ「判定できない」として確認待ちで選んでもらい、それまで予想に「要確認」を付ける。
+  `PaymentSource.bank` を月で絞るときは、日付の月ではなく必ずこれを使う
+- カレンダーの引き落としも予想と同じ額・日付（`cardPaymentSummaryOnDay`）。ただし予想のゲートは使わない
 - 引き落としは「**n 月の引き落とし＝n-1 月の利用ぶん**」。
   ただし頭金・予定支出など **一度きりの出費は月ズレさせず、日付どおりの月に引く**（`oneTimeExpensesIn`）
 - 締め日が月末以外のカードは `cardClosingPeriodOf` で締め期間ごとに集計する
@@ -79,6 +88,10 @@ iOS のビルドは macOS + Xcode でしかできない。Windows では Web と
   自己修復は `repairData()` の 1 か所（読込と `importJson` の両方が通る）。何度走らせても同じ結果にし、
   失った情報（予定の ID など）を推測で作らない
 - 保存（`saveData`）はカードの引落日・締め日も毎回書く。`importJson` は保存の完了を待つ（`Future`）
+- **保存は全部そろったときだけ有効**: 一時保存（`saved_pending_write`）→ 全キー → 一時保存を消す。取り込みは先に
+  復旧点（`saved_restore_point`）を書く。どちらも書けなければ既存のキーを上書きしない。起動時に残っていれば整った状態へ戻す。
+  保存キーを足すときは `_persistedValues` に足す（読込・書き出し・取り込みも忘れずに。往復テストが落ちる）
+- 保存が整っていない間（`uploadsBlocked`）は、ドライブへの保存・自動バックアップをしない。取り込みと診断は使える
 - ドライブ同期は「新しい方で黙って上書き」しない。両方変わっていたら選ばせる（`decideSyncState`）。
   マージもしない
 
@@ -119,7 +132,7 @@ iOS のビルドは macOS + Xcode でしかできない。Windows では Web と
 
 `docs/handoff.md` にまとめてある。作業を始める前に読むこと。
 2026-11 の再構築（調査・設計・進捗・レビュー用の案内）は `docs/survey.md`・`docs/architecture-plan.md`・
-`docs/refactor-progress.md`・`docs/review-handoff.md`。
+`docs/refactor-progress.md`・`docs/review-handoff.md`・`docs/prepublish-review-plan.md`。
 
 ## Web 固有
 

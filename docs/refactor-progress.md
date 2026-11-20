@@ -30,17 +30,29 @@
 | 6 UI | 済み `89d8aa3` | `lib/ui/`・`lib/widgets/home_sections.dart`・`test/home_screen_test.dart` |
 | 7 検証・引き継ぎ文書 | 済み | `docs/review-handoff.md`、CLAUDE.md 更新 |
 
+## 公開前の確認（2026-11-20）
+
+GPT の完了報告レビューの 4 点を再現し（`0e6398b`）、ユーザーの条件を反映して実装した。詳細は `docs/prepublish-review-plan.md`。
+
+| 項目 | コミット |
+|---|---|
+| 1 確認待ちからの二重引き落とし | `692794a`（保存の失敗との組み合わせは `0fa2482`） |
+| 2 請求の月と実際の引落日 | `441c102` |
+| 4 カレンダーの引き落とし額 | `a6b94cd` |
+| 3 保存の途中失敗からの回復 | `0fa2482` |
+| 5 残りの UI（表記・色だけに頼らない・見た目） | `69843d9` |
+
 ## 変更後の検証（最終）
 
-- `flutter test`: 656 成功・2 スキップ（スキップは変更前と同じ）
-- `flutter analyze lib/`: 49 件（すべて非推奨予告の info。新しく作った 3 ファイルの import の分が増えた）
+- `flutter test`: 701 成功・2 スキップ（スキップは開始時と同じ）
+- `flutter analyze lib/`: 49 件（すべて非推奨予告の info）
 - `flutter build web --release --base-href /future-app/`: 成功
-- ブラウザ（Chromium）: 全タブ・ホームの根拠シート・残高の書き直し・引き落としの反映シートを確認。コンソールエラー 0 件
+- ブラウザ（Chromium）: 全タブ・根拠シート・残高の書き直し・引き落としの反映シート・推移・カレンダーの印。コンソールエラー 0 件
 
 ## 次の作業
 
-1. GPT の実装レビュー（`docs/review-handoff.md` を案内として使う）を受け、指摘をコードと照合する
-2. 実環境の確認（Google ドライブの実際の読み書き、iOS/Android、実データでの見え方）
+1. GPT の実装レビュー（`docs/review-handoff.md` を案内として使う。レビュー用のバンドルを作ってある）
+2. 実環境の確認（Google ドライブの実際の読み書き、iOS/Android、実データでの見え方・保存の速さ）
 3. 残っている課題は `docs/review-handoff.md` §9
 
 ## UI 確認の手順（再現用）
