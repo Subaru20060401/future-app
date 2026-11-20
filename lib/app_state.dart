@@ -388,6 +388,9 @@ class AppState extends ChangeNotifier {
   //   締め日を月末以外にすると、その月の引き落としは
   //   「前々月の締め日の翌日 〜 前月の締め日」の利用ぶんになる。
   Map<String, int> cardClosingDays = {};
+  // 💡 カードごとの自分の画像（アイコン用に縮小した PNG を base64 で）。無いカードは既定のマーク。
+  //   キーはカード名（名前を変える・まとめると付け替わる）。書き出し・ドライブ同期にも入る。
+  Map<String, String> cardIcons = {};
 
   final Map<String, List<TodoData>> todos = {};
   List<Payment> payments = [];
@@ -1344,6 +1347,10 @@ class AppState extends ChangeNotifier {
     //   削除した明細が復活し、分割へ移した明細がカードに戻る。
     _renameInDupKeys(deletedDupKeys, from, target);
     _renameInDupKeys(convertedPaymentKeys, from, target);
+
+    // 自分の画像: まとめ先に画像が無ければ持って行く（まとめ先の画像があればそれを使う）
+    final icon = cardIcons.remove(from);
+    if (icon != null) cardIcons.putIfAbsent(target, () => icon);
 
     // 設定側にも残っていたら消す（まとめ先へ寄せる）
     cardPaymentDays.remove(from);
@@ -4671,6 +4678,39 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// カードのアイコン（自分の画像）。null なら既定のマーク。
+  String? cardIconOf(String cardName) => cardIcons[cardName];
+
+  /// 自分の画像を設定する（[pngBase64] が null なら既定のマークに戻す）。保存まで成功したら true。
+  /// ⚠️ 保存に失敗したら（容量不足など）、メモリを前のアイコンに戻して false を返す。
+  ///   保存は「全部そろったときだけ有効」なので、端末の家計データ・元のアイコンは壊れない。
+  Future<bool> setCardIcon(String cardName, String? pngBase64) async {
+    _ensureEditable();
+    final before = cardIcons[cardName];
+    if (pngBase64 == null || pngBase64.isEmpty) {
+      cardIcons.remove(cardName);
+    } else {
+      cardIcons[cardName] = pngBase64;
+    }
+    notifyListeners();
+    try {
+      await saveData();
+      return true;
+    } catch (_) {
+      if (before == null) {
+        cardIcons.remove(cardName);
+      } else {
+        cardIcons[cardName] = before;
+      }
+      notifyListeners();
+      // 💡 戻した状態で保存し直す（これも失敗したら storageIssue のまま。前の整った保存は残っている）
+      try {
+        await saveData();
+      } catch (_) {}
+      return false;
+    }
+  }
+
   void setCardClosingDay(String cardName, int day) {
     _ensureEditable();
     cardClosingDays[cardName] = day.clamp(1, 31);
@@ -4766,6 +4806,7 @@ class AppState extends ChangeNotifier {
       'specialCalendarSigs': specialCalendarSigs,
       'cardPaymentDays': cardPaymentDays,
       'cardClosingDays': cardClosingDays,
+      'cardIcons': cardIcons,
       'events': events.map((k, v) => MapEntry(k, v.map((e) => e.toJson()).toList())),
       'todos': todos.map((k, v) => MapEntry(k, v.map((e) => e.toJson()).toList())),
       'payments': payments.map((e) => e.toJson()).toList(),
@@ -5301,6 +5342,10 @@ class AppState extends ChangeNotifier {
     (map['cardClosingDays'] as Map?)?.forEach((k, v) {
       if (v is int) cardClosingDays[k] = v;
     });
+    cardIcons.clear();
+    (map['cardIcons'] as Map?)?.forEach((k, v) {
+      if (v is String && v.isNotEmpty) cardIcons['$k'] = v;
+    });
 
     events.clear();
     (map['events'] as Map?)?.forEach((k, v) =>
@@ -5473,6 +5518,7 @@ class AppState extends ChangeNotifier {
         // ⚠️ カードの引落日・締め日も毎回書く（B1）。空でもキーを書く（無いと初回起動とみなされる）
         'saved_card_payment_days': jsonEncode(cardPaymentDays),
         'saved_card_closing_days': jsonEncode(cardClosingDays),
+        'saved_card_icons': jsonEncode(cardIcons),
       };
 
   // ⚠️ SharedPreferences の保存・削除は、失敗を例外ではなく false で返すことがある（API の約束）。
@@ -5981,6 +6027,12 @@ class AppState extends ChangeNotifier {
     if (pnStr != null) {
       (jsonDecode(pnStr) as Map<String, dynamic>).forEach((k, v) {
         if (v is String) paymentNotes[k] = v;
+      });
+    }
+    final iconStr = pv.getString('saved_card_icons');
+    if (iconStr != null) {
+      (jsonDecode(iconStr) as Map<String, dynamic>).forEach((k, v) {
+        if (v is String && v.isNotEmpty) cardIcons[k] = v;
       });
     }
     final ccdStr = pv.getString('saved_card_closing_days');

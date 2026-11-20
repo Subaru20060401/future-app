@@ -12,6 +12,7 @@ import '../money_format.dart';
 import '../ui/tokens.dart';
 import '../widgets/billing_link_sheet.dart';
 import '../widgets/month_picker_field.dart';
+import '../ui/card_icon.dart';
 
 class PaymentScreen extends StatefulWidget {
   const PaymentScreen({super.key});
@@ -567,7 +568,9 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
             runSpacing: 4,
             children: [
               ActionChip(
-                avatar: const Icon(Icons.credit_card, size: 16),
+                avatar: _filterCard == null
+                    ? const Icon(Icons.credit_card, size: 16)
+                    : CardIcon(_filterCard!, size: 18),
                 label: Text(
                   'カード：${_filterCard ?? 'すべて'} ▾',
                   overflow: TextOverflow.ellipsis,
@@ -717,7 +720,7 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
               ),
               for (final c in cards)
                 ListTile(
-                  leading: Icon(cardStyleOf(c).icon, color: cardStyleOf(c).color),
+                  leading: CardIcon(c, size: 28),
                   title: Text(c), // 全名称（切らない）
                   subtitle: Text(cardKindLabel(c), style: const TextStyle(fontSize: 12)),
                   trailing: _filterCard == c ? const Icon(Icons.check, color: Colors.pink) : null,
@@ -896,9 +899,8 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
             ),
             const Divider(),
             ...cards.map((c) {
-              final style = cardStyleOf(c);
               return ListTile(
-                leading: Icon(style.icon, color: style.color),
+                leading: CardIcon(c, size: 28),
                 title: Text(c),
                 onTap: () => Navigator.pop(context, c),
               );

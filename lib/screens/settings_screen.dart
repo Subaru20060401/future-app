@@ -31,6 +31,8 @@ import 'shift_image_import_screen.dart';
 import 'mail_schedule_screen.dart';
 import '../mail_schedule_service.dart';
 import '../money_format.dart';
+import '../ui/card_icon.dart';
+import '../ui/card_icon_image.dart';
 
 class SettingsScreen extends StatelessWidget {
   const SettingsScreen({super.key});
@@ -161,7 +163,7 @@ class SettingsScreen extends StatelessWidget {
               const SizedBox(height: 12),
               ...appState.cardPaymentDays.entries.map((e) => ListTile(
                 contentPadding: EdgeInsets.zero,
-                leading: const Icon(Icons.credit_card, size: 20, color: Colors.red),
+                leading: CardIcon(e.key, size: 32),
                 // 💡 名前を上、条件を下に。操作はメニューへ（UI改善計画 2026-10-14 の段階2）。
                 //   以前は「変更・名前・×」が横に並び、名前と説明が押しつぶされていた。
                 title: Text(e.key),
@@ -190,7 +192,7 @@ class SettingsScreen extends StatelessWidget {
                     setLocal(() {});
                   },
                   itemBuilder: (_) => const [
-                    PopupMenuItem(value: 'days', child: Text('締め日・引落日を変更')),
+                    PopupMenuItem(value: 'days', child: Text('締め日・引落日・アイコンを変更')),
                     PopupMenuItem(value: 'rename', child: Text('名前を変える・まとめる')),
                     PopupMenuItem(value: 'remove', child: Text('一覧から外す')),
                   ],
@@ -275,13 +277,49 @@ class SettingsScreen extends StatelessWidget {
         TextEditingController(text: appState.closingDayOf(card).toString());
     final dayCtrl =
         TextEditingController(text: (appState.cardPaymentDays[card] ?? 27).toString());
+    // 💡 アイコン: current＝いま保存されている画像（null＝既定のマーク）、pending＝この画面で選んだもの
+    final current = appState.cardIconOf(card);
+    String? pending = current;
+    String? iconError;
+    var busy = false;
     final ok = await showDialog<bool>(
       context: context,
-      builder: (_) => AlertDialog(
+      builder: (_) => StatefulBuilder(
+        builder: (context, setLocal) => AlertDialog(
         title: Text(card),
-        content: Column(
+        content: SingleChildScrollView(
+          child: Column(
           mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            _CardIconEditor(
+              cardName: card,
+              pending: pending,
+              changed: pending != current,
+              busy: busy,
+              error: iconError,
+              onPick: () async {
+                setLocal(() {
+                  busy = true;
+                  iconError = null;
+                });
+                final r = await _pickCardIcon();
+                setLocal(() {
+                  busy = false;
+                  if (r.error != null) iconError = r.error;
+                  if (r.png != null) pending = r.png;
+                });
+              },
+              onUndo: () => setLocal(() {
+                pending = current;
+                iconError = null;
+              }),
+              onDefault: () => setLocal(() {
+                pending = null;
+                iconError = null;
+              }),
+            ),
+            const SizedBox(height: 12),
             TextField(
               controller: closeCtrl,
               keyboardType: TextInputType.number,
@@ -303,14 +341,16 @@ class SettingsScreen extends StatelessWidget {
               ),
             ),
           ],
+          ),
         ),
         actions: [
           TextButton(
               onPressed: () => Navigator.pop(context, false),
               child: const Text('キャンセル')),
           ElevatedButton(
-              onPressed: () => Navigator.pop(context, true), child: const Text('保存')),
+              onPressed: busy ? null : () => Navigator.pop(context, true), child: const Text('保存')),
         ],
+      ),
       ),
     );
     if (ok != true) return;
@@ -320,6 +360,28 @@ class SettingsScreen extends StatelessWidget {
         card,
         (int.tryParse(dayCtrl.text) ?? appState.cardPaymentDays[card] ?? 27)
             .clamp(1, 31));
+    if (pending != current) {
+      final saved = await appState.setCardIcon(card, pending);
+      if (!saved && context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text('アイコンを保存できませんでした（容量不足など）。元のアイコンのままです')));
+      }
+    }
+  }
+
+  // 画像を選んで、アイコン用に縮小する（端末の中だけで行う。元の画像は保存しない）
+  Future<({String? png, String? error})> _pickCardIcon() async {
+    try {
+      final r = await FilePicker.platform.pickFiles(type: FileType.image, withData: true);
+      if (r == null || r.files.isEmpty) return (png: null, error: null); // 選ばなかった
+      final bytes = r.files.single.bytes;
+      if (bytes == null) return (png: null, error: '画像を読み込めませんでした');
+      return (png: await makeCardIconPng(bytes), error: null);
+    } on CardIconImageError catch (e) {
+      return (png: null, error: e.message);
+    } catch (_) {
+      return (png: null, error: '画像を選べませんでした');
+    }
   }
 
   // 💡 カード名を変える。既にあるカード名を入れると、その1枚にまとまる。
@@ -1371,3 +1433,83 @@ class _MailScanTileState extends State<_MailScanTile> {
     );
   }
 }
+
+// 💡 カード編集画面の「アイコン」欄。いまのアイコン（または選んだ画像）のプレビューと、
+//   画像を選ぶ・取り消し（保存されているものに戻す）・既定に戻す の操作。保存は「保存」を押したとき。
+class _CardIconEditor extends StatelessWidget {
+  const _CardIconEditor({
+    required this.cardName,
+    required this.pending,
+    required this.changed,
+    required this.busy,
+    required this.error,
+    required this.onPick,
+    required this.onUndo,
+    required this.onDefault,
+  });
+
+  final String cardName;
+  final String? pending; // null＝既定のマーク
+  final bool changed;
+  final bool busy;
+  final String? error;
+  final VoidCallback onPick;
+  final VoidCallback onUndo;
+  final VoidCallback onDefault;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text('アイコン', style: TextStyle(fontSize: 12, color: Colors.black54)),
+        const SizedBox(height: 6),
+        Row(
+          children: [
+            CardIcon(cardName,
+                key: const Key('card-icon-preview'),
+                size: 56,
+                imageBase64: pending,
+                useDefault: pending == null),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(cardName, style: const TextStyle(fontWeight: FontWeight.w600)),
+                  Text(
+                    busy
+                        ? '画像を縮小しています…'
+                        : pending == null
+                            ? '既定のマーク'
+                            : changed
+                                ? '選んだ画像（保存すると変わります）'
+                                : '自分の画像',
+                    style: const TextStyle(fontSize: 12, color: Colors.black54),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+        Wrap(
+          spacing: 4,
+          children: [
+            TextButton.icon(
+              onPressed: busy ? null : onPick,
+              icon: const Icon(Icons.image_outlined, size: 18),
+              label: const Text('画像を選ぶ'),
+            ),
+            if (changed)
+              TextButton(onPressed: busy ? null : onUndo, child: const Text('取り消し')),
+            if (pending != null)
+              TextButton(onPressed: busy ? null : onDefault, child: const Text('既定に戻す')),
+          ],
+        ),
+        if (error != null)
+          Text(error!, style: const TextStyle(fontSize: 12, color: Colors.red)),
+      ],
+    );
+  }
+}
+

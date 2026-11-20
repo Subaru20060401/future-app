@@ -9,8 +9,8 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
 import '../app_state.dart';
-import '../card_styles.dart';
 import '../money_format.dart';
+import '../ui/card_icon.dart';
 
 // 金額の表記をそろえる（桁区切り・マイナス）。表記は money_format.dart の yen で 1 か所
 String formatYen(int amount) => yen(amount);
@@ -73,7 +73,6 @@ class PaymentRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final p = payment;
-    final style = cardStyleOf(p.cardName);
     final status = paymentStatusLabel(p);
     final muted = p.infoOnly || p.paid;
     final amountStyle = TextStyle(
@@ -115,7 +114,8 @@ class PaymentRow extends StatelessWidget {
               children: [
                 Padding(
                   padding: const EdgeInsets.only(top: 2),
-                  child: Icon(style.icon, color: style.color, size: 22),
+                  // 💡 設定と同じカードのアイコン（自分の画像か既定のマーク）
+                  child: CardIcon(p.cardName, size: 26),
                 ),
                 const SizedBox(width: 10),
                 Expanded(

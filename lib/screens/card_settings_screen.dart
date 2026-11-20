@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 import '../app_state.dart';
 import '../card_styles.dart';
 import '../money_format.dart';
+import '../ui/card_icon.dart';
 
 // 💡 各クレカの分割金利（年率%）を設定。分割変換時にこの値を使う。
 class CardSettingsScreen extends StatelessWidget {
@@ -49,10 +50,9 @@ class CardSettingsScreen extends StatelessWidget {
           ...appState.cardChoices
               .where((c) => c != AppState.kOtherCard)
               .map((c) {
-            final style = cardStyleOf(c);
             return Card(
               child: ListTile(
-                leading: Icon(style.icon, color: style.color),
+                leading: CardIcon(c, size: 28),
                 title: Text(c),
                 subtitle: Text(
                     '分割は¥${yenNum(minInstallmentAmount(c))}以上'
