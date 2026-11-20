@@ -34,7 +34,11 @@ Future<GateStore> installStore() async {
 }
 
 void main() {
-  test('Drive取り込みの保存中に編集した内容は未同期として残る', () async {
+  // 💡 GPT 実装レビューの再現テスト（元は「取り込み中の編集が未同期として残る」）。
+  //   取り込みの間は編集を断る方式にしたので（GPT 再レビューの残件）、
+  //   「編集ははっきり断られ、取り込んだ内容も、終わったあとの編集も失われない」を確かめる形に変えた。
+  //   画面を通らずに項目を直接書き換えて保存した場合（安全網）も、保存されずに取り込んだ内容へ戻る。
+  test('Drive取り込みの保存中の編集は断られ、終わったあとの編集は未同期として残る', () async {
     var t = DateTime(2026, 11, 20, 10);
     final a = await clockApp(() => t);
     a.currentBalance = 1000;
@@ -48,11 +52,19 @@ void main() {
     final pulling = DriveSync.withStore(d).pullNow(a, snapshot: remote);
     await s.entered.future;
     t = t.add(const Duration(seconds: 1));
-    a.currentBalance = 3000;
-    final editing = a.saveData();
+    expect(() => a.updateBalance(3000), throwsA(isA<DataLockedException>()));
+    a.currentBalance = 3000; // 断る確認を通らない書き換え
+    await expectLater(a.saveData(), throwsA(isA<DataLockedException>()));
+    expect(a.currentBalance, 2000); // 保存せず、取り込んだ内容へ戻す
     s.release.complete();
-    await pulling;
-    await editing;
+    expect((await pulling).state, DriveSyncState.upToDate);
+    expect(a.currentBalance, 2000);
+    expect(decideSyncState(remoteUpdatedAt: remote.updatedAt,
+      knownRemoteAt: a.driveKnownRemoteAt, dataUpdatedAt: a.dataUpdatedAt,
+      syncedAt: a.driveSyncedAt), DriveSyncState.upToDate);
+    t = t.add(const Duration(seconds: 1));
+    a.updateBalance(3000);
+    await settle();
     expect(decideSyncState(remoteUpdatedAt: remote.updatedAt,
       knownRemoteAt: a.driveKnownRemoteAt, dataUpdatedAt: a.dataUpdatedAt,
       syncedAt: a.driveSyncedAt), DriveSyncState.localNewer);

@@ -350,6 +350,11 @@ class DriveSync {
     // ⚠️ 端末の保存が整っていない可能性がある間は、ドライブの正常なコピーを上書きしない
     //   （自動の保存・「この端末の内容で上書き」・競合で「この端末を残す」のすべてがここを通る）。
     //   取り込み（pullNow）と診断は使える。
+    // ⚠️ 取り込み中は上げない（保存が終わる前の中身を送らない）。終わったあとの変更通知で自動保存がまた予約される
+    if (app.dataLocked) {
+      return DriveSyncResult(DriveSyncState.error,
+          error: '${app.dataLockLabel}。終わってから、もう一度ドライブへ保存してください');
+    }
     if (app.uploadsBlocked) {
       return const DriveSyncResult(DriveSyncState.error,
           error: 'この端末の保存データが整っていないため、ドライブへの保存を止めています。'
@@ -380,20 +385,24 @@ class DriveSync {
     DriveSnapshot? snapshot,
     DriveSyncResult? basedOn,
   }) async {
+    // 💡 取得 → 判定 → 取り込み → 同期済みの記録 を、1 つの鍵の中で行う（その間は家計データの変更を断る）。
+    //   ⚠️ 取得を待っている間の編集も、取り込みで置き換わって消える。だから取得の前から止める。
+    //   もう取り込み中なら（二重の取り込み）、DataLockedException で断る。
     try {
-      final remote = snapshot ?? await _store.withFreshToken(fetch);
-      if (remote == null) return const DriveSyncResult(DriveSyncState.noRemote);
-      if (basedOn != null && app.dataUpdatedAt != basedOn.localAtCheck) {
-        return DriveSyncResult(DriveSyncState.localChangedSinceCheck, remote: remote);
-      }
-      // ⚠️ 同期済みにするのは「取り込みを始めた時点」まで。取り込みの保存を待っている間にこの端末で
-      //   編集した内容はドライブに無いので、未同期のまま残す（その編集の変更時刻は必ずこれより後になる）。
-      //   以前は取り込みが終わった時刻を使っていて、その間の編集まで同期済みになっていた（GPT 実装レビュー P1）。
-      final importStartedAt = app.issueStamp();
-      await app.importJson(remote.json);
-      await app.markDriveSynced(localAt: importStartedAt, remoteAt: remote.updatedAt);
-      lastDriveSyncState.value = DriveSyncState.upToDate;
-      return DriveSyncResult(DriveSyncState.upToDate, remote: remote);
+      return await app.runWithDataLock('ドライブから取り込んでいます', (lock) async {
+        final remote = snapshot ?? await _store.withFreshToken(fetch);
+        if (remote == null) return const DriveSyncResult(DriveSyncState.noRemote);
+        if (basedOn != null && app.dataUpdatedAt != basedOn.localAtCheck) {
+          return DriveSyncResult(DriveSyncState.localChangedSinceCheck, remote: remote);
+        }
+        // 💡 同期済みにするのは「取り込みを始めた時点」まで（鍵を持っているので、その後の編集は無い。
+        //   念のため、鍵を外したあとの編集の時刻は必ずこれより後になる＝未同期として残る）
+        final importStartedAt = app.issueStamp();
+        await app.importJson(remote.json, lock: lock);
+        await app.markDriveSynced(localAt: importStartedAt, remoteAt: remote.updatedAt);
+        lastDriveSyncState.value = DriveSyncState.upToDate;
+        return DriveSyncResult(DriveSyncState.upToDate, remote: remote);
+      });
     } catch (e) {
       return _failure(e);
     }

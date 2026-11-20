@@ -22,6 +22,7 @@ import 'screens/settings_screen.dart';
 import 'widgets/app_gate.dart';
 import 'gemini_client.dart';
 import 'widgets/drive_sync_dialog.dart';
+import 'widgets/data_lock_overlay.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -157,7 +158,8 @@ class MyApp extends StatelessWidget {
                 stops: const [0.0, 0.5, 1.0],
               ),
             ),
-            child: inner!,
+            // 💡 取り込み中は全体を覆って操作を止める（成功・失敗のどちらでも、終われば消える）
+            child: DataLockOverlay(child: inner!),
           );
         },
       ),

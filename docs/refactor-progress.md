@@ -6,7 +6,7 @@
 ## 基本情報
 
 - 開始時のコミット: `84a1c780023cc3e8c0a001bfa353dc6f5c49ca09`
-- 作業ブランチ: `claude/zen-heisenberg-xq1194`（push・公開はしない）
+- 作業ブランチ: `claude/zen-heisenberg-xq1194`（push と main 向けの下書き PR は許可済み。マージ・公開はしない）
 - 開始時の未コミット変更: なし
 - 使った Flutter: 3.50.0 stable（`/opt/flutter-sdk/flutter/bin` に手で入れた。CI も stable）
 - ⚠️ `flutter pub get` で `pubspec.lock` と `windows/flutter/generated_*` が書き換わる。ツールの再生成なのでコミットしない
@@ -47,10 +47,15 @@ GPT の完了報告レビューの 4 点を再現し（`0e6398b`）、ユーザ�
 3 件（保存中のカード設定変更・取り込み中の編集の同期済み扱い・false の保存）を、受け取った再現テストを配置して修正。
 詳細は `docs/review-handoff.md` §1.5。全履歴を取得してバンドルを作り直した。
 
+## GPT 再レビュー（f5eef6e）の残件への対応（2026-11-20）
+
+取り込み中は家計データの変更を止める（画面の覆い・AppState で断る・自動の処理は保留・二重の取り込みを断る・
+先に走っていた保存を待つ）。詳細は `docs/review-handoff.md` §1.6、テストは `test/import_lock_test.dart`。
+
 ## 変更後の検証（最終）
 
-- `flutter test`: 716 成功・2 スキップ（スキップは開始時と同じ）
-- `flutter analyze lib/`: 49 件（すべて非推奨予告の info）
+- `flutter test`: 727 成功・2 スキップ（スキップは開始時と同じ）
+- `flutter analyze lib/`: 50 件（すべて非推奨予告の info）
 - `flutter build web --release --base-href /future-app/`: 成功
 - ブラウザ（Chromium）: 全タブ・根拠シート・残高の書き直し・引き落としの反映シート・推移・カレンダーの印。コンソールエラー 0 件
 

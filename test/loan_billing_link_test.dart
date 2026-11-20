@@ -158,19 +158,21 @@ void main() {
     expect(a.unregisteredCardNames, hasLength(1));
   });
 
-  test('名前変更・保存・置換インポートでも紐づけを維持する', () {
+  test('名前変更・保存・置換インポートでも紐づけを維持する', () async {
     final a = AppState()
       ..loans.add(loan())
       ..payments.add(bank());
     a.linkBankBillingToLoan('ジヤツクス', 'pc');
     a.loans.single.name = '新しい名前';
-    final restored = AppState()..importJson(a.exportJson());
+    final restored = AppState();
+    // 💡 取り込みは保存が終わるまで鍵を持つ（その間の 2 回目の取り込みは断られる）ので、待ってから次へ
+    await restored.importJson(a.exportJson());
     expect(restored.loanForBankBillingName('ジャックス')?.name, '新しい名前');
     expect(restored.drawnInMonth(DateTime(2026, 10)), 9800);
     final withoutLinks = jsonDecode(a.exportJson()) as Map<String, dynamic>;
     withoutLinks['loans'][0]['bankBillingNames'] = [];
     withoutLinks['loans'][0]['autoLinkBankBills'] = false;
-    restored.importJson(jsonEncode(withoutLinks));
+    await restored.importJson(jsonEncode(withoutLinks));
     expect(restored.loanForBankBillingName('ジヤツクス'), isNull);
   });
 

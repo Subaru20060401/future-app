@@ -133,7 +133,9 @@ void main() {
       });
     }
 
-    test('時計が進まなくても、取り込み中の編集は未同期として残る', () async {
+    // 💡 取り込みの間は編集を断る（GPT 再レビューの残件への対応）。以前は受け付けて「未同期」として残していたが、
+    //   取り込みが失敗すると巻き戻しで一緒に消えた。いまは始める前に断るので、受け付けた変更が消えることは無い。
+    test('時計が進まなくても、取り込み中の編集ははっきり断られ、終わったあとの編集は未同期として残る', () async {
       final a = await fixedApp(day);
       a.currentBalance = 1000;
       await a.saveData();
@@ -144,9 +146,14 @@ void main() {
       s.blockKey = f(AppState.kPendingWriteKey);
       final pulling = DriveSync.withStore(FakeDriveStore()..remote = remote).pullNow(a, snapshot: remote);
       await s.entered.future;
-      a.updateBalance(3000); // 同じ時刻（時計は止まったまま）
+      expect(a.dataLocked, isTrue);
+      expect(() => a.updateBalance(3000), throwsA(isA<DataLockedException>()));
+      expect(a.currentBalance, 2000); // 断った編集は、メモリにも入っていない（取り込んだ内容のまま）
       s.release.complete();
-      await pulling;
+      final r = await pulling;
+      expect(r.state, DriveSyncState.upToDate);
+      expect(a.dataLocked, isFalse);
+      a.updateBalance(3000); // 終わったら編集できる（時計は止まったまま）
       await settle();
       expect(
           decideSyncState(

@@ -213,6 +213,21 @@ class StorageWriteFailure implements Exception {
   String toString() => '$stageに失敗しました: $cause';
 }
 
+// 💡 取り込み中（ドライブ・バックアップ・貼り付け）は家計データの変更を受け付けない。
+//   ⚠️ 受け付けてから取り込みの失敗で巻き戻すと「入力できたのに消えた」になる。変更は始める前に断る。
+class DataLockedException implements Exception {
+  DataLockedException(this.label);
+  final String label; // いま何をしているか（「ドライブから取り込んでいます」など）
+  @override
+  String toString() => '$label。終わるまで変更できません';
+}
+
+/// 取り込みの間だけ持つ鍵。持っている処理（取り込み本体）だけが家計データを書き換えられる。
+class DataLock {
+  DataLock._(this.label);
+  final String label;
+}
+
 // 💡 起動時の読み込み用: 戻すべき記録（一時保存・復旧点）を端末に書き戻せなかったときは、
 //   その記録の値を優先して読む（混ざった保存を正常なデータとして読まない）。
 class _PrefsView {
@@ -403,6 +418,7 @@ class AppState extends ChangeNotifier {
   final Map<String, double> cardInterestRates = {};
   double interestRateOf(String card) => cardInterestRates[card] ?? 15.0;
   void setInterestRate(String card, double rate) {
+    _ensureEditable();
     cardInterestRates[card] = rate;
     saveData();
     notifyListeners();
@@ -411,6 +427,7 @@ class AppState extends ChangeNotifier {
   // 初回の全期間取得が済んだか（2回目以降は先月+今月だけ取得）
   bool gmailFirstSyncDone = false;
   void markGmailSynced() {
+    _ensureEditable();
     if (!gmailFirstSyncDone) {
       gmailFirstSyncDone = true;
       saveData();
@@ -467,6 +484,7 @@ class AppState extends ChangeNotifier {
 
   // Appleカレンダー自動連携のON/OFF。ON時は権限取得＋既存を全同期。
   Future<bool> setCalendarAutoSync(bool on) async {
+    _ensureEditable();
     calendarAutoSync = on;
     saveData();
     notifyListeners();
@@ -524,7 +542,6 @@ class AppState extends ChangeNotifier {
 
   Future<void> _syncPaydaysOnce(DateTime now) async {
     final today = DateTime(now.year, now.month, now.day);
-    var changed = false;
     // 先月〜3か月先の労働月ぶん（給料日はそれぞれの入金月に来る）
     for (var dm = -1; dm <= 3; dm++) {
       final m = DateTime(now.year, now.month + dm);
@@ -545,15 +562,18 @@ class AppState extends ChangeNotifier {
           description: desc,
           remind: true, // 給料日の当日に通知する
         );
-        if (calId != null) {
-          specialCalendarIds[key] = calId;
-          specialCalendarSigs[key] = sig;
-          changed = true;
-        }
+        // 💡 作った予定の ID は、取り込み中なら終わるまで待ってから記録する（捨てると次に重複して作る）
+        if (calId != null) await _recordSpecialEvent(key, calId, sig);
       }
     }
-    if (changed) saveData();
   }
+
+  // 自動の処理（カレンダーへの書き出し）の記録。取り込み中は終わるまで待つ（runWhenEditable）。
+  Future<void> _recordSpecialEvent(String key, String calId, String sig) => runWhenEditable(() {
+        specialCalendarIds[key] = calId;
+        specialCalendarSigs[key] = sig;
+        saveData();
+      });
 
   // 💡 勤務先を消したら、まだ来ていない給料日のイベントも消す（通知が残らないように）
   void _removePaydayEventsOf(String workplaceId, DateTime today) {
@@ -633,7 +653,6 @@ class AppState extends ChangeNotifier {
 
   Future<void> _syncShortfallsOnce(DateTime now) async {
     final today = DateTime(now.year, now.month, now.day);
-    var changed = false;
     final wanted = <String>{};
     if (shortfallAlerts) {
       for (final day in shortfallDaysAhead()) {
@@ -653,31 +672,32 @@ class AppState extends ChangeNotifier {
           description: desc,
           reminderMinutes: kShortfallReminderMinutes,
         );
-        if (calId != null) {
-          specialCalendarIds[key] = calId;
-          specialCalendarSigs[key] = sig;
-          changed = true;
+        if (calId != null) await _recordSpecialEvent(key, calId, sig);
+      }
+    }
+    // 見込みが無くなった日を片付ける（取り込み中なら終わってから。取り込んだ中身で判断し直さず、
+    //   この回で求めた「要らない日」だけを外す）
+    await runWhenEditable(() {
+      var changed = false;
+      for (final key in specialCalendarIds.keys
+          .where((k) => k.startsWith(_shortfallPrefix) && !wanted.contains(k))
+          .toList()) {
+        final placed = _sigDate(specialCalendarSigs[key]);
+        // ⚠️ もう来た日は通知済み。予定は記録として残し、管理からだけ外す
+        if (placed == null || !placed.isBefore(today)) {
+          calendarSync!.deleteEvent(specialCalendarIds[key]!);
         }
+        specialCalendarIds.remove(key);
+        specialCalendarSigs.remove(key);
+        changed = true;
       }
-    }
-    // 見込みが無くなった日を片付ける
-    for (final key in specialCalendarIds.keys
-        .where((k) => k.startsWith(_shortfallPrefix) && !wanted.contains(k))
-        .toList()) {
-      final placed = _sigDate(specialCalendarSigs[key]);
-      // ⚠️ もう来た日は通知済み。予定は記録として残し、管理からだけ外す
-      if (placed == null || !placed.isBefore(today)) {
-        calendarSync!.deleteEvent(specialCalendarIds[key]!);
-      }
-      specialCalendarIds.remove(key);
-      specialCalendarSigs.remove(key);
-      changed = true;
-    }
-    if (changed) saveData();
+      if (changed) saveData();
+    });
   }
 
   // ───── シフト ─────
   void addShift(DateTime date, ShiftData shift) {
+    _ensureEditable();
     shifts.putIfAbsent(_formatDate(date), () => []).add(shift);
     saveData();
     notifyListeners();
@@ -716,6 +736,7 @@ class AppState extends ChangeNotifier {
   // 💡 まとめて登録したものだけを取り消す。
   //   ⚠️ 位置（index）ではなく、そのシフト自体で探す（元からあったシフトを巻き込まない）。
   int undoShiftsBatch(List<({String dateKey, ShiftData shift})> added) {
+    _ensureEditable();
     var removed = 0;
     final calIds = <String>[];
     for (final a in added) {
@@ -741,6 +762,7 @@ class AppState extends ChangeNotifier {
   }
 
   void removeShift(String dateKey, int index) {
+    _ensureEditable();
     final list = shifts[dateKey];
     final calId = (list != null && index < list.length) ? list[index].calendarEventId : null;
     list?.removeAt(index);
@@ -751,6 +773,7 @@ class AppState extends ChangeNotifier {
   }
 
   void updateShift(String dateKey, int index, ShiftData newShift) {
+    _ensureEditable();
     final list = shifts[dateKey];
     if (list == null || index < 0 || index >= list.length) return;
     final old = list[index];
@@ -796,6 +819,7 @@ class AppState extends ChangeNotifier {
 
   // 💡 複数日のシフトをまとめて追加（繰り返し入力用。保存・通知は1回だけ）
   void addShiftsBulk(Iterable<({DateTime date, ShiftData shift})> entries) {
+    _ensureEditable();
     for (final e in entries) {
       shifts.putIfAbsent(_formatDate(e.date), () => []).add(e.shift);
     }
@@ -820,6 +844,7 @@ class AppState extends ChangeNotifier {
   }
 
   void addWorkplace(Workplace w) {
+    _ensureEditable();
     w.sortWagePeriods();
     workplaces.add(w);
     saveData();
@@ -829,6 +854,7 @@ class AppState extends ChangeNotifier {
 
   // 既存の勤務先を丸ごと差し替え（編集画面の「保存する」用）
   void updateWorkplace(Workplace w) {
+    _ensureEditable();
     final i = workplaces.indexWhere((e) => e.id == w.id);
     if (i < 0) return;
     w.sortWagePeriods();
@@ -840,6 +866,7 @@ class AppState extends ChangeNotifier {
   }
 
   void removeWorkplace(String id) {
+    _ensureEditable();
     _removePaydayEventsOf(id, clockNow());
     workplaces.removeWhere((e) => e.id == id);
     // 削除した勤務先に紐づくデータも掃除（入金の選択肢や集計に残らないように）
@@ -900,6 +927,7 @@ class AppState extends ChangeNotifier {
 
   // 予定の追加/更新（idで照合）。開始日が変わってもバケットを移動する。
   void upsertEvent(EventData event) {
+    _ensureEditable();
     // 既存idを全バケットから除去
     events.forEach((k, list) => list.removeWhere((x) => x.id == event.id));
     events.removeWhere((k, list) => list.isEmpty);
@@ -911,6 +939,7 @@ class AppState extends ChangeNotifier {
   }
 
   void removeEvent(String dateKey, int index) {
+    _ensureEditable();
     final list = events[dateKey];
     final calId = (list != null && index < list.length) ? list[index].calendarEventId : null;
     list?.removeAt(index);
@@ -922,6 +951,7 @@ class AppState extends ChangeNotifier {
 
   // ───── Todo ─────
   void addTodo(TodoData todo) {
+    _ensureEditable();
     final key = _formatDate(todo.deadline);
     todos.putIfAbsent(key, () => []).add(todo);
     saveData();
@@ -929,18 +959,21 @@ class AppState extends ChangeNotifier {
   }
 
   void toggleTodo(TodoData todo) {
+    _ensureEditable();
     todo.completed = !todo.completed;
     saveData();
     notifyListeners();
   }
 
   void updateTodo(String oldKey, TodoData todo) {
+    _ensureEditable();
     todos[oldKey]?.removeWhere((t) => t.id == todo.id);
     if (todos[oldKey]?.isEmpty ?? false) todos.remove(oldKey);
     addTodo(todo);
   }
 
   void removeTodo(String dateKey, String id) {
+    _ensureEditable();
     todos[dateKey]?.removeWhere((t) => t.id == id);
     if (todos[dateKey]?.isEmpty ?? true) todos.remove(dateKey);
     saveData();
@@ -959,6 +992,7 @@ class AppState extends ChangeNotifier {
     PaymentSource source = PaymentSource.manual,
     String note = '', // 利用先（例: Amazonで購入）
   }) {
+    _ensureEditable();
     payments.add(Payment(
         id: _id(),
         cardName: cardName,
@@ -1019,6 +1053,7 @@ class AppState extends ChangeNotifier {
   }
 
   void linkBankBillingToLoan(String name, String loanId) {
+    _ensureEditable();
     final loan = loans.firstWhere((l) => l.id == loanId);
     if (!loan.isFromAccount && !loan.isDownPaymentFromAccount) return;
     final key = billingNameKey(resolveCardName(name));
@@ -1031,6 +1066,7 @@ class AppState extends ChangeNotifier {
   }
 
   void unlinkBankBillingFromLoan(String loanId, String name) {
+    _ensureEditable();
     final loan = loans.firstWhere((l) => l.id == loanId);
     loan.bankBillingNames.remove(name);
     // 💡 外したものを次の起動・取り込みで自動的に戻さない。
@@ -1105,6 +1141,7 @@ class AppState extends ChangeNotifier {
 
   /// 請求の月を利用者が選ぶ（判定できない銀行確定のため）。null で選択を取り消す。
   void setBankBillMonth(Payment p, DateTime? billMonth) {
+    _ensureEditable();
     final key = billRecordKey(p);
     if (billMonth == null) {
       bankBillMonths.remove(key);
@@ -1203,6 +1240,7 @@ class AppState extends ChangeNotifier {
   //   金額が予想から消えたり、削除した明細が次の取り込みで復活したりする。
   //   （test/card_alias_test.dart で全部の行き先を固定している）
   void renameOrMergeCard(String from, String to) {
+    _ensureEditable();
     final target = to.trim();
     if (from == target || from.trim().isEmpty || target.isEmpty) return;
 
@@ -1292,6 +1330,7 @@ class AppState extends ChangeNotifier {
   //   すでに同じ日・同じ金額の明細がそのカードにあるなら、二重になるので付け替えない。
   //   戻り値: 付け替えたら true、重複していて見送ったら false。
   bool moveAmazonPaymentTo(String paymentId, String cardName) {
+    _ensureEditable();
     final i = payments.indexWhere((e) => e.id == paymentId);
     if (i < 0) return false;
     final p = payments[i];
@@ -1317,6 +1356,7 @@ class AppState extends ChangeNotifier {
 
 
   void setPaymentNote(String paymentId, String note) {
+    _ensureEditable();
     final i = payments.indexWhere((p) => p.id == paymentId);
     if (i < 0) return;
     final p = payments[i];
@@ -1362,6 +1402,7 @@ class AppState extends ChangeNotifier {
   // 💡 分割払いへ移したはずの決済がカード側にも残っていたら取り除く（二重計上の自己修復）。
   //   旧バージョンで変換した明細は sourceId の記録が無く復活しうるため、
   //   起動時と取り込み時に既存の分割払いと突き合わせて掃除する。手動追加は対象外。
+  // ⚠️ 取り込み・起動時の自己修復（repairData）からも呼ぶので、取り込み中でも断らない（保存はしない）
   int cleanupInstallmentDuplicates() {
     if (installments.isEmpty) return 0;
     final before = payments.length;
@@ -1381,6 +1422,7 @@ class AppState extends ChangeNotifier {
   ({int added, int removed}) reconcilePayments(
       Iterable<({String cardName, int amount, DateTime date, PaymentSource source, String sourceId, String note})> rawItems,
       {DateTime? since, Map<String, DateTime>? mailReceivedAt}) {
+    _ensureEditable();
     bool inWindow(DateTime d) => since == null || !d.isBefore(since);
     String mailId(String sourceId) => sourceId.startsWith(kAmazonSourcePrefix)
         ? sourceId
@@ -1526,6 +1568,7 @@ class AppState extends ChangeNotifier {
 
 
   void togglePaid(String id) {
+    _ensureEditable();
     final p = payments.firstWhere((e) => e.id == id);
     p.paid = !p.paid;
     saveData();
@@ -1534,6 +1577,7 @@ class AppState extends ChangeNotifier {
 
   // 削除＝ゴミ箱へ退避＋墓石を記録（更新で復活しない）。
   void removePayment(String id) {
+    _ensureEditable();
     final idx = payments.indexWhere((e) => e.id == id);
     if (idx < 0) return;
     final p = payments[idx];
@@ -1547,6 +1591,7 @@ class AppState extends ChangeNotifier {
 
   // ゴミ箱から復元（墓石も解除し、再び更新対象に戻す）。
   void restorePayment(String id) {
+    _ensureEditable();
     final idx = trashedPayments.indexWhere((e) => e.id == id);
     if (idx < 0) return;
     final p = trashedPayments.removeAt(idx);
@@ -1559,6 +1604,7 @@ class AppState extends ChangeNotifier {
 
   // ゴミ箱から完全削除（墓石は残す＝更新でも復活させない）。
   void deleteFromTrash(String id) {
+    _ensureEditable();
     trashedPayments.removeWhere((e) => e.id == id);
     saveData();
     notifyListeners();
@@ -1566,6 +1612,7 @@ class AppState extends ChangeNotifier {
 
   // ゴミ箱を空にする（墓石は残す）。
   void emptyTrash() {
+    _ensureEditable();
     trashedPayments.clear();
     saveData();
     notifyListeners();
@@ -1580,6 +1627,7 @@ class AppState extends ChangeNotifier {
     double interestRate = 0,
     DateTime? startDate,
   }) {
+    _ensureEditable();
     final start = startDate ?? clockNow();
     // 💡 同一取引の二重登録を防止（カード・総額・回数・利用日が同じものは追加しない）。
     final dup = installments.any((i) =>
@@ -1642,6 +1690,7 @@ class AppState extends ChangeNotifier {
 
   // 回数を編集して月額を再計算（金利はカード規則で自動判定）
   void editInstallment(String id, {required int count, String? cardName}) {
+    _ensureEditable();
     final inst = installments.firstWhere((e) => e.id == id);
     if (cardName != null) inst.cardName = cardName;
     inst.installmentCount = count;
@@ -1654,6 +1703,7 @@ class AppState extends ChangeNotifier {
   }
 
   void removeInstallment(String id) {
+    _ensureEditable();
     installments.removeWhere((e) => e.id == id);
     saveData();
     notifyListeners();
@@ -1661,6 +1711,7 @@ class AppState extends ChangeNotifier {
 
   // 💡 カード請求を分割払いへ変換（カードからは外す）。金利はそのカードの設定値。
   void convertPaymentToInstallment(String paymentId, int count) {
+    _ensureEditable();
     final idx = payments.indexWhere((e) => e.id == paymentId);
     if (idx < 0) return;
     final p = payments[idx];
@@ -1691,6 +1742,7 @@ class AppState extends ChangeNotifier {
     required int payDay,
     String method = '',
   }) {
+    _ensureEditable();
     subscriptions.add(Subscription(
         id: _id(), title: title, amount: amount, payDay: payDay, method: method));
     saveData();
@@ -1699,6 +1751,7 @@ class AppState extends ChangeNotifier {
 
   // 定期支払いの支払い方法を変更（口座振替 / カード名）
   void setSubscriptionMethod(String id, String method) {
+    _ensureEditable();
     final i = subscriptions.indexWhere((e) => e.id == id);
     if (i < 0) return;
     subscriptions[i].method = method;
@@ -1707,6 +1760,7 @@ class AppState extends ChangeNotifier {
   }
 
   void removeSubscription(String id) {
+    _ensureEditable();
     subscriptions.removeWhere((e) => e.id == id);
     saveData();
     notifyListeners();
@@ -1714,18 +1768,21 @@ class AppState extends ChangeNotifier {
 
   // ───── ATM引き出し ─────
   void addWithdrawal({required DateTime date, required int amount, String memo = ''}) {
+    _ensureEditable();
     withdrawals.add(Withdrawal(id: _id(), date: date, amount: amount, memo: memo));
     saveData();
     notifyListeners();
   }
 
   void removeWithdrawal(String id) {
+    _ensureEditable();
     withdrawals.removeWhere((e) => e.id == id);
     saveData();
     notifyListeners();
   }
 
   void updateBalance(int balance) {
+    _ensureEditable();
     // 💡 手で書いた残高は通帳の値＝その時点までのデビットは既に引かれている。
     //   金額は動かさず「済み」とだけ記録する（引くと二重になる）。
     _markDebitsAccounted();
@@ -1765,6 +1822,7 @@ class AppState extends ChangeNotifier {
   }
 
   void updateWalletCash(int amount) {
+    _ensureEditable();
     walletCash = amount;
     saveData();
     notifyListeners();
@@ -1780,6 +1838,7 @@ class AppState extends ChangeNotifier {
 
   void addPlannedIncome(
       {required String title, required int amount, required DateTime date, bool monthly = false}) {
+    _ensureEditable();
     plannedIncomes.add(PlannedIncome(
         id: _id(), title: title, amount: amount, date: date, monthly: monthly));
     saveData();
@@ -1788,6 +1847,7 @@ class AppState extends ChangeNotifier {
 
   void updatePlannedIncome(String id,
       {String? title, int? amount, DateTime? date, bool? monthly}) {
+    _ensureEditable();
     final i = plannedIncomes.indexWhere((e) => e.id == id);
     if (i < 0) return;
     final p = plannedIncomes[i];
@@ -1800,6 +1860,7 @@ class AppState extends ChangeNotifier {
   }
 
   void removePlannedIncome(String id) {
+    _ensureEditable();
     plannedIncomes.removeWhere((e) => e.id == id);
     receivedPlannedKeys.removeWhere((k) => k.startsWith('$id|'));
     saveData();
@@ -1848,6 +1909,7 @@ class AppState extends ChangeNotifier {
 
   // 予定入金を受け取った → 残高に加算して履歴に残す
   void receivePlannedIncome(String id, int amount, DateTime date) {
+    _ensureEditable();
     final p = plannedIncomes.firstWhere((e) => e.id == id,
         orElse: () => PlannedIncome(id: '', title: '入金', amount: 0, date: date));
     receivedPlannedKeys.add(_plannedKey(id, date));
@@ -1867,6 +1929,7 @@ class AppState extends ChangeNotifier {
 
   // 予定入金を「受け取らなかった」ことにする（残高は変えない）
   void skipPlannedIncome(String id, DateTime date) {
+    _ensureEditable();
     receivedPlannedKeys.add(_plannedKey(id, date));
     saveData();
     notifyListeners();
@@ -1963,6 +2026,7 @@ class AppState extends ChangeNotifier {
     required DateTime at,
     String? workplaceId,
   }) {
+    _ensureEditable();
     if (amount <= 0) return;
     balanceHistory.add(BalanceEntry(
       id: _id(),
@@ -1981,6 +2045,7 @@ class AppState extends ChangeNotifier {
   // 💡 履歴を取り消して残高を元に戻す（入力ミスの修正用）。
   //   元の通知も未処理に戻すので、もう一度入力し直せる。
   void undoBalanceEntry(String entryId) {
+    _ensureEditable();
     final i = balanceHistory.indexWhere((e) => e.id == entryId);
     if (i < 0) return;
     final e = balanceHistory[i];
@@ -2024,6 +2089,7 @@ class AppState extends ChangeNotifier {
   // ⚠️ 取り込みの「作り直し」はしない（取得に失敗したときに消えないよう、足すだけ）。
   //   同じ取引番号は1件として扱う。古いもの（振込予定日から120日超）は掃除する。
   void addPayPayTransfers(Iterable<PayPayTransfer> list) {
+    _ensureEditable();
     var changed = false;
     for (final t in list) {
       if (!_isTrackedBank(t.bank)) continue;
@@ -2100,6 +2166,7 @@ class AppState extends ChangeNotifier {
   //   残高の編集日時も更新するので、この入金が予想残高で二重計上されない。
   void addDeposit(int amount,
       {String? workplaceId, DateTime? date, String? sourceKey, String? label}) {
+    _ensureEditable();
     if (amount == 0) return;
     _foldDebitsIntoBalance();
     currentBalance += amount;
@@ -2143,6 +2210,7 @@ class AppState extends ChangeNotifier {
 
   // メールから見つけた入金通知を取り込む（処理済み・既存は無視）
   int addDepositNotices(Iterable<({String sourceId, DateTime date})> notices) {
+    _ensureEditable();
     var added = 0;
     for (final n in notices) {
       if (n.sourceId.isEmpty) continue;
@@ -2162,6 +2230,7 @@ class AppState extends ChangeNotifier {
   // 入金通知に金額を入力して残高へ反映
   void applyDepositNotice(String sourceId, int amount,
       {String? workplaceId, String? transferId}) {
+    _ensureEditable();
     final idx = pendingDeposits.indexWhere((e) => e.sourceId == sourceId);
     final date = idx >= 0 ? pendingDeposits[idx].date : clockNow();
     if (idx >= 0) pendingDeposits.removeAt(idx);
@@ -2400,6 +2469,7 @@ class AppState extends ChangeNotifier {
   //   ・本人が消した予約の「追加」は復活させない
   //   戻り値は新しく増えた件数。
   int addScheduleSuggestions(Iterable<ScheduleSuggestion> incoming) {
+    _ensureEditable();
     final alreadyOpen = scheduleSuggestions.where((s) => s.isOpen).map((s) => s.id).toSet();
     final ordered = incoming.toList()..sort((a, b) {
       final byTime = a.receivedAt.compareTo(b.receivedAt);
@@ -2495,6 +2565,7 @@ class AppState extends ChangeNotifier {
 
   // 💡 本人の操作で保留・不要から確認待ちへ戻す。登録済みや取消履歴は戻さない。
   void reopenScheduleSuggestion(String id) {
+    _ensureEditable();
     final s = scheduleSuggestions.where((e) => e.id == id).firstOrNull;
     if (s == null || (s.status != SuggestionStatus.held &&
         s.status != SuggestionStatus.rejected)) {
@@ -2506,6 +2577,7 @@ class AppState extends ChangeNotifier {
   }
 
   void _setSuggestionStatus(String id, SuggestionStatus st) {
+    _ensureEditable();
     final s = scheduleSuggestions.where((e) => e.id == id).firstOrNull;
     if (s == null || !s.isOpen) return;
     s.status = st;
@@ -2522,6 +2594,7 @@ class AppState extends ChangeNotifier {
     required bool allDay,
     required String location,
   }) {
+    _ensureEditable();
     final s = scheduleSuggestions.where((e) => e.id == id).firstOrNull;
     if (s == null || !s.isOpen) return;
     s
@@ -2541,6 +2614,7 @@ class AppState extends ChangeNotifier {
   static const Duration kSuggestionHistoryKeep = Duration(days: 90);
 
   int pruneScheduleSuggestions(DateTime now) {
+    _ensureEditable();
     final limit = now.subtract(kSuggestionHistoryKeep);
     final before = scheduleSuggestions.length;
     scheduleSuggestions.removeWhere((s) {
@@ -2558,6 +2632,7 @@ class AppState extends ChangeNotifier {
 
   // 見本の提案をまとめて消す（登録済みの予定・シフトは残す）
   void removeSampleSuggestions() {
+    _ensureEditable();
     scheduleSuggestions
         .removeWhere((s) => s.sample && s.status != SuggestionStatus.approved);
     saveData();
@@ -2591,6 +2666,7 @@ class AppState extends ChangeNotifier {
     String? workplaceId,
     int? breakMinutes,
   }) {
+    _ensureEditable();
     final s = scheduleSuggestions.where((e) => e.id == id).firstOrNull;
     if (s == null) return '提案が見つかりません';
     if (!s.isOpen) return 'この提案はもう処理済みです';
@@ -2749,6 +2825,7 @@ class AppState extends ChangeNotifier {
   // ⚠️ 同じ引き落とし（同じ ID）は一度だけ。処理済みなら何もしない（連打・古い画面からの再操作・
   //   再起動後の再操作で二重に引かない）。判定は画面ではなくここで行う。
   bool applyDraw(String id, int amount, {String? label}) {
+    _ensureEditable();
     if (handledDrawIds.contains(id)) return false;
     if (amount != 0) {
       _foldDebitsIntoBalance();
@@ -2770,6 +2847,7 @@ class AppState extends ChangeNotifier {
   // 引き落としを「確認した」にする（残高は変えない。同じものは二度と出さない）。
   // 💡 入力した残高に含まれている可能性があるときの基本の操作。戻り値: 状態を変えたら true。
   bool skipDraw(String id) {
+    _ensureEditable();
     if (!handledDrawIds.add(id)) return false;
     saveData();
     notifyListeners();
@@ -2794,6 +2872,7 @@ class AppState extends ChangeNotifier {
   // 💡 未反映の見込みの引き落としだけをまとめて引く（含まれている可能性があるもの・判断できないものは引かない）。
   //   戻り値: 引いた件数と金額。
   ({int count, int amount}) applyLikelyNotIncludedDraws() {
+    _ensureEditable();
     var count = 0, amount = 0;
     for (final d in List.of(pendingDraws)) {
       if (drawReflectionOf(d.date) != DrawReflection.likelyNotIncluded) continue;
@@ -2807,6 +2886,7 @@ class AppState extends ChangeNotifier {
 
   // 未反映の引き落としをまとめてスキップ（過去分の一括整理用）
   void skipAllDraws() {
+    _ensureEditable();
     for (final d in pendingDraws) {
       handledDrawIds.add(d.id);
     }
@@ -2816,6 +2896,7 @@ class AppState extends ChangeNotifier {
 
   // 口座からの支払いを手入力で引く（引き落とし・現金払いなど）
   void subtractFromBalance(int amount, {String label = '手入力'}) {
+    _ensureEditable();
     if (amount == 0) return;
     _foldDebitsIntoBalance();
     currentBalance -= amount;
@@ -2831,6 +2912,7 @@ class AppState extends ChangeNotifier {
 
   // 入金通知をスキップ（残高は変えない。同じ通知は二度と出さない）
   void skipDepositNotice(String sourceId) {
+    _ensureEditable();
     pendingDeposits.removeWhere((e) => e.sourceId == sourceId);
     handledDepositIds.add(sourceId);
     saveData();
@@ -2938,6 +3020,7 @@ class AppState extends ChangeNotifier {
   // ───── 予算（カテゴリ別の月上限。カテゴリ名＝支出内訳のラベル）─────
   final Map<String, int> budgets = {};
   void setBudget(String category, int amount) {
+    _ensureEditable();
     if (amount <= 0) {
       budgets.remove(category);
     } else {
@@ -2967,6 +3050,7 @@ class AppState extends ChangeNotifier {
   int goalAmount = 0; // 0 = 未設定
   DateTime? goalDate; // 目標年月（その月末までに達成したい）
   void setGoal(int amount, DateTime? date) {
+    _ensureEditable();
     goalAmount = amount;
     goalDate = date;
     saveData();
@@ -3037,6 +3121,7 @@ class AppState extends ChangeNotifier {
   int? actualSalaryOfWorkplace(DateTime month, String wpKey) =>
       actualSalariesByWp[_wpSalKey(month, wpKey)];
   void setActualSalaryOfWorkplace(DateTime month, String wpKey, int? amount) {
+    _ensureEditable();
     final key = _wpSalKey(month, wpKey);
     if (amount == null || amount <= 0) {
       actualSalariesByWp.remove(key);
@@ -3660,6 +3745,7 @@ class AppState extends ChangeNotifier {
     int monthlyOverride = 0,
     int firstPaymentAmount = 0,
   }) {
+    _ensureEditable();
     loans.add(Loan(
       id: _id(),
       name: name.trim(),
@@ -3678,6 +3764,7 @@ class AppState extends ChangeNotifier {
   }
 
   void updateLoan(Loan loan) {
+    _ensureEditable();
     repairLoanBillingLinks();
     saveData();
     notifyListeners();
@@ -3695,6 +3782,7 @@ class AppState extends ChangeNotifier {
       required int amount,
       required DateTime date,
       bool monthly = false}) {
+    _ensureEditable();
     plannedExpenses.add(PlannedExpense(
         id: _id(), title: title.trim(), amount: amount, date: date, monthly: monthly));
     saveData();
@@ -3702,6 +3790,7 @@ class AppState extends ChangeNotifier {
   }
 
   void removePlannedExpense(String id) {
+    _ensureEditable();
     plannedExpenses.removeWhere((e) => e.id == id);
     paidPlannedExpenseKeys.removeWhere((k) => k.startsWith('$id|'));
     saveData();
@@ -3714,6 +3803,7 @@ class AppState extends ChangeNotifier {
     required DateTime date,
     required bool monthly,
   }) {
+    _ensureEditable();
     final expense = plannedExpenses.firstWhere((e) => e.id == id);
     expense
       ..title = title.trim()
@@ -3728,6 +3818,7 @@ class AppState extends ChangeNotifier {
   // 💡 予定日より前に払ったとき用。予定日を過ぎていれば、残高を書き直した時点で
   //   二重計上ゲート（_forecastInclude）が外すので、ここを使わなくても二重にはならない。
   void markPlannedExpensePaid(String id, DateTime date) {
+    _ensureEditable();
     paidPlannedExpenseKeys.add(_plannedExpenseKey(id, date));
     saveData();
     notifyListeners();
@@ -3735,6 +3826,7 @@ class AppState extends ChangeNotifier {
 
   // 払い済みを取り消す（押し間違えたとき）
   void unmarkPlannedExpensePaid(String id, DateTime date) {
+    _ensureEditable();
     paidPlannedExpenseKeys.remove(_plannedExpenseKey(id, date));
     saveData();
     notifyListeners();
@@ -3810,6 +3902,7 @@ class AppState extends ChangeNotifier {
   }
 
   void removeLoan(String id) {
+    _ensureEditable();
     loans.removeWhere((l) => l.id == id);
     saveData();
     notifyListeners();
@@ -4383,6 +4476,7 @@ class AppState extends ChangeNotifier {
   }
 
   void setCardPaymentDay(String cardName, int day) {
+    _ensureEditable();
     cardPaymentDays[cardName] = day;
     _saveCardPaymentDays();
     notifyListeners();
@@ -4431,6 +4525,7 @@ class AppState extends ChangeNotifier {
   // 💡 カードを設定から外す。明細は消さない（過去の記録は残す）。
   //   cardChoices は明細に出てくるカード名も拾うので、過去データの表示は壊れない。
   void removeCard(String cardName) {
+    _ensureEditable();
     cardPaymentDays.remove(cardName);
     cardClosingDays.remove(cardName);
     _saveCardPaymentDays();
@@ -4438,6 +4533,7 @@ class AppState extends ChangeNotifier {
   }
 
   void setCardClosingDay(String cardName, int day) {
+    _ensureEditable();
     cardClosingDays[cardName] = day.clamp(1, 31);
     _saveCardPaymentDays();
     notifyListeners();
@@ -4588,6 +4684,7 @@ class AppState extends ChangeNotifier {
   // 💡 CSVには交通費・深夜/残業/休日の割増が載らないので、「給与」列から逆算して
   //    復元する（そうしないと取り込んだ月の収入がズレる）。
   CsvImportResult importShiftsCsv(String text, {bool replace = false}) {
+    _ensureEditable();
     final lines = const LineSplitter()
         .convert(text.replaceAll('﻿', ''))
         .where((l) => l.trim().isNotEmpty)
@@ -4774,6 +4871,7 @@ class AppState extends ChangeNotifier {
   Future<void> doAutoBackup() async {
     if (kIsWeb) return; // Webはファイル保存できない（設定→書き出しで手動保存）
     if (!autoBackupEnabled) return;
+    if (_dataLock != null || uploadsBlocked) return; // ⚠️ 取り込み中・保存が整っていない間は書き出さない
     try {
       final dir = await getApplicationDocumentsDirectory();
       final backupDir = Directory('${dir.path}/backups');
@@ -4817,7 +4915,7 @@ class AppState extends ChangeNotifier {
   // バックアップファイルからリストア。
   Future<void> restoreFromBackup(File file) async {
     final text = await file.readAsString();
-    await importJson(text);
+    await importJson(text, label: 'バックアップから復元しています');
   }
 
   Future<void> setAutoBackupEnabled(bool on) async {
@@ -4837,7 +4935,32 @@ class AppState extends ChangeNotifier {
   //   3) 取り込んだ状態を保存（一時保存 → 全キー）。成功で一時保存と復旧点を消す
   //   4) 3 が失敗したら、メモリを戻し、復旧点の値で端末も戻す。それも失敗したら「回復待ち」にして、
   //      次の起動で復旧点から戻す（復旧点は消さずに残る）
-  Future<void> importJson(String text) async {
+  //   ⚠️ 取り込みの間は家計データの変更を断る（DataLock）。成功しても失敗しても最後に外す。
+  //   [lock]: 呼び出し側が先に鍵を取っているとき（ドライブ: 取得から取り込みまでを 1 つの処理にする）
+  Future<void> importJson(String text, {DataLock? lock, String label = 'データを取り込んでいます'}) {
+    if (lock != null) {
+      if (!identical(lock, _dataLock)) {
+        return Future.error(StateError('取り込みの鍵が有効ではありません'));
+      }
+      return _importJsonLocked(text);
+    }
+    // 💡 JSON として読めないものは、鍵を取る前に断る（何も変えない・表示も切り替えない）
+    try {
+      if (jsonDecode(text) is! Map) throw const FormatException('取り込むデータの形が違います');
+    } catch (e) {
+      return Future.error(e);
+    }
+    final DataLock own;
+    try {
+      own = acquireDataLock(label);
+    } catch (e) {
+      return Future.error(e); // 二重の取り込み → 後から来た方を断る（先の取り込みはそのまま続く）
+    }
+    // 💡 鍵の取得とメモリでの読み込みは同じ同期区間で行う（間に他の変更が入らない）
+    return _importJsonLocked(text).whenComplete(() => releaseDataLock(own));
+  }
+
+  Future<void> _importJsonLocked(String text) async {
     final beforeJson = exportJson();
     final beforeValues = _persistedValues(includeUpdatedAt: true);
     try {
@@ -4846,8 +4969,15 @@ class AppState extends ChangeNotifier {
       _importJson(beforeJson, repair: false);
       rethrow;
     }
+    _lockSnapshot = exportJson();
     // 💡 成功した取り込みも「この端末での編集」には数えない（更新時刻は変えない）
     final afterValues = _persistedValues(includeUpdatedAt: false);
+    // ⚠️ 取り込み前に始まっていた保存を終わらせてから復旧点を書く。
+    //   走っている保存は成功すると復旧点を消すので、先に書くと「戻す先」が消えて、
+    //   取り込みの保存が途中で止まったときに取り込む前の状態へ戻せなくなる。
+    //   （書く値はその保存を頼んだ時点のものなので、取り込んだ内容とは混ざらない。
+    //    失敗しても、取り込む前の状態は beforeValues として復旧点に入る）
+    await _drainWrites();
     final prefs = await SharedPreferences.getInstance();
     try {
       await _putRecord(
@@ -4861,7 +4991,6 @@ class AppState extends ChangeNotifier {
           }));
     } catch (e) {
       _importJson(beforeJson, repair: false);
-      notifyListeners();
       throw StorageWriteFailure('復旧点の保存', e);
     }
     try {
@@ -4880,11 +5009,93 @@ class AppState extends ChangeNotifier {
       } catch (_) {
         if (!wasUnrecoverable) storageIssue = StorageIssue.recoveryPending; // 復旧点が残る → 次の起動で戻す
       }
-      notifyListeners();
       rethrow;
     }
     storageIssue = null; // 💡 取り込み直し・復元が保存まで成功した＝整った状態になった
+    _importSucceededUnderLock = true;
+    // 💡 画面への通知は、鍵を外すとき（releaseDataLock）にまとめて行う
+  }
+
+  // ════════════════ 取り込み中の変更の停止 ════════════════
+  // 💡 取り込みの間（鍵を持っている間）は:
+  //   ・画面: 全体を「取り込み中」の表示で覆い、操作できなくする（DataLockOverlay）
+  //   ・AppState の変更（追加・削除・残高の入力など）: 始める前に DataLockedException で断る（_ensureEditable）
+  //   ・自動の処理（Gmail の反映・カレンダーの記録）: 取り込みが終わるまで待ってから行う（runWhenEditable）
+  //   ・ドライブへの保存・自動バックアップ: 行わない（終わったあとの変更通知でまた予約される）
+  //   ・二重の取り込み: 後から来た方を断る
+  //   ⚠️ 変更を受け付けてから巻き戻すと、入力した内容が黙って消える（GPT 再レビューの残件）。
+  DataLock? _dataLock;
+  String? _lockSnapshot; // 鍵を持っている間の正しい中身（安全網の巻き戻し用）
+  bool _importSucceededUnderLock = false;
+  Completer<void>? _unlocked;
+
+  /// 取り込み中なら true（画面はこれで全体を覆う）
+  bool get dataLocked => _dataLock != null;
+
+  /// いま何をしているか（取り込み中でなければ null）
+  String? get dataLockLabel => _dataLock?.label;
+
+  /// 鍵を取る。もう取り込み中なら DataLockedException（二重の取り込みを断る）。
+  DataLock acquireDataLock(String label) {
+    final held = _dataLock;
+    if (held != null) throw DataLockedException(held.label);
+    final lock = _dataLock = DataLock._(label);
+    _lockSnapshot = exportJson();
+    _importSucceededUnderLock = false;
+    _unlocked = Completer<void>();
     notifyListeners();
+    return lock;
+  }
+
+  /// 鍵を外す（成功でも失敗でも必ず呼ぶ）。待っていた自動の処理を動かす。
+  void releaseDataLock(DataLock lock) {
+    if (!identical(lock, _dataLock)) return;
+    _dataLock = null;
+    _lockSnapshot = null;
+    final waiting = _unlocked;
+    _unlocked = null;
+    waiting?.complete();
+    notifyListeners(); // 💡 ドライブの自動保存・不足の見込みの書き直しは、この通知でまた予約される
+    if (_importSucceededUnderLock) {
+      _importSucceededUnderLock = false;
+      _maybeAutoBackup(); // 取り込みの保存の直後は鍵を持っていて見送ったため
+    }
+  }
+
+  /// 鍵を持ったまま処理する（ドライブの取り込み: 取得 → 判定 → 取り込み を 1 つの処理にする）
+  Future<T> runWithDataLock<T>(String label, Future<T> Function(DataLock lock) body) async {
+    final lock = acquireDataLock(label);
+    try {
+      return await body(lock);
+    } finally {
+      releaseDataLock(lock);
+    }
+  }
+
+  /// 自動の処理の変更は、取り込みが終わるまで待ってから行う（断らずに保留する）。
+  /// 💡 「取り込み中でない」の確認と変更を同じ同期区間で行う（間に取り込みが始まらない）。
+  Future<T> runWhenEditable<T>(T Function() action) async {
+    while (_dataLock != null) {
+      await _unlocked!.future;
+    }
+    return action();
+  }
+
+  void _ensureEditable() {
+    final held = _dataLock;
+    if (held != null) throw DataLockedException(held.label);
+  }
+
+  // 走っている保存・並んでいる保存が全部終わるまで待つ（失敗は storageIssue に出る）。
+  // ⚠️ 鍵を持っている間に呼ぶ（新しい保存が並ばないので、必ず終わる）
+  Future<void> _drainWrites() async {
+    while (true) {
+      final waiting = _queuedDone?.future ?? _runningWrite;
+      if (waiting == null) return;
+      try {
+        await waiting;
+      } catch (_) {}
+    }
   }
 
   // [repair]: 取り込んだ後に自己修復するか。⚠️ 失敗時の巻き戻しでは修復しない（元の状態にそのまま戻す）
@@ -5256,6 +5467,20 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> saveData({bool markModified = true}) {
+    if (markModified && _dataLock != null) {
+      // ⚠️ 安全網: 取り込み中に、断る確認（_ensureEditable）を通らずに書き換えた経路がある。
+      //   その変更は保存せず、取り込み中の正しい中身へ戻して断る（取り込みの保存に混ぜない）。
+      //   ここに来るのは不具合なので、見つけたら書き換える側に _ensureEditable / runWhenEditable を足す。
+      final label = _dataLock!.label;
+      final snap = _lockSnapshot;
+      if (snap != null) {
+        _importJson(snap, repair: false);
+        notifyListeners();
+      }
+      final f = Future<void>.error(DataLockedException(label));
+      f.catchError((_) {});
+      return f;
+    }
     if (markModified) dataUpdatedAt = issueStamp();
     final f = _enqueueWrite(_persistedValues(includeUpdatedAt: markModified));
     // ⚠️ 呼び出し側の多くは待たない。失敗は storageIssue で画面に出すので、未処理の例外にしない
@@ -5267,6 +5492,7 @@ class AppState extends ChangeNotifier {
 
   /// 保存をやり直す（保存に失敗・回復待ちのとき、画面のボタンから）。成功したら true。
   Future<bool> retryStorage() async {
+    if (_dataLock != null) return false; // 取り込み中は取り込みの保存を待つ
     try {
       await saveData(markModified: false);
       return true;
@@ -5276,6 +5502,8 @@ class AppState extends ChangeNotifier {
   }
 
   void _maybeAutoBackup() {
+    // ⚠️ 取り込み中は書き出さない（保存が終わる前の中身をバックアップにしない）。終わったら releaseDataLock から呼ぶ
+    if (_dataLock != null) return;
     if (uploadsBlocked) return; // ⚠️ 整っていない状態で、正常なバックアップを押し出さない
     // 自動バックアップ（1日1回）
     final now = clockNow();

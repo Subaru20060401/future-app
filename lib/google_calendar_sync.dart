@@ -170,14 +170,17 @@ class GoogleCalendarSync implements CalendarSyncHook {
       reminderMinutes: appState.shiftReminderFor(s),
     );
     if (id != null && id != s.calendarEventId) {
-      // ⚠️ 書き出している間に取り消された（まとめて登録→すぐ「元に戻す」）なら、
-      //   作った予定を消す。IDが付く前に消されると予定だけが残ってしまうため。
-      if (!appState.hasShift(s)) {
-        deleteEvent(id);
-        return;
-      }
-      s.calendarEventId = id;
-      appState.saveData();
+      // 💡 取り込み中なら、終わるまで待ってから記録する（取り込みの保存に混ぜない）
+      await appState.runWhenEditable(() {
+        // ⚠️ 書き出している間に取り消された（まとめて登録→すぐ「元に戻す」）・取り込みで置き換わったなら、
+        //   作った予定を消す。IDが付く前に消されると予定だけが残ってしまうため。
+        if (!appState.hasShift(s)) {
+          deleteEvent(id);
+          return;
+        }
+        s.calendarEventId = id;
+        appState.saveData();
+      });
     }
   }
 
@@ -194,8 +197,13 @@ class GoogleCalendarSync implements CalendarSyncHook {
       description: [e.memo, e.url].where((s) => s.isNotEmpty).join('\n'),
     );
     if (id != null && id != e.calendarEventId) {
-      e.calendarEventId = id;
-      appState.saveData();
+      // 💡 取り込み中なら、終わるまで待ってから記録する
+      await appState.runWhenEditable(() {
+        // 取り込みで置き換わった予定（もうデータに無い）には記録しない
+        if (!appState.events.values.any((l) => l.any((x) => identical(x, e)))) return;
+        e.calendarEventId = id;
+        appState.saveData();
+      });
     }
   }
 
