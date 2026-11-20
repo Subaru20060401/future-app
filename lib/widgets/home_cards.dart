@@ -11,6 +11,49 @@ import 'planned_income_sheet.dart';
 import 'mail_schedule_review_sheet.dart';
 import '../money_format.dart';
 
+// 💡 請求の月を判定できない銀行確定を、どの月の請求か選んでもらう。
+//   ⚠️ 金額や名前だけで決めない（同じカード・同じ額でも別の請求のことがある）。
+//   選ぶまでは日付の月の請求として数え、影響する予想に「要確認」を付けている。
+Future<void> showBankBillMonthDialog(BuildContext context, AppState appState, Payment p) async {
+  final candidates = appState.billMonthCandidatesOf(p);
+  final chosen = await showDialog<DateTime>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: const Text('どの月の請求ですか？'),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('${p.paymentDate.month}/${p.paymentDate.day}  ${p.cardName}  ¥${yenNum(p.amount)}',
+                style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 6),
+            const Text(
+              '銀行の引落確定の日付が、設定の引落日から計算した日と合いません'
+              '（引落日の設定を変えた、いつもと違う日に引き落とされた、など）。'
+              '選ぶまでは日付の月の請求として数え、関係する見込みに「要確認」を付けています。',
+              style: TextStyle(fontSize: 12),
+            ),
+            const SizedBox(height: 8),
+            for (final c in candidates)
+              Text('・${c.month.month}月の請求なら、設定上の引落日は ${c.expectedDate.month}/${c.expectedDate.day}',
+                  style: const TextStyle(fontSize: 12)),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(context), child: const Text('あとで')),
+        for (final c in candidates)
+          TextButton(
+            onPressed: () => Navigator.pop(context, c.month),
+            child: Text('${c.month.month}月の請求'),
+          ),
+      ],
+    ),
+  );
+  if (chosen != null) appState.setBankBillMonth(p, chosen);
+}
+
 // 確認待ちを1件開く（種類ごとに既存の確認処理へ渡す）。
 // 💡 開いただけでは残高を動かさない。反映・スキップの操作で解消する。
 Future<void> openHomeNotice(
@@ -25,6 +68,8 @@ Future<void> openHomeNotice(
       await showPlannedIncomeSheet(context, appState);
     case HomeNoticeKind.scheduleSuggestion:
       await showSuggestionReviewSheet(context, appState, notice.suggestion!);
+    case HomeNoticeKind.bankBillMonthUnknown:
+      await showBankBillMonthDialog(context, appState, notice.bankRecord!);
     case HomeNoticeKind.installmentWithoutCard:
       await showDialog<void>(
         context: context,
@@ -51,6 +96,7 @@ IconData _iconOf(HomeNoticeKind kind) => switch (kind) {
       HomeNoticeKind.plannedIncome => Icons.event_available,
       HomeNoticeKind.installmentWithoutCard => Icons.credit_card_off,
       HomeNoticeKind.scheduleSuggestion => Icons.mark_email_unread_outlined,
+      HomeNoticeKind.bankBillMonthUnknown => Icons.help_outline,
     };
 
 Color _colorOf(HomeNoticeKind kind) => switch (kind) {
@@ -59,6 +105,7 @@ Color _colorOf(HomeNoticeKind kind) => switch (kind) {
       HomeNoticeKind.plannedIncome => Colors.teal,
       HomeNoticeKind.installmentWithoutCard => Colors.orange,
       HomeNoticeKind.scheduleSuggestion => Colors.indigo,
+      HomeNoticeKind.bankBillMonthUnknown => Colors.orange,
     };
 
 Widget _noticeTile(BuildContext context, AppState appState, HomeNotice n) {

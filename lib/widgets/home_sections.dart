@@ -267,7 +267,11 @@ Future<void> showForecastDetail(BuildContext context, AppState appState, int off
               child: Wrap(
                 spacing: AppSpace.xs,
                 crossAxisAlignment: WrapCrossAlignment.center,
-                children: [Text(l.label, style: AppText.body), CertaintyBadge(l.certainty)],
+                children: [
+                  Text(l.label, style: AppText.body),
+                  CertaintyBadge(l.certainty),
+                  if (l.needsReview) const ReviewBadge(),
+                ],
               ),
             ),
             const SizedBox(width: AppSpace.s),
@@ -380,6 +384,7 @@ class UpcomingDrawsCard extends StatelessWidget {
                                 crossAxisAlignment: WrapCrossAlignment.center,
                                 children: [
                                   CertaintyBadge(l.certainty),
+                                  if (l.needsReview) const ReviewBadge(),
                                   if (shortDates.contains(l.date))
                                     const Text('⚠ 残高が足りない日',
                                         style: TextStyle(fontSize: 12, color: AppColors.warning)),

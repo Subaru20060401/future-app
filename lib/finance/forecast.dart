@@ -29,6 +29,8 @@ class ForecastLine {
   final int amount;
   final DateTime date; // 入金日・引落日（その日の 0 時）
   final Certainty certainty;
+  // 💡 請求の月を判定できない銀行確定が関わる行（金額が二重・抜けの可能性があり、利用者の確認が要る）
+  final bool needsReview;
 
   const ForecastLine({
     required this.kind,
@@ -37,6 +39,7 @@ class ForecastLine {
     required this.amount,
     required this.date,
     required this.certainty,
+    this.needsReview = false,
   });
 }
 

@@ -197,12 +197,21 @@ enum DrawReflection {
   unknown, // 判断できない（同じ日・残高を入力した記録が無い）
 }
 
+// 引き落としの請求の月の決まり方
+enum BillMonthStatus {
+  matched, // 設定の引落日から一意に決まった
+  userChosen, // 利用者が選んだ
+  unresolved, // 判定できない（日付の月として扱い、確認待ちに出す）
+  noSetting, // 引落日の設定が無い（日付の月として扱う）
+}
+
 enum HomeNoticeKind {
   draw, // 引き落としの反映待ち
   deposit, // 入金の反映待ち（メールに金額が無いので入力が要る）
   plannedIncome, // 予定入金の受け取り確認
   installmentWithoutCard, // カード未設定の分割払い（予想から漏れる可能性）
   scheduleSuggestion, // メールから見つけた予定・単発バイトの提案（承認するまで何も登録しない）
+  bankBillMonthUnknown, // 請求の月を判定できない銀行確定（利用者が選ぶ）
 }
 
 class HomeNotice {
@@ -216,6 +225,7 @@ class HomeNotice {
   final DepositNotice? deposit;
   final ({PlannedIncome income, DateTime date})? planned;
   final ScheduleSuggestion? suggestion;
+  final Payment? bankRecord;
 
   const HomeNotice({
     required this.kind,
@@ -227,6 +237,7 @@ class HomeNotice {
     this.deposit,
     this.planned,
     this.suggestion,
+    this.bankRecord,
   });
 }
 
@@ -997,10 +1008,102 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
+  // ════════════ 引き落としの「請求の月」 ════════════
+  // 💡 実際の引落日（銀行確定・請求予定に載っている日付）と、その引き落としが「何月の請求か」は別の概念。
+  //   ふだんは同じ月だが、月末払いが休みで翌月にずれると（10/31土 → 11/2）、11/2 の引落は10月の請求。
+  //   ⚠️ 日付の月で数えると、11月の請求と取り違えて同じ額を2回引き、11月の請求が消えていた。
+  //   決め方（金額では決めない。同じカード・同じ額でも別の請求のことがあるため）:
+  //   ・利用者が選んだ月（bankBillMonths）があればそれ
+  //   ・設定の引落日から計算した日付が、候補（日付の月・前月）のうち ちょうど1つと一致すれば、その月
+  //   ・一致しない／両方と一致する（支払日の設定を変えた、通常と違う振替日など）→ 判定できない。
+  //     集計は日付の月で扱い（以前と同じ）、確認待ちに出して利用者に選んでもらい、影響する予想に「要確認」を付ける
+  final Map<String, String> bankBillMonths = {}; // 明細のキー → 'yyyy-MM'（利用者が選んだ請求の月）
+
+  String billRecordKey(Payment p) =>
+      p.sourceId.isNotEmpty ? p.sourceId : _dupKey(p.cardName, p.amount, p.paymentDate, p.source);
+
+  // 設定から計算した、その請求の月の引落日（ローンは返済日、カードは引落日。未設定は27日）
+  DateTime _expectedDrawDate(String label, DateTime billMonth) {
+    final loan = loanForBankBillingName(label);
+    final day = loan?.payDay ?? cardPaymentDays[label] ?? _drawDayOf(label);
+    return drawDateInMonth(day, billMonth);
+  }
+
+  ({DateTime month, BillMonthStatus status}) _billMonthOf(String label, DateTime date,
+      {String? key}) {
+    final dateMonth = DateTime(date.year, date.month);
+    final chosen = key == null ? null : bankBillMonths[key];
+    if (chosen != null) {
+      final m = DateTime.tryParse('$chosen-01');
+      if (m != null) return (month: DateTime(m.year, m.month), status: BillMonthStatus.userChosen);
+    }
+    // 💡 引落日の設定が無いカード（ローンでもない）は、照らし合わせる手がかりが無い。
+    //   日付の月として扱い、確認待ちには出さない（出すと設定していないカードの確定がすべて「要確認」になる）。
+    //   ⚠️ 未設定のカードは予想でも仮に27日として扱っているので、27日以降が全部休みの月（2月など）に
+    //     翌月へずれると、この取り違えが残りうる。引落日を設定すれば判定に乗る。
+    if (!cardPaymentDays.containsKey(label) && loanForBankBillingName(label) == null) {
+      return (month: dateMonth, status: BillMonthStatus.noSetting);
+    }
+    final day = DateTime(date.year, date.month, date.day);
+    final prev = DateTime(date.year, date.month - 1);
+    final candidates = [
+      for (final m in [prev, dateMonth])
+        if (_expectedDrawDate(label, m) == day) m,
+    ];
+    if (candidates.length == 1) return (month: candidates.single, status: BillMonthStatus.matched);
+    return (month: dateMonth, status: BillMonthStatus.unresolved);
+  }
+
+  /// 銀行確定・請求予定の明細が何月の請求か（とその決まり方）
+  ({DateTime month, BillMonthStatus status}) billMonthOf(Payment p) =>
+      _billMonthOf(p.cardName, p.paymentDate, key: billRecordKey(p));
+
+  bool _isBillOf(Payment p, DateTime billMonth) {
+    final m = billMonthOf(p).month;
+    return m.year == billMonth.year && m.month == billMonth.month;
+  }
+
+  /// 請求の月の候補（日付の前月・日付の月）と、今の設定から計算した各月の引落日（選ぶ画面で見せる）
+  List<({DateTime month, DateTime expectedDate})> billMonthCandidatesOf(Payment p) => [
+        for (final m in [
+          DateTime(p.paymentDate.year, p.paymentDate.month - 1),
+          DateTime(p.paymentDate.year, p.paymentDate.month),
+        ])
+          (month: m, expectedDate: _expectedDrawDate(p.cardName, m)),
+      ];
+
+  /// 請求の月を利用者が選ぶ（判定できない銀行確定のため）。null で選択を取り消す。
+  void setBankBillMonth(Payment p, DateTime? billMonth) {
+    final key = billRecordKey(p);
+    if (billMonth == null) {
+      bankBillMonths.remove(key);
+    } else {
+      bankBillMonths[key] = DateFormat('yyyy-MM').format(billMonth);
+    }
+    saveData();
+    notifyListeners();
+  }
+
+  /// 請求の月を判定できない銀行確定（利用者が選んでいないもの）
+  List<Payment> get unresolvedBankBills => [
+        for (final p in payments)
+          if (p.source == PaymentSource.bank && !p.infoOnly &&
+              billMonthOf(p).status == BillMonthStatus.unresolved)
+            p,
+      ];
+
+  // 💡 判定できない銀行確定が影響しうる「カード × 請求の月」（日付の月とその前月）
+  Set<String> get _billsNeedingReview => {
+        for (final p in unresolvedBankBills) ...{
+          '${p.cardName}|${_ym(DateTime(p.paymentDate.year, p.paymentDate.month))}',
+          '${p.cardName}|${_ym(DateTime(p.paymentDate.year, p.paymentDate.month - 1))}',
+        },
+      };
+
   bool _hasLoanBankBill(Loan loan, DateTime payMonth,
       {DateTime? onDate, int minimumAmount = 0}) => payments.any((p) =>
       p.source == PaymentSource.bank && !p.infoOnly &&
-      p.paymentDate.year == payMonth.year && p.paymentDate.month == payMonth.month &&
+      _isBillOf(p, payMonth) &&
       p.amount >= minimumAmount &&
       (onDate == null || (p.paymentDate.year == onDate.year &&
           p.paymentDate.month == onDate.month && p.paymentDate.day == onDate.day)) &&
@@ -1280,12 +1383,16 @@ class AppState extends ChangeNotifier {
         p.source != PaymentSource.manual && !replace(p)).toList();
 
     // 銀行確定があるカード月（請求予定を抑制）
+    // 💡 「カード|請求の月」。日付の月ではなく請求の月で比べる（休みで翌月にずれた引落の
+    //   銀行確定が、翌月の別の請求予定を消さないように）。
+    String billKeyOf(String card, DateTime date, String sourceId) =>
+        '$card|${_ym(_billMonthOf(card, date, key: sourceId.isEmpty ? null : sourceId).month)}';
     final bankKeys = <String>{
       for (final p in retained.where((p) => p.source == PaymentSource.bank))
-        '${resolveCardName(p.cardName)}|${_ym(p.paymentDate)}',
+        '${resolveCardName(p.cardName)}|${_ym(billMonthOf(p).month)}',
     };
     for (final it in items.where((e) => e.source == PaymentSource.bank)) {
-      bankKeys.add('${it.cardName}|${_ym(it.date)}');
+      bankKeys.add(billKeyOf(it.cardName, it.date, it.sourceId));
     }
 
     // 望ましい自動集合を構築（重複・変換済み・銀行に上書きされた予測を除外）
@@ -1307,7 +1414,7 @@ class AppState extends ChangeNotifier {
       if (deletedDupKeys.contains(key)) continue;
       if (it.sourceId.isNotEmpty && deletedSourceIds.contains(it.sourceId)) continue;
       if (it.source == PaymentSource.billing &&
-          bankKeys.contains('${it.cardName}|${_ym(it.date)}')) {
+          bankKeys.contains(billKeyOf(it.cardName, it.date, it.sourceId))) {
         continue; // 銀行確定が優先
       }
       if (!seen.add(key)) continue; // 同内容（同時刻）は1件に統合
@@ -1344,7 +1451,8 @@ class AppState extends ChangeNotifier {
     // 💡 確認できる範囲だけ入れ替え、保持した請求予定も銀行確定があれば除く。
     payments.removeWhere((p) => replace(p) ||
         (p.source == PaymentSource.billing &&
-         bankKeys.contains('${resolveCardName(p.cardName)}|${_ym(p.paymentDate)}')));
+         bankKeys.contains(
+             '${resolveCardName(p.cardName)}|${_ym(_billMonthOf(resolveCardName(p.cardName), p.paymentDate, key: p.sourceId.isEmpty ? null : p.sourceId).month)}')));
     for (final it in desired) {
       final k = _dupKey(it.cardName, it.amount, it.date, it.source);
       final card = amazonCardOverrides[it.sourceId] ?? it.cardName;
@@ -2060,7 +2168,8 @@ class AppState extends ChangeNotifier {
     final bankDone = <String>{}; // 「カード|yyyy-MM」= 事前お知らせが来ている
     for (final p in payments) {
       if (p.source != PaymentSource.bank) continue;
-      bankDone.add('${p.cardName}|${DateFormat('yyyy-MM').format(p.paymentDate)}');
+      // 💡 請求の月で記録する（休みで翌月にずれた引落の確定が、翌月の別の請求を隠さないように）
+      bankDone.add('${p.cardName}|${DateFormat('yyyy-MM').format(billMonthOf(p).month)}');
       if (!inWindow(p.paymentDate)) continue;
       final id = 'bank:${p.sourceId.isNotEmpty ? p.sourceId : _dupKey(p.cardName, p.amount, p.paymentDate, p.source)}';
       if (handledDrawIds.contains(id)) continue;
@@ -2078,7 +2187,7 @@ class AppState extends ChangeNotifier {
         final m = DateTime(now.year, now.month - back); // 請求の月
         final date = cardDrawDateOf(card, m); // 土日祝・年末年始は翌営業日
         if (!inWindow(date)) continue;
-        final ym = DateFormat('yyyy-MM').format(date);
+        final ym = DateFormat('yyyy-MM').format(m); // 請求の月
         if (bankDone.contains('$card|$ym')) continue; // 事前お知らせ優先
         final amount = cardBillAmountOf(card, m);
         if (amount <= 0) continue;
@@ -2088,7 +2197,7 @@ class AppState extends ChangeNotifier {
         //     ここでは使わない（使うと翌月の正当な請求まで処理済みに見える）。そのため、ずれた引落が
         //     一度だけ再び出ることがあるが、「入力した残高に含まれている可能性」が表示され、
         //     基本の操作は「残高はそのまま確認」なので二重には引かれにくい。
-        final id = 'card:$card:${DateFormat('yyyy-MM').format(m)}';
+        final id = 'card:$card:$ym';
         if (handledDrawIds.contains(id)) continue;
         out.add((id: id, label: '$card（予定）', amount: amount, date: date));
       }
@@ -2163,6 +2272,20 @@ class AppState extends ChangeNotifier {
         date: e.date,
         amount: e.income.amount,
         planned: e,
+      ));
+    }
+    // 💡 請求の月を判定できない銀行確定（直近62日）。利用者が選ぶまで、影響する予想は「要確認」
+    final recentFrom = DateTime(clockNow().year, clockNow().month, clockNow().day)
+        .subtract(const Duration(days: 62));
+    for (final p in unresolvedBankBills) {
+      if (p.paymentDate.isBefore(recentFrom)) continue;
+      out.add(HomeNotice(
+        kind: HomeNoticeKind.bankBillMonthUnknown,
+        title: 'どの月の請求か確認してください：${p.cardName}',
+        detail: '${p.paymentDate.month}/${p.paymentDate.day} の引落確定（設定の引落日と合いません）',
+        date: p.paymentDate,
+        amount: p.amount,
+        bankRecord: p,
       ));
     }
     final noCard = installmentsWithoutCard.where((i) => remainingMonthsOf(i) > 0);
@@ -2939,10 +3062,7 @@ class AppState extends ChangeNotifier {
   //   ＝翌月(M+1)に引き落とされる bank 明細が存在するか。
   bool isExpenseConfirmedByBank(DateTime month) {
     final nextMonth = DateTime(month.year, month.month + 1);
-    return payments.any((p) =>
-        p.source == PaymentSource.bank &&
-        p.paymentDate.year == nextMonth.year &&
-        p.paymentDate.month == nextMonth.month);
+    return payments.any((p) => p.source == PaymentSource.bank && _isBillOf(p, nextMonth));
   }
 
   // 💡 その月（利用月）の請求が銀行の引落確定で決まっているカードと、その確定額。
@@ -2950,9 +3070,7 @@ class AppState extends ChangeNotifier {
     final nextMonth = DateTime(month.year, month.month + 1);
     final bank = <String, int>{};
     for (final p in payments) {
-      if (p.source == PaymentSource.bank &&
-          p.paymentDate.year == nextMonth.year &&
-          p.paymentDate.month == nextMonth.month) {
+      if (p.source == PaymentSource.bank && _isBillOf(p, nextMonth)) {
         bank[p.cardName] = (bank[p.cardName] ?? 0) + p.amount;
       }
     }
@@ -2989,7 +3107,7 @@ class AppState extends ChangeNotifier {
     // ① 翌月に引き落とされる銀行確定（＝この月の利用分）
     final bank = <String, int>{};
     for (final p in payments) {
-      if (p.source == PaymentSource.bank && sameYm(p.paymentDate, nextMonth)) {
+      if (p.source == PaymentSource.bank && _isBillOf(p, nextMonth)) {
         bank[p.cardName] = (bank[p.cardName] ?? 0) + p.amount;
       }
     }
@@ -3294,11 +3412,11 @@ class AppState extends ChangeNotifier {
       final cardHasBank = payments.any((p) =>
           p.cardName == label &&
           p.source == PaymentSource.bank &&
-          sameYm(p.paymentDate, nextMonth));
+          _isBillOf(p, nextMonth));
       for (final p in payments) {
         if (p.cardName != label) continue;
         final belongs = cardHasBank
-            ? (p.source == PaymentSource.bank && sameYm(p.paymentDate, nextMonth))
+            ? (p.source == PaymentSource.bank && _isBillOf(p, nextMonth))
             : (p.source != PaymentSource.bank && sameYm(p.paymentDate, month));
         if (!belongs) continue;
         if (p.infoOnly) continue; // 記録のみ（他カードで計上済み）は合計に入っていない
@@ -3764,7 +3882,7 @@ class AppState extends ChangeNotifier {
     DateTime? bankDate;
     for (final p in payments) {
       if (p.source != PaymentSource.bank || p.cardName != label) continue;
-      if (p.paymentDate.year != payMonth.year || p.paymentDate.month != payMonth.month) continue;
+      if (!_isBillOf(p, payMonth)) continue; // 請求の月で選ぶ（日付は実際の引落日のまま）
       final d = DateTime(p.paymentDate.year, p.paymentDate.month, p.paymentDate.day);
       if (bankDate == null || d.isAfter(bankDate)) bankDate = d;
     }
@@ -3933,6 +4051,7 @@ class AppState extends ChangeNotifier {
                 amount: l.amount,
                 date: l.date,
                 certainty: l.certainty,
+                needsReview: l.needsReview,
               )
             : l);
       }
@@ -4041,6 +4160,7 @@ class AppState extends ChangeNotifier {
     }
 
     // ── 引き落とし（drawBreakdownOf がゲート済み。日付と確からしさを付ける） ──
+    final review = _billsNeedingReview;
     for (final e in drawBreakdownOf(m)) {
       final group = drawLabelOf(e.label, m);
       if (e.label == '定期支払い') {
@@ -4064,6 +4184,8 @@ class AppState extends ChangeNotifier {
         amount: -e.amount,
         date: drawDateOf(e.label, m), // 判定と同じ日付に置く
         certainty: _drawCertainty(e.label, m),
+        // 💡 請求の月を判定できない銀行確定があるカードは、その前後の請求を「要確認」にする
+        needsReview: review.contains('${e.label}|${_ym(m)}'),
       ));
     }
 
@@ -4317,9 +4439,7 @@ class AppState extends ChangeNotifier {
     for (final p in payments) {
       if (p.source != PaymentSource.bank) continue;
       if (p.cardName != cardName) continue;
-      if (p.paymentDate.year == payMonth.year && p.paymentDate.month == payMonth.month) {
-        bank += p.amount;
-      }
+      if (_isBillOf(p, payMonth)) bank += p.amount;
     }
     if (bank > 0) return bank;
 
@@ -4376,6 +4496,7 @@ class AppState extends ChangeNotifier {
       'paymentNotes': paymentNotes,
       'amazonCardOverrides': amazonCardOverrides,
       'cardAliases': cardAliases,
+      'bankBillMonths': bankBillMonths,
       // 💡 カレンダーのイベントIDは同じGoogleアカウントで共通。別の端末で同じ給料日を
       //   二重に作らないよう、同期データにも入れる。
       'specialCalendarIds': specialCalendarIds,
@@ -4747,6 +4868,10 @@ class AppState extends ChangeNotifier {
     (map['cardAliases'] as Map?)?.forEach((k, v) {
       if (v is String) cardAliases['$k'] = v;
     });
+    bankBillMonths.clear();
+    (map['bankBillMonths'] as Map?)?.forEach((k, v) {
+      if (v is String) bankBillMonths['$k'] = v;
+    });
     specialCalendarIds.clear();
     (map['specialCalendarIds'] as Map?)?.forEach((k, v) {
       if (v is String) specialCalendarIds['$k'] = v;
@@ -4870,6 +4995,7 @@ class AppState extends ChangeNotifier {
     await prefs.setString('saved_payment_notes', jsonEncode(paymentNotes));
     await prefs.setString('saved_amazon_overrides', jsonEncode(amazonCardOverrides));
     await prefs.setString('saved_card_aliases', jsonEncode(cardAliases));
+    await prefs.setString('saved_bank_bill_months', jsonEncode(bankBillMonths));
     await prefs.setString('saved_special_calendar_ids', jsonEncode(specialCalendarIds));
     await prefs.setString('saved_special_calendar_sigs', jsonEncode(specialCalendarSigs));
     await prefs.setString('saved_actual_salaries', jsonEncode(actualSalaries));
@@ -5174,6 +5300,12 @@ class AppState extends ChangeNotifier {
           for (final e in (jsonDecode(cpdStr) as Map<String, dynamic>).entries)
             if (e.value is int) e.key: e.value as int
         });
+    }
+    final bbmStr = prefs.getString('saved_bank_bill_months');
+    if (bbmStr != null) {
+      (jsonDecode(bbmStr) as Map<String, dynamic>).forEach((k, v) {
+        if (v is String) bankBillMonths[k] = v;
+      });
     }
     final caStr = prefs.getString('saved_card_aliases');
     if (caStr != null) {

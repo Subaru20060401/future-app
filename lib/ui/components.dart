@@ -67,6 +67,25 @@ class CertaintyBadge extends StatelessWidget {
   }
 }
 
+/// 要確認（請求の月を判定できない銀行確定が関わる行など）。文字で示す。
+class ReviewBadge extends StatelessWidget {
+  const ReviewBadge({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+      decoration: BoxDecoration(
+        color: AppColors.cautionBg,
+        border: Border.all(color: AppColors.caution),
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: const Text('要確認',
+          style: TextStyle(fontSize: 12, color: AppColors.caution, fontWeight: FontWeight.w600)),
+    );
+  }
+}
+
 enum BannerKind { info, caution, error }
 
 /// 状態と、次にすること。アイコン＋文で示す（色だけにしない）。
