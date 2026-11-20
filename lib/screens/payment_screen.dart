@@ -11,6 +11,7 @@ import '../widgets/payment_row.dart';
 import '../money_format.dart';
 import '../ui/tokens.dart';
 import '../widgets/billing_link_sheet.dart';
+import '../widgets/month_picker_field.dart';
 
 class PaymentScreen extends StatefulWidget {
   const PaymentScreen({super.key});
@@ -1265,7 +1266,8 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
                   child: ListTile(
                     leading: const Icon(Icons.subscriptions, color: Colors.purple),
                     title: Text(s.title),
-                    subtitle: Text('毎月${s.payDay}日 ・ ${s.methodLabel}'),
+                    subtitle: Text('毎月${s.payDay}日 ・ ${s.methodLabel}'
+                        '${s.startMonth != null ? ' ・ ${yearMonthLabel(s.startMonth)}から' : ''}'),
                     trailing: Text(yen(s.amount), style: const TextStyle(fontWeight: FontWeight.bold)),
                     onTap: () => _editSubscriptionMethod(appState, s),
                   ),
@@ -1280,6 +1282,8 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
     final amountCtrl = TextEditingController();
     final dayCtrl = TextEditingController(text: '1');
     String method = ''; // '' = 口座振替
+    final now = appState.clockNow();
+    DateTime? startMonth = DateTime(now.year, now.month); // 💡 新規は今月を初期値にする
     showDialog(
       context: context,
       builder: (context) => StatefulBuilder(
@@ -1322,6 +1326,14 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
                   _methodHint(method),
                   style: const TextStyle(fontSize: 12, color: AppColors.subtle),
                 ),
+                const SizedBox(height: 12),
+                MonthPickerField(
+                  label: '開始月（最初に使う月）',
+                  value: startMonth,
+                  fallback: DateTime(now.year, now.month),
+                  onChanged: (m) => setLocal(() => startMonth = m),
+                ),
+                _firstDrawHint(appState, method, startMonth),
               ],
             ),
           ),
@@ -1334,6 +1346,7 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
                   amount: int.tryParse(amountCtrl.text) ?? 0,
                   payDay: int.tryParse(dayCtrl.text) ?? 1,
                   method: method,
+                  startMonth: startMonth,
                 );
                 Navigator.pop(context);
               },
@@ -1354,18 +1367,35 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
     return 'カードの請求に含まれます（口座からは別途引きません）';
   }
 
-  // 既存の定期支払いの支払い方法を変更
+  // 最初に口座から落ちる月の説明（開始月と支払い方法から。計算は AppState）
+  Widget _firstDrawHint(AppState appState, String method, DateTime? startMonth) {
+    final first = appState.subscriptionFirstDrawMonth(method, startMonth);
+    if (first == null) return const SizedBox.shrink();
+    final isCard = method.isNotEmpty && method != kManualPayMethod;
+    return Text(
+      '${yearMonthLabel(startMonth)}の利用から支出に載せます。'
+      '口座から最初に落ちるのは${yearMonthLabel(first)}${isCard ? '（カードの引き落とし日）' : ''}です',
+      style: const TextStyle(fontSize: 12, color: AppColors.subtle),
+    );
+  }
+
+  // 既存の定期支払いの支払い方法・開始月を変更
   void _editSubscriptionMethod(AppState appState, Subscription sub) {
     String method = sub.method;
+    DateTime? startMonth = sub.startMonth;
+    final now = appState.clockNow();
     showDialog(
       context: context,
       builder: (context) => StatefulBuilder(
         builder: (context, setLocal) => AlertDialog(
-          title: Text('${sub.title} の支払い方法'),
-          content: Column(
+          title: Text('${sub.title} の設定'),
+          content: SingleChildScrollView(
+            child: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              const Text('支払い方法', style: TextStyle(fontSize: 12, color: AppColors.subtle)),
+              const SizedBox(height: 4),
               Wrap(
                 spacing: 6,
                 runSpacing: 4,
@@ -1392,13 +1422,24 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
                 _methodHint(method),
                 style: const TextStyle(fontSize: 12, color: AppColors.subtle),
               ),
+              const SizedBox(height: 12),
+              MonthPickerField(
+                label: '開始月（最初に使う月）',
+                value: startMonth,
+                fallback: DateTime(now.year, now.month),
+                allowUnset: true,
+                unsetHint: '未設定です。これまでどおり、どの月の支出にも載せます',
+                onChanged: (m) => setLocal(() => startMonth = m),
+              ),
+              _firstDrawHint(appState, method, startMonth),
             ],
+            ),
           ),
           actions: [
             TextButton(onPressed: () => Navigator.pop(context), child: const Text('キャンセル')),
             ElevatedButton(
               onPressed: () {
-                appState.setSubscriptionMethod(sub.id, method);
+                appState.editSubscription(sub.id, method: method, startMonth: startMonth);
                 Navigator.pop(context);
               },
               child: const Text('保存'),

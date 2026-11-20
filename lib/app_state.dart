@@ -1793,17 +1793,43 @@ class AppState extends ChangeNotifier {
   }
 
   // ───── 定期支払い ─────
+  // 💡 startMonth: 最初の利用月。登録画面は今月を初期値にする（null＝未設定は以前の版のデータ用）
   void addSubscription({
     required String title,
     required int amount,
     required int payDay,
     String method = '',
+    DateTime? startMonth,
   }) {
     _ensureEditable();
     subscriptions.add(Subscription(
-        id: _id(), title: title, amount: amount, payDay: payDay, method: method));
+        id: _id(), title: title, amount: amount, payDay: payDay, method: method, startMonth: startMonth));
     saveData();
     notifyListeners();
+  }
+
+  // 定期支払いの開始月を変える（null で未設定に戻す＝どの月にも載せる）
+  void setSubscriptionStartMonth(String id, DateTime? startMonth) =>
+      editSubscription(id, method: subscriptions.firstWhere((e) => e.id == id).method, startMonth: startMonth);
+
+  // 定期支払いの編集画面の保存（支払い方法と開始月を 1 回で保存する）
+  void editSubscription(String id, {required String method, required DateTime? startMonth}) {
+    _ensureEditable();
+    final i = subscriptions.indexWhere((e) => e.id == id);
+    if (i < 0) return;
+    subscriptions[i].method = method;
+    subscriptions[i].startMonth =
+        startMonth == null ? null : DateTime(startMonth.year, startMonth.month);
+    saveData();
+    notifyListeners();
+  }
+
+  /// 開始月から、最初に口座から落ちる月（画面の説明用）。
+  /// 口座振替・手動払いは開始月そのもの、カード払いは翌月（カードの請求として落ちる）。
+  DateTime? subscriptionFirstDrawMonth(String method, DateTime? startMonth) {
+    if (startMonth == null) return null;
+    final card = method.isNotEmpty && method != kManualPayMethod;
+    return DateTime(startMonth.year, startMonth.month + (card ? 1 : 0));
   }
 
   // 定期支払いの支払い方法を変更（口座振替 / カード名）
@@ -2402,6 +2428,8 @@ class AppState extends ChangeNotifier {
     for (final sub in subscriptions.where((e) => !e.isCardPayment)) {
       for (var back = 0; back < 3; back++) {
         final m = DateTime(now.year, now.month - back);
+        // 💡 開始月より前の月は払っていない（口座振替・手動払いは、利用した月に払う）
+        if (!sub.isUsedIn(m)) continue;
         // 💡 予想（subscriptionDrawsIn）と同じく、休みなら翌営業日（以前はそのままの日付だった）
         final date = drawDateInMonth(sub.payDay, m);
         if (!inWindow(date)) continue;
@@ -3567,7 +3595,8 @@ class AppState extends ChangeNotifier {
     bool sameYm(DateTime d, DateTime m) => d.year == m.year && d.month == m.month;
 
     if (label == '定期支払い') {
-      for (final s in subscriptions) {
+      // 💡 合計（subscriptionTotalOf）と同じ判定で並べる（開始月・銀行確定済みのカード）
+      for (final s in subscriptionsUsedIn(month)) {
         out.add((title: s.title, subtitle: '毎月${s.payDay}日', amount: s.amount));
       }
     } else if (label == '分割払い（カード未設定）') {
@@ -3802,13 +3831,19 @@ class AppState extends ChangeNotifier {
   // 💡 指定月の支出に載せる定期支払いの合計。
   //   カード払いの定期は、その月が銀行確定していればカードの引き落とし額に既に含まれるので除く
   //   （分割払いと同じ二重計上対策）。口座振替の定期は常に計上する。
-  int subscriptionTotalOf(DateTime month) {
+  //   開始月より前の月には載せない（開始月が未設定なら、従来どおりどの月にも載せる）。
+  int subscriptionTotalOf(DateTime month) =>
+      subscriptionsUsedIn(month).fold(0, (sum, s) => sum + s.amount);
+
+  // 指定月の支出（利用月）に載せる定期支払い。subscriptionTotalOf と支出の明細で同じものを使う。
+  List<Subscription> subscriptionsUsedIn(DateTime month) {
     // ⚠️ 判定は定期ごとの支払いカード単位。どれか1枚の確定で全部止めると、
     //   まだ確定していないカードで払っている定期まで予想から消える。
     final bank = _bankConfirmedTotalsOf(month);
     return subscriptions
+        .where((s) => s.isUsedIn(month))
         .where((s) => !s.isCardPayment || !_isConfirmedIn(s.method, bank))
-        .fold(0, (sum, s) => sum + s.amount);
+        .toList();
   }
 
   // ───── ローン ─────
@@ -4147,16 +4182,20 @@ class AppState extends ChangeNotifier {
     for (final e in expenseBreakdownOf(useMonth)) {
       if (byPeriod.contains(e.label)) continue; // 締め期間で集計済み
       if (_excludedFromDraw(e.label)) continue;
-      if (e.label == '定期支払い') {
-        // ⚠️ 定期はまとめて1行だが、支払日は1件ずつ違う。まとめた行の日付（いちばん早い支払日）で
-        //   判断すると、早い定期が過ぎただけで、まだ落ちていない月末の定期まで消えていた。
-        //   1件ずつの引き落とし日で、残高を書き直した日より後のものだけ足す。
-        final amount = subscriptionDrawsIn(payMonth).fold(0, (s, d) => s + d.amount);
-        if (amount > 0) out.add((label: e.label, amount: amount, colorValue: e.colorValue));
-        continue;
-      }
+      if (e.label == '定期支払い') continue; // 下で 1 件ずつ足す
       if (!afterEdit(e.label)) continue;
       out.add(e);
+    }
+    // ⚠️ 定期はまとめて1行だが、支払日は1件ずつ違う。まとめた行の日付（いちばん早い支払日）で
+    //   判断すると、早い定期が過ぎただけで、まだ落ちていない月末の定期まで消えていた。
+    //   1件ずつの引き落とし日で、残高を書き直した日より後のものだけ足す。
+    // ⚠️ 前月の支出に「定期支払い」が有るかでは決めない。口座振替の定期は利用した月に落ちるので、
+    //   開始月（その月が最初の利用）の引き落としが、前月に定期が無いせいで消えていた。
+    if (!_excludedFromDraw('定期支払い')) {
+      final subAmount = subscriptionDrawsIn(payMonth).fold(0, (s, d) => s + d.amount);
+      if (subAmount > 0) {
+        out.add((label: '定期支払い', amount: subAmount, colorValue: Colors.purple.toARGB32()));
+      }
     }
 
     out.sort((a, b) => b.amount.compareTo(a.amount));
@@ -4182,13 +4221,15 @@ class AppState extends ChangeNotifier {
   //   ・口座振替・手動払い … 定期の支払日（休みなら翌営業日）
   //   ・カード払い … そのカードの引き落とし日（カードの請求として落ちるため）
   //   どれを含めるかは subscriptionTotalOf と同じ（カード払いで銀行確定済みのカードは、
-  //   確定額に含まれるので除く）。残高を書き直した日より前に落ちたものも除く（二重計上ゲート）。
+  //   確定額に含まれるので除く。開始月より前の利用は載せない）。残高を書き直した日より前に落ちたものも除く（二重計上ゲート）。
   List<({String title, int amount, DateTime date})> subscriptionDrawsIn(DateTime payMonth) {
     final useMonth = DateTime(payMonth.year, payMonth.month - 1);
     final bank = _bankConfirmedTotalsOf(useMonth);
     final out = <({String title, int amount, DateTime date})>[];
     for (final s in subscriptions) {
       if (s.isCardPayment && _isConfirmedIn(s.method, bank)) continue;
+      // 💡 開始月＝最初の利用月。口座振替・手動払いは利用した月に、カード払いは翌月に口座から落ちる
+      if (!s.isUsedIn(s.isCardPayment ? useMonth : payMonth)) continue;
       final date = s.isCardPayment
           ? cardDrawDateOf(s.method, payMonth)
           : drawDateInMonth(s.payDay, payMonth);
