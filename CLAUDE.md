@@ -38,6 +38,8 @@ iOS のビルドは macOS + Xcode でしかできない。Windows では Web と
   - ⚠️ この 2 つは AppState・画面・外部サービス・Flutter を import しない。`DateTime.now()` も読まない
     （`test/architecture_test.dart` で固定）
 - 「今日」は `AppState.clockNow()`。計算・判定で `DateTime.now()` を直接読まない（テストで時刻を固定するため）
+- カードのアイコンは `lib/ui/card_icon.dart` の `CardIcon` 1 つ（自分の画像 `cardIcons`＝`saved_card_icons`、無ければ既定のマーク）。
+  画像は端末で 96×96 の PNG に縮小して保存（`card_icon_image.dart`）。⚠️ 公式ロゴは同梱しない（配布できる条件の素材が無い）
 - 見た目の決まりと共通部品は `lib/ui/`（`tokens.dart`・`components.dart`）。色だけで区別しない
   （金額は +/− と言葉、状態は「確定」「見込み」「要確認」の文字、カレンダーの印は形も変える）。
   金額の表記は `money_format.dart` の `yen()` 1 か所（¥85,000 ／ −¥5,000 ／ +¥5,000）
@@ -67,6 +69,11 @@ iOS のビルドは macOS + Xcode でしかできない。Windows では Web と
   設定の引落日から一意に決まらなければ「判定できない」として確認待ちで選んでもらい、それまで予想に「要確認」を付ける。
   `PaymentSource.bank` を月で絞るときは、日付の月ではなく必ずこれを使う
 - カレンダーの引き落としも予想と同じ額・日付（`cardPaymentSummaryOnDay`）。ただし予想のゲートは使わない
+- **財布の現金は口座の予想に入れない**（`forecastStart` は口座の残高だけ）。財布は記録・表示だけ。
+  ATM の引き出しは口座から引いて財布に足す（`movedToWallet`。以前の版の引き出しは動かしていないので戻さない）
+- **定期支払いの開始月**（`Subscription.startMonth`＝最初の利用月。null は以前のデータで、どの月にも載せる）。
+  判定は `isUsedIn` 1 か所。口座振替・手動払いは利用した月に、カード払いは翌月に口座から落ちる。
+  支出・予想・確認待ちで同じ判定を使う（カレンダーは定期を出していない）
 - 引き落としは「**n 月の引き落とし＝n-1 月の利用ぶん**」。
   ただし頭金・予定支出など **一度きりの出費は月ズレさせず、日付どおりの月に引く**（`oneTimeExpensesIn`）
 - 締め日が月末以外のカードは `cardClosingPeriodOf` で締め期間ごとに集計する
