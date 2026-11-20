@@ -31,7 +31,8 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
   late final TabController _tab = TabController(length: _paymentTabs.length, vsync: this);
   String? _filterCard; // カード絞り込み（nullは全件）
   late DateTime _filterMonth = DateTime(DateTime.now().year, DateTime.now().month); // 初期=今月
-  _SortMode _sortMode = _SortMode.dateAsc; // 並べ替え
+  // 💡 カード明細は最初から日付が新しい順（最近の利用を上に）。古い順・金額順へは手で切り替えられる
+  _SortMode _sortMode = _SortMode.dateDesc; // 並べ替え
   bool _showBank = false; // 銀行確定(過去)を表示するか（既定は非表示）
   String _search = ''; // 文字・金額での検索
   final _searchCtrl = TextEditingController();
