@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 import 'package:intl/intl.dart';
 import '../app_state.dart';
 import '../money_format.dart';
+import '../ui/tokens.dart';
 
 // 💡 口座残高に反映した「入金・引き落とし」の履歴。
 //   いつ・何を・いくら反映したかを確認でき、間違えたら取り消せる。
@@ -87,7 +88,7 @@ class _BalanceHistoryScreenState extends State<BalanceHistoryScreen> {
             child: list.isEmpty
                 ? const Center(
                     child: Text('履歴はまだありません',
-                        style: TextStyle(color: Colors.grey)))
+                        style: TextStyle(color: AppColors.subtle)))
                 : ListView.builder(
                     itemCount: list.length,
                     itemBuilder: (context, i) {
@@ -199,7 +200,7 @@ class _BalanceHistoryScreenState extends State<BalanceHistoryScreen> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 const Text('すでに反映済みの入出金を、記録としてだけ残します。\n残高は変わりません。',
-                    style: TextStyle(fontSize: 12, color: Colors.grey)),
+                    style: TextStyle(fontSize: 12, color: AppColors.subtle)),
                 const SizedBox(height: 12),
                 Row(
                   children: [
@@ -295,7 +296,7 @@ class _BalanceHistoryScreenState extends State<BalanceHistoryScreen> {
                 style: const TextStyle(fontSize: 12, color: Colors.black54)),
             const SizedBox(height: 4),
             const Text('元の通知は未処理に戻るので、入力し直せます。',
-                style: TextStyle(fontSize: 12, color: Colors.grey)),
+                style: TextStyle(fontSize: 12, color: AppColors.subtle)),
           ],
         ),
         actions: [

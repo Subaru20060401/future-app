@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 import '../app_state.dart';
 import '../widgets/legend_dot.dart';
 import '../money_format.dart';
+import '../ui/tokens.dart';
 
 // 💡 月々の収入(給与)と支出を棒グラフで振り返る。横スクロールで過去に遡れる。
 //   支出は「利用月の支出」（AppState.expenseBreakdownOf。予想と同じ規則・残高のゲートは無し）。
@@ -66,7 +67,7 @@ class HistoryScreen extends StatelessWidget {
               spacing: 12,
               runSpacing: 4,
               children: [
-                const LegendDot(color: Colors.green, label: '収入（給与の見込み）'),
+                const LegendDot(color: AppColors.income, label: '収入（給与の見込み・左の棒）'),
                 for (final e in legend.entries) LegendDot(color: e.value, label: e.key),
               ],
             ),
@@ -85,7 +86,7 @@ class HistoryScreen extends StatelessWidget {
                       touchTooltipData: BarTouchTooltipData(
                         getTooltipItem: (group, a, rod, b) {
                           return BarTooltipItem(
-                            '¥${yenNum(rod.toY.toInt())}',
+                            yen(rod.toY.toInt()),
                             const TextStyle(color: Colors.white, fontSize: 11),
                           );
                         },
@@ -117,11 +118,11 @@ class HistoryScreen extends StatelessWidget {
                     barGroups: [
                       for (int i = 0; i < months.length; i++)
                         BarChartGroupData(x: i, barsSpace: 2, barRods: [
-                          BarChartRodData(toY: incomes[i].toDouble(), color: Colors.green, width: 10),
+                          BarChartRodData(toY: incomes[i].toDouble(), color: AppColors.income, width: 10),
                           BarChartRodData(
                             toY: expenses[i].toDouble(),
                             width: 10,
-                            color: Colors.red,
+                            color: AppColors.expense,
                             rodStackItems: stackOf(i), // 内訳の色で積み上げ
                           ),
                         ]),
@@ -145,17 +146,17 @@ class HistoryScreen extends StatelessWidget {
                       children: [
                         Text('$y年', style: const TextStyle(fontWeight: FontWeight.bold)),
                         const Spacer(),
-                        Text('年収 ¥${yenNum(appState.salaryOfYear(y))}',
-                            style: const TextStyle(color: Colors.green)),
+                        Text('年収 ${yen(appState.salaryOfYear(y))}',
+                            style: const TextStyle(color: AppColors.income)),
                         const SizedBox(width: 12),
                         Column(
                           crossAxisAlignment: CrossAxisAlignment.end,
                           children: [
-                            Text('年間支出 ¥${yenNum(ex.total)}',
-                                style: const TextStyle(color: Colors.red)),
+                            Text('年間支出 ${yen(ex.total)}',
+                                style: const TextStyle(color: AppColors.expense)),
                             // 💡 定期・分割・ローンは今の設定から計算したもの（明細の記録ではない）
                             if (ex.fromSettings > 0)
-                              Text('うち設定から計算 ¥${yenNum(ex.fromSettings)}',
+                              Text('うち設定から計算 ${yen(ex.fromSettings)}',
                                   style: const TextStyle(fontSize: 12, color: Colors.black54)),
                           ],
                         ),

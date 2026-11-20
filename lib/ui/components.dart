@@ -29,14 +29,13 @@ class MoneyText extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final sign = !signed ? (amount < 0 ? '−' : '') : (amount > 0 ? '+' : (amount < 0 ? '−' : '±'));
-    final text = '$sign¥${yenNum(amount.abs())}';
+    final text = yen(amount, signed: signed);
     final c = color ??
         (signed
             ? (amount > 0 ? AppColors.income : (amount < 0 ? AppColors.expense : null))
             : (amount < 0 ? AppColors.warning : null));
     // 💡 読み上げでは「マイナス」「プラス」を言葉で伝える
-    final spoken = '${amount < 0 ? 'マイナス' : (signed && amount > 0 ? 'プラス' : '')}${yenNum(amount.abs())}円';
+    final spoken = yenSpoken(amount, signed: signed);
     return Semantics(
       label: spoken,
       excludeSemantics: true,

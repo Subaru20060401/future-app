@@ -10,12 +10,10 @@ import 'package:intl/intl.dart';
 
 import '../app_state.dart';
 import '../card_styles.dart';
+import '../money_format.dart';
 
-final _yen = NumberFormat.decimalPattern('ja');
-
-// 金額の表記をそろえる（桁区切り・マイナス）
-String formatYen(int amount) =>
-    amount < 0 ? '−¥${_yen.format(-amount)}' : '¥${_yen.format(amount)}';
+// 金額の表記をそろえる（桁区切り・マイナス）。表記は money_format.dart の yen で 1 か所
+String formatYen(int amount) => yen(amount);
 
 String paymentSourceLabel(PaymentSource s) => switch (s) {
       PaymentSource.bank => '引落確定',

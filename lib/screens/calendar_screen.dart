@@ -8,6 +8,7 @@ import 'event_edit_screen.dart';
 import '../widgets/app_sheet.dart';
 import '../widgets/add_entry_sheets.dart';
 import '../money_format.dart';
+import '../ui/tokens.dart';
 
 class CalendarScreen extends StatefulWidget {
   const CalendarScreen({super.key});
@@ -37,7 +38,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
               subtitle: Text('締日: ${e.workplace.isEndOfMonthClosing ? '月末' : '${e.workplace.closingDay}日'} / 給料日: ${e.workplace.paydayDay}日'),
             ),
             const Divider(),
-            _detailRow('入金予定額', '¥${yenNum(e.amount)}', Colors.green),
+            _detailRow('入金予定額', yen(e.amount), Colors.green),
             _detailRow('給料日', '${e.date.year}年${e.date.month}月${e.date.day}日', Colors.black87),
           ],
         ),
@@ -88,7 +89,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
                 children: [
                   Expanded(child: Text('💳 ${summary.cardName}',
                       style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold))),
-                  Text('-¥${yenNum(summary.amount)}',
+                  Text(yen(-(summary.amount)),
                       style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.red)),
                 ],
               ),
@@ -107,8 +108,8 @@ class _CalendarScreenState extends State<CalendarScreen> {
                       title: Text(p.note.isNotEmpty ? p.note : p.cardName,
                           style: const TextStyle(fontSize: 13)),
                       subtitle: Text('${p.paymentDate.month}/${p.paymentDate.day}',
-                          style: const TextStyle(fontSize: 11, color: Colors.black45)),
-                      trailing: Text('-¥${yenNum(p.amount)}',
+                          style: const TextStyle(fontSize: 11, color: AppColors.subtle)),
+                      trailing: Text(yen(-(p.amount)),
                           style: const TextStyle(color: Colors.red, fontSize: 13, fontWeight: FontWeight.bold)),
                     );
                   },
@@ -202,25 +203,29 @@ class _CalendarScreenState extends State<CalendarScreen> {
                 final hasPayday = appState.paydaysOnDay(day).isNotEmpty;
                 final hasPayment = appState.cardPaymentSummaryOnDay(day).isNotEmpty;
                 final hasPlanned = appState.plannedIncomesOnDay(day).isNotEmpty;
-                final dots = <Color>[
-                  if (hasShift) Colors.blueAccent,      // シフト＝青
-                  if (hasPayday || hasPlanned) const Color(0xFF2E9E5B), // 給料日・予定入金＝緑
-                  if (hasPayment) Colors.redAccent,     // 引き落とし＝赤
-                  if (hasEvent) Colors.orange,          // 予定＝オレンジ
+                // 💡 色だけで区別しないよう、種類ごとに形も変える（凡例と同じ）。読み上げでは種類を言葉で伝える
+                final marks = <({Color color, MarkShape shape, String label})>[
+                  if (hasShift) (color: Colors.blueAccent, shape: MarkShape.circle, label: 'シフト'),
+                  if (hasPayday || hasPlanned)
+                    (color: const Color(0xFF2E9E5B), shape: MarkShape.triangle, label: '給料日・入金'),
+                  if (hasPayment) (color: Colors.redAccent, shape: MarkShape.square, label: '引き落とし'),
+                  if (hasEvent) (color: Colors.orange, shape: MarkShape.diamond, label: '予定'),
                 ];
-                if (dots.isEmpty) return null;
+                if (marks.isEmpty) return null;
                 return Positioned(
                   bottom: 1,
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: dots
-                        .map((c) => Container(
-                              width: 6,
-                              height: 6,
-                              margin: const EdgeInsets.symmetric(horizontal: 0.8),
-                              decoration: BoxDecoration(color: c, shape: BoxShape.circle),
-                            ))
-                        .toList(),
+                  child: Semantics(
+                    label: '${day.month}月${day.day}日: ${marks.map((m) => m.label).join('・')}あり',
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        for (final m in marks)
+                          Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 0.8),
+                            child: Mark(color: m.color, shape: m.shape),
+                          ),
+                      ],
+                    ),
                   ),
                 );
               },
@@ -239,9 +244,11 @@ class _CalendarScreenState extends State<CalendarScreen> {
               alignment: WrapAlignment.center,
               children: const [
                 LegendDot(color: Colors.blueAccent, label: 'シフト', compact: true),
-                LegendDot(color: Color(0xFF2E9E5B), label: '給料日', compact: true),
-                LegendDot(color: Colors.redAccent, label: '引き落とし', compact: true),
-                LegendDot(color: Colors.orange, label: '予定', compact: true),
+                LegendDot(
+                    color: Color(0xFF2E9E5B), label: '給料日', compact: true, shape: MarkShape.triangle),
+                LegendDot(
+                    color: Colors.redAccent, label: '引き落とし', compact: true, shape: MarkShape.square),
+                LegendDot(color: Colors.orange, label: '予定', compact: true, shape: MarkShape.diamond),
               ],
             ),
           ),
@@ -271,7 +278,7 @@ Expanded(
                   ),
                   title: Text(e.workplace.name),
                   subtitle: const Text('給料日'),
-                  trailing: Text('¥${yenNum(e.amount)}',
+                  trailing: Text(yen(e.amount),
                       style: const TextStyle(color: Colors.green, fontWeight: FontWeight.bold)),
                   onTap: () => _showPaydayDetail(context, e, appState),
                 ),
@@ -310,11 +317,11 @@ Expanded(
                           ? '請求予定'
                           : '引き落とし日（金額はまだ未確定）'),
                   trailing: p.amount > 0
-                      ? Text('-¥${yenNum(p.amount)}',
+                      ? Text(yen(-(p.amount)),
                           style: const TextStyle(
                               color: Colors.red, fontWeight: FontWeight.bold))
                       : const Text('—',
-                          style: TextStyle(color: Colors.black38)),
+                          style: TextStyle(color: AppColors.subtle)),
                   onTap: () => _showCardPaymentDetail(context, p, _selectedDay!, appState),
                 ),
               )),
@@ -341,7 +348,7 @@ Expanded(
                     title: Text(s.workplace),
                     subtitle: Text(
                         '${TimeOfDay.fromDateTime(s.start).format(context)}〜${TimeOfDay.fromDateTime(s.end).format(context)}  (${s.workHours.toStringAsFixed(1)}h / 休憩${s.breakMinutes}分)'),
-                    trailing: Text('¥${yenNum(s.earnings)}'),
+                    trailing: Text(yen(s.earnings)),
                     onTap: () => _editShift(selectedKey, idx, s, appState),
                   ),
                 ),

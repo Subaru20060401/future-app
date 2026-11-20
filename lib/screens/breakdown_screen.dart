@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 import '../app_state.dart';
 import '../widgets/app_sheet.dart';
 import '../money_format.dart';
+import '../ui/tokens.dart';
 
 typedef BreakdownItem = ({String label, int amount, int colorValue});
 typedef DetailRow = ({String title, String subtitle, int amount});
@@ -89,8 +90,8 @@ class _BreakdownScreenState extends State<BreakdownScreen> {
             child: Column(
               children: [
                 Text(widget.totalLabel,
-                    style: const TextStyle(fontSize: 13, color: Colors.grey)),
-                Text('¥ ${yenNum(total)}',
+                    style: const TextStyle(fontSize: 13, color: AppColors.subtle)),
+                Text(yen(total),
                     style: TextStyle(
                         fontSize: 30,
                         fontWeight: FontWeight.bold,
@@ -109,7 +110,7 @@ class _BreakdownScreenState extends State<BreakdownScreen> {
               padding: EdgeInsets.symmetric(vertical: 60),
               child: Center(
                   child: Text('この月のデータはありません',
-                      style: TextStyle(color: Colors.grey))),
+                      style: TextStyle(color: AppColors.subtle))),
             )
           else ...[
             // 円グラフ（中央に年収/年支出を表示）
@@ -141,14 +142,14 @@ class _BreakdownScreenState extends State<BreakdownScreen> {
                     mainAxisSize: MainAxisSize.min,
                     children: [
                       Text(widget.centerLabel,
-                          style: const TextStyle(fontSize: 12, color: Colors.grey)),
+                          style: const TextStyle(fontSize: 12, color: AppColors.subtle)),
                       const SizedBox(height: 2),
-                      Text('¥${yenNum(widget.yearValueBuilder(appState, _month.year))}',
+                      Text(yen(widget.yearValueBuilder(appState, _month.year)),
                           style: TextStyle(
                               fontSize: 18,
                               fontWeight: FontWeight.bold,
                               color: widget.accent)),
-                      Text('${_month.year}年', style: const TextStyle(fontSize: 12, color: Colors.grey)),
+                      Text('${_month.year}年', style: const TextStyle(fontSize: 12, color: AppColors.subtle)),
                     ],
                   ),
                 ],
@@ -160,7 +161,7 @@ class _BreakdownScreenState extends State<BreakdownScreen> {
               const Padding(
                 padding: EdgeInsets.only(left: 4, bottom: 4),
                 child: Text('項目をタップで明細',
-                    style: TextStyle(fontSize: 12, color: Colors.grey)),
+                    style: TextStyle(fontSize: 12, color: AppColors.subtle)),
               ),
             ...items.map((e) {
               final pct = total > 0 ? (e.amount / total * 100) : 0;
@@ -187,19 +188,19 @@ class _BreakdownScreenState extends State<BreakdownScreen> {
                             mainAxisSize: MainAxisSize.min,
                             children: [
                               Text(e.label),
-                              Text(sub, style: const TextStyle(fontSize: 12, color: Colors.grey)),
+                              Text(sub, style: const TextStyle(fontSize: 12, color: AppColors.subtle)),
                             ],
                           );
                         }),
                       ),
-                      Text('¥${yenNum(e.amount)}',
+                      Text(yen(e.amount),
                           style: const TextStyle(fontWeight: FontWeight.bold)),
                       const SizedBox(width: 8),
                       SizedBox(
                         width: 40,
                         child: Text('${pct.toStringAsFixed(0)}%',
                             textAlign: TextAlign.right,
-                            style: const TextStyle(fontSize: 12, color: Colors.grey)),
+                            style: const TextStyle(fontSize: 12, color: AppColors.subtle)),
                       ),
                       if (tappable)
                         const Icon(Icons.chevron_right, size: 18, color: Colors.grey),
@@ -234,7 +235,7 @@ class _BreakdownScreenState extends State<BreakdownScreen> {
                   Text('${e.label}（${_month.month}月）',
                       style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
                   const Spacer(),
-                  Text('¥${yenNum(e.amount)}',
+                  Text(yen(e.amount),
                       style: TextStyle(
                           fontSize: 16, fontWeight: FontWeight.bold, color: widget.accent)),
                 ],
@@ -257,7 +258,7 @@ class _BreakdownScreenState extends State<BreakdownScreen> {
                             style: TextStyle(
                                 fontSize: 12, color: Colors.deepOrange[700])),
                       ),
-                      Text('¥${yenNum(part)}',
+                      Text(yen(part),
                           style: TextStyle(
                               fontSize: 12,
                               fontWeight: FontWeight.bold,
@@ -271,7 +272,7 @@ class _BreakdownScreenState extends State<BreakdownScreen> {
               child: rows.isEmpty
                   ? const Padding(
                       padding: EdgeInsets.all(24),
-                      child: Text('明細はありません', style: TextStyle(color: Colors.grey)))
+                      child: Text('明細はありません', style: TextStyle(color: AppColors.subtle)))
                   : ListView.separated(
                       shrinkWrap: true,
                       itemCount: rows.length,
@@ -282,7 +283,7 @@ class _BreakdownScreenState extends State<BreakdownScreen> {
                           dense: true,
                           title: Text(r.title),
                           subtitle: r.subtitle.isNotEmpty ? Text(r.subtitle) : null,
-                          trailing: Text('¥${yenNum(r.amount)}',
+                          trailing: Text(yen(r.amount),
                               style: const TextStyle(fontWeight: FontWeight.bold)),
                         );
                       },
