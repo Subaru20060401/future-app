@@ -384,7 +384,24 @@ void main() {
     addTearDown(t.view.resetPhysicalSize);
     addTearDown(t.view.resetDevicePixelRatio);
     final a = await app();
-    a.addScheduleSuggestions(sampleScheduleSuggestions(DateTime(2026, 11, 1)));
+    // 💡 以前は見本の提案（削除済み）を使っていた。同じ形の単発バイトの提案をここで作る
+    a.addScheduleSuggestions([
+      ScheduleSuggestion(
+        id: 'acct:m3#C-003',
+        accountKey: 'acct',
+        messageId: 'acct:m3',
+        entityKey: 'example-gig#C-003',
+        kind: SuggestionKind.shift,
+        title: '単発：イベント設営（テスト）',
+        start: DateTime(2026, 11, 16, 9),
+        end: DateTime(2026, 11, 16, 17),
+        location: 'テスト会場',
+        evidence: '「勤務が確定しました」',
+        sender: 'テスト派遣',
+        receivedAt: DateTime(2026, 11, 1, 9),
+        missing: ['休憩時間が書かれていません'],
+      ),
+    ]);
     final gigSg = a.scheduleSuggestions.firstWhere(
       (s) => s.kind == SuggestionKind.shift,
     );

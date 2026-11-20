@@ -1184,26 +1184,6 @@ class SettingsScreen extends StatelessWidget {
                   }
                 },
               ),
-              // 💡 メールから予定を探す機能の動作確認用（開発用）。普段の一覧からはここへ移した
-              ListTile(
-                dense: true,
-                leading: const Icon(Icons.science_outlined, color: Colors.grey),
-                title: const Text('見本の提案を入れて試す'),
-                subtitle: const Text('架空の3件（説明会・面接・単発バイト）。ホームの確認待ちに出ます'),
-                onTap: () {
-                  final n = appState.addScheduleSuggestions(sampleScheduleSuggestions(appState.clockNow()));
-                  ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                      content: Text(n > 0 ? '見本を$n件入れました' : '見本はもう入っています')));
-                },
-              ),
-              if (appState.scheduleSuggestions.any((s) => s.sample))
-                ListTile(
-                  dense: true,
-                  leading: const Icon(Icons.delete_sweep_outlined, color: Colors.grey),
-                  title: const Text('見本の提案を消す'),
-                  subtitle: const Text('登録した予定・シフトは残ります'),
-                  onTap: () => appState.removeSampleSuggestions(),
-                ),
               ListTile(
                 leading: const Icon(Icons.bug_report, color: Colors.indigo),
                 title: const Text('🔧 楽天メールの中身を確認'),

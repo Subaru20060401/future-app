@@ -2751,13 +2751,15 @@ class AppState extends ChangeNotifier {
     return removed;
   }
 
-  // 見本の提案をまとめて消す（登録済みの予定・シフトは残す）
-  void removeSampleSuggestions() {
-    _ensureEditable();
-    scheduleSuggestions
-        .removeWhere((s) => s.sample && s.status != SuggestionStatus.approved);
-    saveData();
-    notifyListeners();
+  // 💡 見本の提案（架空の説明会・面接・単発バイト）を入れる機能は 2026-11 に削除した。
+  //   残っている未承認の見本は、起動時と取り込み時に片付ける（repairData → _removeSampleSuggestions）。
+  //   ⚠️ 見本かどうかは sample の印だけで決める。「面接」などのタイトルで消すと、本物の予定まで消える。
+  //     承認済みの見本（本人が登録した予定・シフトにつながっている）は、記録として残す。
+  //   保存はしない（呼び出し側がまとめて保存する）。何度走らせても同じ結果。
+  int _removeSampleSuggestions() {
+    final before = scheduleSuggestions.length;
+    scheduleSuggestions.removeWhere((s) => s.sample && s.status != SuggestionStatus.approved);
+    return before - scheduleSuggestions.length;
   }
 
   ({String dateKey, int index})? _findShiftById(String id) {
@@ -6022,6 +6024,7 @@ class AppState extends ChangeNotifier {
   bool repairData() {
     // 💡 「三井住友」は「三井OLIVE」に統合
     var changed = retireOldScheduleSuggestions() > 0;
+    if (_removeSampleSuggestions() > 0) changed = true; // 削除した「見本の提案」の残り
     for (final p in payments) {
       if (p.cardName == '三井住友') {
         p.cardName = '三井OLIVE';
