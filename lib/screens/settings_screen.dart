@@ -1007,7 +1007,7 @@ class SettingsScreen extends StatelessWidget {
           SwitchListTile(
             secondary: const Icon(Icons.wallet, color: Colors.brown),
             title: const Text('財布の現金を使う'),
-            subtitle: const Text('残高画面に「財布の現金」を表示して予想残高に加算'),
+            subtitle: const Text('残高画面に「財布の現金」を表示する（口座の予想残高には入れません）'),
             value: appState.showWalletCash,
             onChanged: (v) => appState.setShowWalletCash(v),
           ),

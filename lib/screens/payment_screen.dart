@@ -1444,6 +1444,12 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
             children: [
               TextField(controller: amountCtrl, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: '金額(円)')),
               TextField(controller: memoCtrl, decoration: const InputDecoration(labelText: 'メモ')),
+              // 💡 引き出し＝口座のお金が財布へ移る（AppState.addWithdrawal）
+              const Padding(
+                padding: EdgeInsets.only(top: 8),
+                child: Text('保存すると、口座の残高から引いて財布の現金に足します（消すと元に戻ります）',
+                    style: TextStyle(fontSize: 12, color: AppColors.subtle)),
+              ),
               ListTile(
                 contentPadding: EdgeInsets.zero,
                 title: const Text('日付'),

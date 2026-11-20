@@ -63,7 +63,7 @@ class BalanceCard extends StatelessWidget {
           if (appState.showWalletCash)
             _row(
               label: '財布',
-              caption: '月末の見込みに足します',
+              caption: '口座の見込みには入れません',
               amount: MoneyText(appState.walletCash, style: AppText.amount),
               editLabel: '財布の現金を書き直す',
               onEdit: onEditWallet,
@@ -310,7 +310,6 @@ Future<void> showForecastDetail(BuildContext context, AppState appState, int off
             totalRow('口座の残高', appState.currentBalance),
             if (appState.debitsAfterSnapshot() > 0)
               totalRow('その後のデビット', -appState.debitsAfterSnapshot(), signed: true),
-            if (appState.effectiveWalletCash != 0) totalRow('財布の現金', appState.effectiveWalletCash),
           ] else
             totalRow('${months[offset - 1].month.month}月末の見込み', f.start),
           const Divider(height: AppSpace.xl),

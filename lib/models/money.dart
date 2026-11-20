@@ -406,12 +406,17 @@ class Withdrawal {
   DateTime date;
   int amount;
   String memo;
+  // 💡 登録したときに「口座から引いて財布に足した」か。
+  //   ⚠️ 以前の版で登録した引き出しは記録だけで、口座も財布も動かしていない（false のまま読む）。
+  //     取り消すときに、動かしていないお金を戻さないための印。
+  bool movedToWallet;
 
   Withdrawal({
     required this.id,
     required this.date,
     required this.amount,
     this.memo = '',
+    this.movedToWallet = false,
   });
 
   Map<String, dynamic> toJson() => {
@@ -419,6 +424,7 @@ class Withdrawal {
         'date': date.toIso8601String(),
         'amount': amount,
         'memo': memo,
+        if (movedToWallet) 'movedToWallet': true,
       };
 
   factory Withdrawal.fromJson(Map<String, dynamic> json) => Withdrawal(
@@ -426,6 +432,7 @@ class Withdrawal {
         date: DateTime.parse(json['date']),
         amount: json['amount'],
         memo: json['memo'] ?? '',
+        movedToWallet: json['movedToWallet'] == true,
       );
 }
 

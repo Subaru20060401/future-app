@@ -1824,16 +1824,44 @@ class AppState extends ChangeNotifier {
   }
 
   // ───── ATM引き出し ─────
+  // 💡 ATM で引き出した＝口座のお金が財布へ移る。口座残高から引き、財布に足す（入出金の履歴にも残す）。
+  //   支出の内訳の「ATM」には、これまでどおり引き出した月の支出として出す。
+  //   ⚠️ 財布の現金は口座の予想に入らないので、口座の見込みは引き出した分だけ減る。
   void addWithdrawal({required DateTime date, required int amount, String memo = ''}) {
     _ensureEditable();
-    withdrawals.add(Withdrawal(id: _id(), date: date, amount: amount, memo: memo));
+    final w = Withdrawal(id: _id(), date: date, amount: amount, memo: memo, movedToWallet: amount > 0);
+    withdrawals.add(w);
+    if (amount > 0) {
+      _foldDebitsIntoBalance();
+      currentBalance -= amount;
+      walletCash += amount;
+      balanceUpdatedAt = clockNow();
+      _recordBalanceEntry(
+        kind: BalanceEntryKind.draw,
+        label: 'ATM引き出し',
+        amount: amount,
+        sourceKey: _atmKey(w.id),
+      );
+    }
     saveData();
     notifyListeners();
   }
 
+  static String _atmKey(String withdrawalId) => 'atm:$withdrawalId';
+
+  // 💡 引き出しを消したら、口座と財布も元に戻す（登録したときに動かした分だけ）。
   void removeWithdrawal(String id) {
     _ensureEditable();
-    withdrawals.removeWhere((e) => e.id == id);
+    final i = withdrawals.indexWhere((e) => e.id == id);
+    if (i < 0) return;
+    final w = withdrawals.removeAt(i);
+    if (w.movedToWallet) {
+      _foldDebitsIntoBalance();
+      currentBalance += w.amount;
+      walletCash -= w.amount;
+      balanceUpdatedAt = clockNow();
+      balanceHistory.removeWhere((e) => e.sourceKey == _atmKey(w.id));
+    }
     saveData();
     notifyListeners();
   }
@@ -2111,6 +2139,14 @@ class AppState extends ChangeNotifier {
     balanceUpdatedAt = clockNow();
     balanceHistory.removeAt(i);
     final key = e.sourceKey;
+    // 💡 ATM 引き出しの取り消し: 財布に足した分も戻し、引き出しの記録も消す（口座だけ戻ると二重になる）
+    if (key != null && key.startsWith('atm:')) {
+      final wi = withdrawals.indexWhere((w) => _atmKey(w.id) == key);
+      if (wi >= 0) {
+        final w = withdrawals.removeAt(wi);
+        if (w.movedToWallet) walletCash -= w.amount;
+      }
+    }
     if (key != null && key.isNotEmpty) {
       handledDrawIds.remove(key);
       handledDepositIds.remove(key);
@@ -4188,7 +4224,8 @@ class AppState extends ChangeNotifier {
     return total;
   }
 
-  // 財布の現金（機能ONのときだけ有効）
+  // 財布の現金（機能ONのときだけ表示する）。
+  // ⚠️ 口座の予想には入れない（財布のお金は口座の引き落としに使えないため）。表示だけに使う。
   int get effectiveWalletCash => showWalletCash ? walletCash : 0;
 
   // ════════════ 残高の予想（1 つの行の並びから全部を作る） ════════════
@@ -4199,8 +4236,10 @@ class AppState extends ChangeNotifier {
   //     足し引きを増やすときは _forecastLinesOf にだけ足す（lib/finance/forecast.dart）。
   //   計算中に保存・通知・状態の変更はしない（読み取りだけ）。
 
-  // 今月の起点＝デビット調整済みの残高＋財布の現金
-  int get forecastStart => effectiveBalance + effectiveWalletCash;
+  // 今月の起点＝デビット調整済みの口座残高。
+  // ⚠️ 財布の現金は足さない（口座の残高の予想なので。以前は財布を足していて、財布の表示を切り替えると
+  //   月末・最低残高・足りない日・不足の通知まで変わっていた）。
+  int get forecastStart => effectiveBalance;
 
   /// 今月から [count] か月ぶんの予想（[0] が今月）。
   /// 💡 行は「実際の日付の月」に入れる。引落日・給料日が休みで月をまたぐと
@@ -4639,14 +4678,13 @@ class AppState extends ChangeNotifier {
   }
 
   // 💡 月末の予想の内訳（タップ詳細用）。forecastMonths と同じ行を group ごとにまとめる。
-  //   今月は起点を「現在の残高・財布・デビット」に分けて見せ、翌月以降は前月末から始める。
+  //   今月は起点を「現在の残高・デビット」に分けて見せ、翌月以降は前月末から始める（財布は口座の予想に入れない）。
   Map<String, int> _breakdownOf(int offset) {
     final months = forecastMonths(count: offset + 1);
     final f = months[offset];
     final out = <String, int>{};
     if (offset == 0) {
       out['現在の残高'] = currentBalance;
-      if (showWalletCash && walletCash != 0) out['財布の現金'] = walletCash;
       final debit = debitsAfterSnapshot();
       if (debit > 0) out['デビット利用（編集後・即時引落）'] = -debit;
     } else {
