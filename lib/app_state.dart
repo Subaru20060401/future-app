@@ -4314,40 +4314,40 @@ class AppState extends ChangeNotifier {
     ).toList();
   }
 
-  // 指定日に表示するカード別集約引き落とし情報。
-  // 銀行確定(bank)はその日付優先、未確定はcardPaymentDaysの日に前月billing合計を表示。
+  // 💡 カレンダー: その日に口座から落ちるカードの請求（カード別）。
+  //   請求額と実際の引落日は予想と同じもの（cardBillAmountOf・drawDateOf・請求の月の判定）を使う。
+  //   ・締め日が月末以外のカードは締め期間、分割・カード払いのローン・頭金も合算した額
+  //   ・休みで翌月にずれた引落（10/31土 → 11/2）は、ずれた先の日に出す
+  //   ・銀行確定があれば確定（日付も確定の日付）
+  //   ⚠️ 予想のゲート（残高を書いた日）は使わない。残高を書く前の引落もカレンダーには残す。
+  //   ⚠️ 以前は前月の暦月の利用合計だけで、締め期間・分割・ずれた引落を見ていなかった。
   List<({String cardName, int amount, bool isConfirmed})> cardPaymentSummaryOnDay(DateTime date) {
+    final day = DateTime(date.year, date.month, date.day);
+    final months = [DateTime(day.year, day.month - 1), DateTime(day.year, day.month)];
     final result = <({String cardName, int amount, bool isConfirmed})>[];
+    final shown = <String>{};
 
-    // 銀行確定: この日のbank支払いをカード別集計
-    final bankByCard = <String, int>{};
+    // 設定したカード（請求の月ごとに、予想と同じ額）。まだ利用が無ければ 0 円で引落日だけ出す
+    for (final card in cardPaymentDays.keys) {
+      if (_excludedFromDraw(card)) continue;
+      for (final m in months) {
+        if (drawDateOf(card, m) != day) continue;
+        final confirmed = payments.any((p) =>
+            p.source == PaymentSource.bank && !p.infoOnly && p.cardName == card && _isBillOf(p, m));
+        result.add((cardName: card, amount: cardBillAmountOf(card, m), isConfirmed: confirmed));
+        shown.add(card);
+      }
+    }
+    // 設定していない名前の銀行確定（ローンの請求元など）は、確定の日にその額を出す
+    final bankOnly = <String, int>{};
     for (final p in payments) {
-      if (p.source == PaymentSource.bank &&
-          p.paymentDate.year == date.year &&
-          p.paymentDate.month == date.month &&
-          p.paymentDate.day == date.day) {
-        bankByCard[p.cardName] = (bankByCard[p.cardName] ?? 0) + p.amount;
-      }
+      if (p.source != PaymentSource.bank || p.infoOnly || shown.contains(p.cardName)) continue;
+      if (DateTime(p.paymentDate.year, p.paymentDate.month, p.paymentDate.day) != day) continue;
+      bankOnly[p.cardName] = (bankOnly[p.cardName] ?? 0) + p.amount;
     }
-    for (final e in bankByCard.entries) {
-      result.add((cardName: e.key, amount: e.value, isConfirmed: true));
-    }
-
-    // 予定: cardPaymentDaysに登録済みカードで、この日が引き落とし日なら前月billing合計を表示
-    final confirmedCards = bankByCard.keys.toSet();
-    final prevMonth = DateTime(date.year, date.month - 1);
-    for (final e in cardPaymentDays.entries) {
-      if (confirmedCards.contains(e.key)) continue;
-      // 土日祝は翌営業日にずれた日で判定
-      if (cardDrawDateOf(e.key, DateTime(date.year, date.month)) !=
-          DateTime(date.year, date.month, date.day)) {
-        continue;
-      }
-      // 前月の利用ぶん（まだ無ければ0＝「引き落とし日」だけ表示する）
-      final total = paymentTotalsByCardOf(prevMonth)[e.key] ?? 0;
-      result.add((cardName: e.key, amount: total, isConfirmed: false));
-    }
-
+    bankOnly.forEach((card, amount) {
+      result.add((cardName: card, amount: amount, isConfirmed: true));
+    });
     return result;
   }
 
