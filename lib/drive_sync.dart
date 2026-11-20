@@ -356,7 +356,7 @@ class DriveSync {
               'ドライブから取り込み直すか、保存をやり直してください');
     }
     try {
-      final sentAt = app.clockNow();
+      final sentAt = app.issueStamp();
       final localAt = app.dataUpdatedAt ?? sentAt;
       final json = app.exportJson();
       await _store.withFreshToken(
@@ -386,8 +386,12 @@ class DriveSync {
       if (basedOn != null && app.dataUpdatedAt != basedOn.localAtCheck) {
         return DriveSyncResult(DriveSyncState.localChangedSinceCheck, remote: remote);
       }
+      // ⚠️ 同期済みにするのは「取り込みを始めた時点」まで。取り込みの保存を待っている間にこの端末で
+      //   編集した内容はドライブに無いので、未同期のまま残す（その編集の変更時刻は必ずこれより後になる）。
+      //   以前は取り込みが終わった時刻を使っていて、その間の編集まで同期済みになっていた（GPT 実装レビュー P1）。
+      final importStartedAt = app.issueStamp();
       await app.importJson(remote.json);
-      await app.markDriveSynced(localAt: app.clockNow(), remoteAt: remote.updatedAt);
+      await app.markDriveSynced(localAt: importStartedAt, remoteAt: remote.updatedAt);
       lastDriveSyncState.value = DriveSyncState.upToDate;
       return DriveSyncResult(DriveSyncState.upToDate, remote: remote);
     } catch (e) {

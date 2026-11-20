@@ -363,7 +363,7 @@ class AppState extends ChangeNotifier {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool('saved_drive_sync_enabled', driveSyncEnabled);
     await prefs.setBool('saved_require_google_login', requireGoogleLogin);
-    await prefs.setString('saved_data_updated_at', dataUpdatedAt?.toIso8601String() ?? '');
+    // ⚠️ saved_data_updated_at（家計データの変更時刻）は saveData の列だけが書く（ここで書くと順序が崩れる）
     await prefs.setString('saved_drive_synced_at', driveSyncedAt?.toIso8601String() ?? '');
     await prefs.setString(
         'saved_drive_remote_at', driveKnownRemoteAt?.toIso8601String() ?? '');
@@ -4388,13 +4388,11 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> _saveCardPaymentDays() async =>
-      _writeCardDays(await SharedPreferences.getInstance());
-
-  Future<void> _writeCardDays(SharedPreferences prefs) async {
-    await prefs.setString('saved_card_payment_days', jsonEncode(cardPaymentDays));
-    await prefs.setString('saved_card_closing_days', jsonEncode(cardClosingDays));
-  }
+  // 💡 カード設定の保存も、ふつうの保存（saveData）の列を通す。
+  // ⚠️ 以前はここだけ SharedPreferences に直接書いていたため、ふつうの保存の途中で設定を変えると、
+  //   後から書かれた古い値で上書きされ、再起動すると変更前の引落日に戻っていた（GPT 実装レビュー P1）。
+  //   保存の入口は saveData 1 つにする（一時保存・直列化・失敗の扱いがそろう）。
+  Future<void> _saveCardPaymentDays() => saveData();
 
   // 💡 カード選択に出す一覧。設定で登録したカードに加え、
   //   既存の明細・分割・定期に出てくるカード名も拾う。
@@ -4876,8 +4874,8 @@ class AppState extends ChangeNotifier {
         for (final e in beforeValues.entries) {
           await _putValue(prefs, e.key, e.value);
         }
-        await prefs.remove(kPendingWriteKey);
-        await prefs.remove(kRestorePointKey);
+        await _remove(prefs, kPendingWriteKey);
+        await _remove(prefs, kRestorePointKey);
         storageIssue = null;
       } catch (_) {
         if (!wasUnrecoverable) storageIssue = StorageIssue.recoveryPending; // 復旧点が残る → 次の起動で戻す
@@ -5124,29 +5122,36 @@ class AppState extends ChangeNotifier {
         'saved_card_closing_days': jsonEncode(cardClosingDays),
       };
 
-  static Future<void> _putValue(SharedPreferences prefs, String key, Object value) async {
-    if (value is int) {
-      await prefs.setInt(key, value);
-    } else if (value is bool) {
-      await prefs.setBool(key, value);
-    } else if (value is List) {
-      await prefs.setStringList(key, [for (final e in value) '$e']);
-    } else {
-      await prefs.setString(key, value as String);
+  // ⚠️ SharedPreferences の保存・削除は、失敗を例外ではなく false で返すことがある（API の約束）。
+  //   false を見落とすと、復旧点を書けていないのに上書きを始めたり、保存できていないのに成功扱いにしたりする
+  //   （GPT 実装レビュー P2）。保存・削除はすべてここを通し、false は例外にする。
+  static Future<void> _checked(Future<bool> op, String what) async {
+    if (!await op) throw StateError('保存先が失敗を返しました: $what');
+  }
+
+  static Future<void> _remove(SharedPreferences prefs, String key) =>
+      _checked(prefs.remove(key), '$key の削除');
+
+  static Future<void> _putValue(SharedPreferences prefs, String key, Object value) {
+    if (value is int) return _checked(prefs.setInt(key, value), key);
+    if (value is bool) return _checked(prefs.setBool(key, value), key);
+    if (value is List) {
+      return _checked(prefs.setStringList(key, [for (final e in value) '$e']), key);
     }
+    return _checked(prefs.setString(key, value as String), key);
   }
 
   // 1つのキーに全部を書く（一時保存・復旧点）。書けなければ空きを作って一度だけやり直す。
   Future<void> _putRecord(SharedPreferences prefs, String key, String json) async {
     try {
-      await prefs.setString(key, json);
+      await _checked(prefs.setString(key, json), key);
     } catch (_) {
       final free = freeStorageSpace;
       if (free == null) rethrow;
       try {
         await free();
       } catch (_) {}
-      await prefs.setString(key, json);
+      await _checked(prefs.setString(key, json), key);
     }
   }
 
@@ -5162,8 +5167,8 @@ class AppState extends ChangeNotifier {
       for (final e in values.entries) {
         await _putValue(prefs, e.key, e.value);
       }
-      await prefs.remove(kPendingWriteKey);
-      await prefs.remove(kRestorePointKey);
+      await _remove(prefs, kPendingWriteKey);
+      await _remove(prefs, kRestorePointKey);
     } catch (e) {
       throw StorageWriteFailure('保存', e); // 一時保存が残るので、次の起動で書き直せる
     }
@@ -5193,15 +5198,30 @@ class AppState extends ChangeNotifier {
       _queuedDone = null;
       final f = _writeValues(v);
       _runningWrite = f;
+      Object? error;
+      StackTrace? stack;
       try {
         await f;
         _onWriteSucceeded();
-        done.complete();
       } catch (e, st) {
         _onWriteFailed();
-        done.completeError(e, st);
+        error = e;
+        stack = st;
       } finally {
         if (identical(_runningWrite, f)) _runningWrite = null;
+      }
+      // 💡 書いている間に頼まれた保存（後ろに並んだもの）が終わるまで待ってから完了にする。
+      //   「保存した」と返った時点で、それまでの変更がすべて端末に入っているようにするため。
+      final next = _queuedDone?.future;
+      if (next != null) {
+        try {
+          await next;
+        } catch (_) {} // 後ろの保存の失敗は、その保存を頼んだ側と storageIssue に出る
+      }
+      if (error != null) {
+        done.completeError(error, stack);
+      } else {
+        done.complete();
       }
     }();
     return done.future;
@@ -5224,8 +5244,19 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  // 💡 変更時刻・同期の基準時刻は、時計が同じ値を返しても必ず増える値にする。
+  //   ⚠️ 取り込みを始めた時刻と、その後の編集の時刻が同じだと、編集が「同期済み」に紛れる（GPT 実装レビュー P1）。
+  DateTime? _lastStamp;
+  DateTime issueStamp() {
+    var t = clockNow();
+    final last = _lastStamp;
+    if (last != null && !t.isAfter(last)) t = last.add(const Duration(microseconds: 1));
+    _lastStamp = t;
+    return t;
+  }
+
   Future<void> saveData({bool markModified = true}) {
-    if (markModified) dataUpdatedAt = clockNow();
+    if (markModified) dataUpdatedAt = issueStamp();
     final f = _enqueueWrite(_persistedValues(includeUpdatedAt: markModified));
     // ⚠️ 呼び出し側の多くは待たない。失敗は storageIssue で画面に出すので、未処理の例外にしない
     //   （待っている呼び出し側には、そのまま例外が届く）。
@@ -5303,7 +5334,7 @@ class AppState extends ChangeNotifier {
         final done = walRaw == null &&
             _fingerprint(_currentValues(prefs, afterKeys)) == rp['afterHash'];
         if (done) {
-          await prefs.remove(kRestorePointKey);
+          await _remove(prefs, kRestorePointKey);
           return null;
         }
         target = _decodeValues(rp['before']);
@@ -5319,8 +5350,8 @@ class AppState extends ChangeNotifier {
       for (final e in target.entries) {
         await _putValue(prefs, e.key, e.value);
       }
-      await prefs.remove(kPendingWriteKey);
-      await prefs.remove(kRestorePointKey);
+      await _remove(prefs, kPendingWriteKey);
+      await _remove(prefs, kRestorePointKey);
       recoveredOnStartup = true;
       return null;
     } catch (_) {
