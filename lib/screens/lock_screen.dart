@@ -117,7 +117,7 @@ class _LockScreenState extends State<LockScreen> {
                       'パスワードを忘れた場合は、ブラウザのサイトデータを消すと'
                       'ロックは外れますが、この端末のデータも消えます。'
                       'ドライブ同期がONなら別の端末から復元できます。',
-                      style: TextStyle(fontSize: 11, color: Colors.grey),
+                      style: TextStyle(fontSize: 12, color: Colors.grey),
                       textAlign: TextAlign.center,
                     ),
                   ),

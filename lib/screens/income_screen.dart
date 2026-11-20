@@ -1,18 +1,14 @@
 import 'package:flutter/material.dart';
-import 'package:fl_chart/fl_chart.dart';
 import 'package:provider/provider.dart';
 import '../app_state.dart';
-import '../card_styles.dart';
 import '../widgets/gmail_refresh_button.dart';
-import '../widgets/deposit_dialog.dart';
-import '../widgets/planned_expense_sheet.dart';
-import '../widgets/planned_income_sheet.dart';
 import '../widgets/home_cards.dart';
-import '../widgets/animated_amount.dart';
+import '../widgets/home_sections.dart';
+import '../ui/components.dart';
+import '../ui/tokens.dart';
 import '../widgets/sync_status.dart';
 import '../widgets/add_entry_sheets.dart';
 import 'history_screen.dart';
-import 'balance_history_screen.dart';
 import 'breakdown_screen.dart';
 import 'trend_screen.dart';
 import '../widgets/app_sheet.dart';
@@ -185,8 +181,10 @@ class IncomeScreen extends StatelessWidget {
               children: [
                 Icon(Icons.subscriptions, color: Colors.purple, size: 20),
                 SizedBox(width: 6),
-                Text('固定費（サブスク）の見直し',
-                    style: TextStyle(fontWeight: FontWeight.bold)),
+                Expanded(
+                  child: Text('固定費（サブスク）の見直し',
+                      style: TextStyle(fontWeight: FontWeight.bold)),
+                ),
               ],
             ),
             const SizedBox(height: 6),
@@ -199,8 +197,11 @@ class IncomeScreen extends StatelessWidget {
                   child: Row(
                     children: [
                       Expanded(child: Text(s.title, style: const TextStyle(fontSize: 13))),
-                      Text('¥${yenNum(s.amount)}/月（年¥${yenNum(s.amount * 12)}）',
-                          style: const TextStyle(fontSize: 12, color: Colors.black54)),
+                      Flexible(
+                        child: Text('¥${yenNum(s.amount)}/月（年¥${yenNum(s.amount * 12)}）',
+                            textAlign: TextAlign.end,
+                            style: const TextStyle(fontSize: 12, color: Colors.black54)),
+                      ),
                     ],
                   ),
                 )),
@@ -315,7 +316,7 @@ class IncomeScreen extends StatelessWidget {
             const Padding(
               padding: EdgeInsets.only(left: 4, bottom: 4),
               child: Text('バイト別（タップで実給料を入力）',
-                  style: TextStyle(fontSize: 11, color: Colors.grey)),
+                  style: TextStyle(fontSize: 12, color: Colors.grey)),
             ),
             // #3 勤務先ごとに見込み・実給料を入力
             ...byWp.map((w) => InkWell(
@@ -340,7 +341,7 @@ class IncomeScreen extends StatelessWidget {
                             children: [
                               Text(w.name, style: const TextStyle(fontSize: 13)),
                               Text('勤務 ${w.hours.toStringAsFixed(1)}h ・ 見込み ¥${yenNum(w.estimated)}',
-                                  style: const TextStyle(fontSize: 11, color: Colors.grey)),
+                                  style: const TextStyle(fontSize: 12, color: Colors.grey)),
                             ],
                           ),
                         ),
@@ -363,83 +364,6 @@ class IncomeScreen extends StatelessWidget {
   }
 
   // which: 0=今月末, 1=来月末, 2=翌々月末
-  void _showBalanceDetail(BuildContext context, AppState appState, {required int which}) {
-    final now = DateTime.now();
-    final month = DateTime(now.year, now.month + which);
-    final breakdown = which == 0
-        ? appState.thisMonthBreakdown
-        : which == 1
-            ? appState.nextMonthBreakdown
-            : appState.monthAfterNextBreakdown;
-    final total = which == 0
-        ? appState.thisMonthBalance
-        : which == 1
-            ? appState.nextMonthBalance
-            : appState.monthAfterNextBalance;
-    final title = '${month.month}月末の予想残高 詳細';
-
-    Widget row(String label, int value) {
-      final color = value > 0 ? Colors.green[700]! : (value < 0 ? Colors.red : Colors.black54);
-      final sign = value >= 0 ? '+' : '';
-      return Padding(
-        padding: const EdgeInsets.symmetric(vertical: 5),
-        child: Row(
-          children: [
-            Expanded(child: Text(label, style: const TextStyle(fontSize: 14))),
-            Text('$sign¥${yenNum(value)}', style: TextStyle(fontWeight: FontWeight.bold, color: color, fontSize: 14)),
-          ],
-        ),
-      );
-    }
-
-    showAppSheet(context, (_) => Padding(
-        padding: const EdgeInsets.fromLTRB(20, 20, 20, 32),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(title, style: const TextStyle(fontSize: 17, fontWeight: FontWeight.bold)),
-            const SizedBox(height: 12),
-            ...breakdown.entries.map((e) => row(e.key, e.value)),
-            // 💡 分割払いは各カードの請求に含まれて落ちるので、上のカードの金額に
-            //   足し込んである。ここは「そのうちいくらか」の参考表示で、合計には入れない。
-            if (appState.installmentPartOfDraw(month) > 0)
-              Padding(
-                padding: const EdgeInsets.only(top: 6),
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Expanded(
-                      child: Text(
-                        '※ うち分割払い（各カードの請求に含む・合計には足しません）',
-                        style: TextStyle(fontSize: 11, color: Colors.deepOrange[700]),
-                      ),
-                    ),
-                    Text('¥${yenNum(appState.installmentPartOfDraw(month))}',
-                        style: TextStyle(
-                            fontSize: 12,
-                            fontWeight: FontWeight.bold,
-                            color: Colors.deepOrange[700])),
-                  ],
-                ),
-              ),
-            const Divider(height: 20),
-            Row(
-              children: [
-                const Expanded(child: Text('= 予想残高', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15))),
-                Text('¥${yenNum(total)}',
-                    style: TextStyle(
-                        fontSize: 20,
-                        fontWeight: FontWeight.bold,
-                        color: total < 0 ? Colors.red : Colors.pink)),
-              ],
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
   // 💡 まだ何も入っていないときの案内（空のグラフの代わり）
   Widget _homeEmptyGuide(BuildContext context, AppState appState) {
     return Card(
@@ -477,85 +401,6 @@ class IncomeScreen extends StatelessWidget {
           ],
         ),
       ),
-    );
-  }
-
-  // 来月末・翌々月末の小さい表示（今月末より目立たせない）。タップで詳細。
-  Widget _smallMonthTile(BuildContext context, AppState appState,
-      {required String label, required int value, required int which}) {
-    return InkWell(
-      borderRadius: BorderRadius.circular(12),
-      onTap: () => _showBalanceDetail(context, appState, which: which),
-      child: Container(
-        padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 10),
-        decoration: BoxDecoration(
-          color: Colors.white.withValues(alpha: 0.6),
-          borderRadius: BorderRadius.circular(12),
-        ),
-        child: Column(
-          children: [
-            Text('$labelの予想', style: const TextStyle(fontSize: 12, color: Colors.black54)),
-            const SizedBox(height: 2),
-            Text('¥ ${yenNum(value)}',
-                style: TextStyle(
-                    fontSize: 18,
-                    fontWeight: FontWeight.bold,
-                    color: value < 0 ? Colors.red : Colors.pink[300])),
-          ],
-        ),
-      ),
-    );
-  }
-
-  // 💡 月末のあいだの谷（最低残高）。月末が足りていても、次の給料日までに
-  //   底を打つことがあるので、いつ・いくらまで減るかを常に出す。
-  Widget _lowestBalanceRow(BuildContext context, AppState appState) {
-    final low = appState.lowestBalanceAhead()!;
-    final isShort = low.balance < 0; // 引き落としに足りない
-    return Column(
-      children: [
-        const Divider(height: 24),
-        InkWell(
-          borderRadius: BorderRadius.circular(12),
-          onTap: () => _showLowPointDetail(context, appState),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(vertical: 4),
-            child: Column(
-              children: [
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    if (isShort)
-                      const Padding(
-                        padding: EdgeInsets.only(right: 4),
-                        child: Icon(Icons.warning_amber, size: 16, color: Colors.red),
-                      ),
-                    Text(
-                      '最低残高（${low.date.month}月${low.date.day}日）',
-                      style: TextStyle(
-                          fontSize: 13,
-                          color: isShort ? Colors.red : Colors.black54),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 4),
-                Text('¥ ${yenNum(low.balance)}',
-                    style: TextStyle(
-                        fontSize: 20,
-                        fontWeight: FontWeight.bold,
-                        color: isShort ? Colors.red : Colors.pink[300])),
-                const SizedBox(height: 2),
-                Text(
-                  isShort ? '引き落としに足りません。タップで内訳' : 'タップで内訳',
-                  style: TextStyle(
-                      fontSize: 11,
-                      color: isShort ? Colors.red : Colors.black38),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ],
     );
   }
 
@@ -609,7 +454,7 @@ class IncomeScreen extends StatelessWidget {
               ),
             const SizedBox(height: 4),
             const Text('その日の引き落とし後の残高です。入金を早めるか、支払いを分ける必要があります',
-                style: TextStyle(fontSize: 11, color: Colors.black54)),
+                style: TextStyle(fontSize: 12, color: Colors.black54)),
           ],
         ),
       ),
@@ -692,21 +537,6 @@ class IncomeScreen extends StatelessWidget {
     );
   }
 
-  // グラフの棒を作成する補助関数
-  BarChartGroupData _makeGroupData(int x, double y, Color color) {
-    return BarChartGroupData(
-      x: x,
-      barRods: [
-        BarChartRodData(
-          toY: y,
-          color: color,
-          width: 25,
-          borderRadius: BorderRadius.circular(4),
-        )
-      ],
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     // 💡 監視開始（データが変わるとこの画面が自動リビルドされます）
@@ -722,51 +552,57 @@ class IncomeScreen extends StatelessWidget {
       );
     }
 
-    // データの計算（新仕様の残高予測）
-    final now = DateTime.now();
-    // 給料は給料日に入金される前提（給料日offsetぶん前の労働月の手取り）
-    final int expectedIncome = appState.incomeForecastIn(now);
-    final int cardExpenses = appState.cardPaymentsOf(now);
-    final int subscriptions = appState.subscriptionTotal;
-    final int installments = appState.installmentTotal;
-    final int withdrawals = appState.withdrawalsOf(now);
-    final int thisMonth = appState.thisMonthBalance;
-    final int nextMonth = appState.nextMonthBalance;
-    final int futureBalance = nextMonth;
-    final int monthAfterNext = appState.monthAfterNextBalance;
-    final int thisMonthNum = now.month;
-    final int nextMonthNum = DateTime(now.year, now.month + 1, 1).month;
-    final int monthAfterNextNum = DateTime(now.year, now.month + 2, 1).month;
+    void editBalance() =>
+        _showEditDialog(context, '口座の残高', appState.currentBalance, appState.updateBalance);
+    void editWallet() =>
+        _showEditDialog(context, '財布の現金', appState.walletCash, appState.updateWalletCash);
 
-    final cardBreakdown = appState.cardChargesOf(now);
+    // 💡 何も入っていない（残高も明細もシフトも無い）ときは、最初にやることを案内する
+    final isEmpty = appState.balanceUpdatedAt == null &&
+        appState.currentBalance == 0 &&
+        appState.payments.isEmpty &&
+        appState.shifts.isEmpty;
 
-    // 💡 支出を色分けセグメントに（カード別＋定期＋分割＋ATM）
-    final segments = <({String label, int value, Color color})>[
-      for (final e in cardBreakdown.entries)
-        (label: e.key, value: e.value, color: cardColorOf(e.key)),
-      if (subscriptions > 0) (label: '定期支払い', value: subscriptions, color: Colors.purple),
-      if (installments > 0) (label: '分割払い', value: installments, color: Colors.deepOrange),
-      if (withdrawals > 0) (label: 'ATM', value: withdrawals, color: Colors.brown),
+    // ── 読む順: いまの残高 → 月末の見込み → 注意 → 次の引き落とし → 確認待ち → 操作 → 予定 → 内訳 → 目安 ──
+    final primary = <Widget>[
+      BalanceCard(appState: appState, onEditBalance: editBalance, onEditWallet: editWallet),
+      ForecastCard(
+        appState: appState,
+        onShowLowPoint: () => _showLowPointDetail(context, appState),
+      ),
+      // 💡 収支の内訳は月末の見込みと同じ行から作る（合計と内訳が食い違わない）
+      MonthFlowCard(appState: appState),
     ];
-    final totalExpense = segments.fold<int>(0, (s, e) => s + e.value);
-    // グラフに出すものが何も無いか（残高も収入も支出も0）
-    final hasChartData =
-        appState.currentBalance != 0 || expectedIncome != 0 || totalExpense != 0;
-
-    // 積み上げ棒のスタックアイテムを作成
-    final stackItems = <BarChartRodStackItem>[];
-    double from = 0;
-    for (final s in segments) {
-      stackItems.add(BarChartRodStackItem(from, from + s.value, s.color));
-      from += s.value;
-    }
-    final maxY = [
-      appState.currentBalance.toDouble(),
-      expectedIncome.toDouble(),
-      totalExpense.toDouble(),
-      futureBalance.toDouble(),
-      10000,
-    ].reduce((a, b) => a > b ? a : b) * 1.2;
+    final secondary = <Widget>[
+      // 💡 引き落としで残高が足りなくなる日。どのカードで割るかまで出す
+      if (appState.shortfallDaysAhead().isNotEmpty) _shortfallCard(appState),
+      UpcomingDrawsCard(appState: appState),
+      // 💡 確認待ち（入出金の反映待ちなど）。起動時に順番に聞くのをやめ、ここに集める。
+      HomeNoticesCard(appState: appState),
+      MoneyActionsCard(appState: appState, onEditWallet: editWallet),
+      // 今日・直近の予定
+      UpcomingScheduleCard(appState: appState),
+    ];
+    final guides = <Widget>[
+      // 扶養・社保の「壁」アラート
+      if (appState.salaryOfYear(appState.clockNow().year) > 0) _fuyouWallCard(appState),
+      // 目標貯金と達成予測
+      _goalCard(context, appState),
+      // 固定費（サブスク）の見直しサジェスト
+      if (appState.subscriptions.isNotEmpty) _subscriptionReviewCard(appState),
+      // 予算超過の警告
+      if (appState.overBudgetThisMonth.isNotEmpty)
+        StatusBanner(
+          kind: BannerKind.caution,
+          message: '予算オーバー',
+          detail: appState.overBudgetThisMonth
+              .map((e) =>
+                  '${e.label}: ¥${yenNum(e.spent)} / ¥${yenNum(e.budget)}（+¥${yenNum(e.spent - e.budget)}）')
+              .join('\n'),
+        ),
+      _detailButtons(context),
+      _yearSummary(appState),
+    ];
 
     return Scaffold(
       appBar: AppBar(
@@ -801,497 +637,154 @@ class IncomeScreen extends StatelessWidget {
           const GmailRefreshButton(),
         ],
       ),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(20.0),
-        child: Column(
-          children: [
-            // 💡 メール更新の結果（一行。失敗・見送りなら再試行を出す）
-            const SyncStatusBar(),
-            // 合計表示部分
-            Container(
-              padding: const EdgeInsets.all(20),
-              width: double.infinity,
-              decoration: BoxDecoration(
-                gradient: LinearGradient(colors: [Colors.pink[100]!, Colors.pink[50]!]),
-                borderRadius: BorderRadius.circular(20),
-              ),
-              child: Column(
+      body: LayoutBuilder(builder: (context, c) {
+        final wide = c.maxWidth >= kWideLayoutWidth;
+        final head = <Widget>[
+          // 💡 メール更新の結果（一行。失敗・見送りなら再試行を出す）
+          const SyncStatusBar(),
+          // 💡 保存の失敗・回復待ち（端末の保存が整っていない間は、ここで知らせる）
+          StorageStatusBanner(appState: appState),
+          // 💡 ドライブ同期の競合・失敗（自動保存が止まっているとき）
+          DriveSyncBanner(appState: appState),
+          if (isEmpty) _homeEmptyGuide(context, appState),
+        ];
+        if (!wide) {
+          return ListView(
+            padding: const EdgeInsets.fromLTRB(4, 4, 4, 32),
+            children: [...head, ...primary, ...secondary, ...guides],
+          );
+        }
+        // 💡 PCの広い画面: 左に残高と見込み、右に引き落とし・確認待ち・操作
+        return SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(8, 4, 8, 32),
+          child: Column(
+            children: [
+              ...head,
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  // 💡 現在の残高（デビット反映後の実効残高）。タップで手入力し直せる。
-                  //   未反映の引き落としがあるときは、まだ残高に入っていないことを添える。
-                  InkWell(
-                    borderRadius: BorderRadius.circular(12),
-                    onTap: () => _showEditDialog(
-                        context, '現在の残高', appState.currentBalance, appState.updateBalance),
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 2, horizontal: 4),
-                      child: Row(
-                        children: [
-                          const Icon(Icons.account_balance_wallet, size: 18, color: Colors.black54),
-                          const SizedBox(width: 6),
-                          const Text('現在の残高',
-                              style: TextStyle(fontSize: 14, color: Colors.black54)),
-                          const Spacer(),
-                          Column(
-                            crossAxisAlignment: CrossAxisAlignment.end,
-                            children: [
-                              // 💡 金額が変わったら短く動かし、差額を添える（表示だけ）
-                              AnimatedAmount(
-                                value: appState.effectiveBalance,
-                                style: const TextStyle(
-                                    fontSize: 20, fontWeight: FontWeight.bold),
-                              ),
-                              if (appState.pendingDraws.isNotEmpty)
-                                Text('未反映の引き落とし ${appState.pendingDraws.length}件',
-                                    style: TextStyle(fontSize: 11, color: Colors.red[700])),
-                            ],
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                  const Divider(height: 20),
-                  // 今月末（◯月末）＝いちばん大きく。タップで詳細
-                  InkWell(
-                    borderRadius: BorderRadius.circular(12),
-                    onTap: () => _showBalanceDetail(context, appState, which: 0),
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 4),
-                      child: Column(
-                        children: [
-                          Text('$thisMonthNum月末の予想残高',
-                              style: const TextStyle(fontSize: 15, color: Colors.black54)),
-                          const SizedBox(height: 4),
-                          AnimatedAmount(
-                            value: thisMonth,
-                            alignment: CrossAxisAlignment.center,
-                            // ⚠️ 色は最終の金額で決める（動いている途中の値で判定しない）
-                            style: TextStyle(
-                                fontSize: 38,
-                                fontWeight: FontWeight.bold,
-                                color: thisMonth < 0 ? Colors.red : Colors.pink),
-                          ),
-                          const SizedBox(height: 2),
-                          const Text('タップで詳細', style: TextStyle(fontSize: 11, color: Colors.black38)),
-                        ],
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 10),
-                  // 来月末・翌々月末は小さく横に並べる（翌々月末は表示ON時のみ）
-                  Row(
-                    children: [
-                      Expanded(
-                        child: _smallMonthTile(context, appState,
-                            label: '$nextMonthNum月末', value: futureBalance, which: 1),
-                      ),
-                      if (appState.showMonthAfterNext) ...[
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: _smallMonthTile(context, appState,
-                              label: '$monthAfterNextNum月末', value: monthAfterNext, which: 2),
-                        ),
-                      ],
-                    ],
-                  ),
-                  // 💡 月末と月末のあいだの谷。
-                  //   10日引き落としのカードのように月末をまたいで落ちるものがあると、
-                  //   月末の予想は足りていても、次の給料日までに底を打つことがある。
-                  if (appState.lowestBalanceAhead() != null)
-                    _lowestBalanceRow(context, appState),
+                  Expanded(child: Column(children: [...primary, ...guides])),
+                  Expanded(child: Column(children: secondary)),
                 ],
               ),
-            ),
-            const SizedBox(height: 16),
+            ],
+          ),
+        );
+      }),
+    );
+  }
 
-            // 💡 引き落としで残高が足りなくなる日。どのカードで割るかまで出す
-            //   （どれを遅らせるか・いつ入金するかを決められるように）。
-            if (appState.shortfallDaysAhead().isNotEmpty)
-              _shortfallCard(appState),
-
-            // 💡 確認待ち（入出金の反映待ちなど）。起動時に順番に聞くのをやめ、ここに集める。
-            HomeNoticesCard(appState: appState),
-
-            // 今日・直近の予定
-            UpcomingScheduleCard(appState: appState),
-            const SizedBox(height: 8),
-
-            // 扶養・社保の「壁」アラート
-            if (appState.salaryOfYear(DateTime.now().year) > 0) _fuyouWallCard(appState),
-
-            // 目標貯金と達成予測
-            _goalCard(context, appState),
-
-            // 固定費（サブスク）の見直しサジェスト
-            if (appState.subscriptions.isNotEmpty) _subscriptionReviewCard(appState),
-
-            // 予算超過の警告
-            if (appState.overBudgetThisMonth.isNotEmpty)
-              Card(
-                color: Colors.red[50],
-                child: Padding(
-                  padding: const EdgeInsets.all(14),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Row(
-                        children: [
-                          Icon(Icons.warning_amber, color: Colors.red, size: 20),
-                          SizedBox(width: 6),
-                          Text('予算オーバー', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.red)),
-                        ],
-                      ),
-                      const SizedBox(height: 4),
-                      ...appState.overBudgetThisMonth.map((e) => Text(
-                          '${e.label}: ¥${yenNum(e.spent)} / ¥${yenNum(e.budget)}（+¥${yenNum(e.spent - e.budget)}）',
-                          style: const TextStyle(fontSize: 13, color: Colors.red))),
-                    ],
+  // 月ごとの収入／支出の詳細（円グラフ）へ
+  Widget _detailButtons(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      child: Row(
+        children: [
+          Expanded(
+            child: OutlinedButton.icon(
+              style: OutlinedButton.styleFrom(
+                foregroundColor: AppColors.income,
+                minimumSize: const Size.fromHeight(AppSpace.minTap),
+              ),
+              icon: const Icon(Icons.pie_chart),
+              label: const Text('月ごとの収入'),
+              onPressed: () => Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => BreakdownScreen(
+                    title: '月ごとの収入',
+                    totalLabel: '給料見込み合計',
+                    accent: Colors.green,
+                    builder: (s, m) => s.incomeBreakdownOf(m),
+                    centerLabel: '年収',
+                    yearValueBuilder: (s, y) => s.salaryOfYear(y),
+                    subInfoBuilder: _incomeSubInfo,
+                    detailBuilder: (s, m, label) => s.incomeDetailOf(m, label),
+                    legendSubBuilder: (s, m, label) {
+                      final h = s.workHoursOfWorkplace(m, label);
+                      return h > 0 ? '勤務 ${h.toStringAsFixed(1)}h' : null;
+                    },
                   ),
                 ),
               ),
-
-            // 月ごとの収入／支出の詳細（円グラフ）へ遷移
-            Row(
-              children: [
-                Expanded(
-                  child: OutlinedButton.icon(
-                    style: OutlinedButton.styleFrom(
-                      foregroundColor: Colors.green,
-                      padding: const EdgeInsets.symmetric(vertical: 12),
-                    ),
-                    icon: const Icon(Icons.pie_chart),
-                    label: const Text('月ごとの収入詳細'),
-                    onPressed: () => Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (_) => BreakdownScreen(
-                          title: '月ごとの収入',
-                          totalLabel: '給料見込み合計',
-                          accent: Colors.green,
-                          builder: (s, m) => s.incomeBreakdownOf(m),
-                          centerLabel: '年収',
-                          yearValueBuilder: (s, y) => s.salaryOfYear(y),
-                          subInfoBuilder: _incomeSubInfo,
-                          detailBuilder: (s, m, label) => s.incomeDetailOf(m, label),
-                          legendSubBuilder: (s, m, label) {
-                            final h = s.workHoursOfWorkplace(m, label);
-                            return h > 0 ? '勤務 ${h.toStringAsFixed(1)}h' : null;
-                          },
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: OutlinedButton.icon(
-                    style: OutlinedButton.styleFrom(
-                      foregroundColor: Colors.red,
-                      padding: const EdgeInsets.symmetric(vertical: 12),
-                    ),
-                    icon: const Icon(Icons.pie_chart),
-                    label: const Text('月ごとの支出詳細'),
-                    onPressed: () => Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (_) => BreakdownScreen(
-                          title: '月ごとの支出',
-                          totalLabel: '支出合計',
-                          accent: Colors.red,
-                          builder: (s, m) => s.expenseBreakdownOf(m),
-                          centerLabel: '年支出',
-                          yearValueBuilder: (s, y) => s.expenseOfYear(y),
-                          detailBuilder: (s, m, label) => s.expenseDetailOf(m, label),
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-              ],
             ),
-            const SizedBox(height: 16),
-
-            // ⚠ 残高不足アラート
-            if (appState.shortagePayments.isNotEmpty)
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.all(16),
-                decoration: BoxDecoration(
-                  color: Colors.red[50],
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: Colors.red),
+          ),
+          const SizedBox(width: AppSpace.m),
+          Expanded(
+            child: OutlinedButton.icon(
+              style: OutlinedButton.styleFrom(
+                foregroundColor: AppColors.expense,
+                minimumSize: const Size.fromHeight(AppSpace.minTap),
+              ),
+              icon: const Icon(Icons.pie_chart),
+              label: const Text('月ごとの支出'),
+              onPressed: () => Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => BreakdownScreen(
+                    title: '月ごとの支出',
+                    totalLabel: '支出合計',
+                    accent: Colors.red,
+                    builder: (s, m) => s.expenseBreakdownOf(m),
+                    centerLabel: '年間支出',
+                    yearValueBuilder: (s, y) => s.expenseOfYear(y),
+                    detailBuilder: (s, m, label) => s.expenseDetailOf(m, label),
+                  ),
                 ),
-                child: Column(
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // 💡 年間サマリー（年収の見込み・実績と、年間支出）
+  Widget _yearSummary(AppState appState) {
+    if (appState.dataYears.isEmpty) return const SizedBox.shrink();
+    return SectionCard(
+      title: '年間サマリー',
+      icon: Icons.calendar_today_outlined,
+      child: Column(
+        children: [
+          for (final year in appState.dataYears)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: AppSpace.xs),
+              child: Builder(builder: (context) {
+                final spending = appState.expenseSummaryOfYear(year);
+                return Row(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Text('⚠ 残高不足の恐れ',
-                        style: TextStyle(fontWeight: FontWeight.bold, color: Colors.red)),
-                    const SizedBox(height: 4),
-                    Text('今月末残高がマイナスになる見込みです (¥${yenNum(thisMonth)})',
-                        style: const TextStyle(color: Colors.red)),
-                  ],
-                ),
-              ),
-            const SizedBox(height: 30),
-
-            // 💡 データが無いのに空の大きなグラフを出していたので、そのときは
-            //   最初にやることの案内に置き換える（UI改善計画 2026-10-14 の段階3）
-            if (!hasChartData)
-              _homeEmptyGuide(context, appState)
-            else ...[
-            // グラフ表示部分
-            const Text('収支の内訳', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-            const SizedBox(height: 20),
-            SizedBox(
-              height: 250,
-              child: BarChart(
-                BarChartData(
-                  alignment: BarChartAlignment.spaceAround,
-                  maxY: maxY,
-                  barTouchData: BarTouchData(enabled: false),
-                  titlesData: FlTitlesData(
-                    show: true,
-                    bottomTitles: AxisTitles(
-                      sideTitles: SideTitles(
-                        showTitles: true,
-                        getTitlesWidget: (double value, TitleMeta meta) {
-                          const style = TextStyle(fontWeight: FontWeight.bold, fontSize: 12);
-                          switch (value.toInt()) {
-                            case 0: return const Text('現在', style: style);
-                            case 1: return const Text('給与', style: style);
-                            case 2: return const Text('支出', style: style);
-                            case 3: return const Text('来月', style: style);
-                            default: return const Text('');
-                          }
-                        },
-                      ),
-                    ),
-                    leftTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-                    topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-                    rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-                  ),
-                  borderData: FlBorderData(show: false),
-                  // 💡 支出はカード色で積み上げ表示
-                  barGroups: [
-                    _makeGroupData(0, appState.currentBalance.toDouble(), Colors.blue),
-                    _makeGroupData(1, expectedIncome.toDouble(), Colors.green),
-                    BarChartGroupData(x: 2, barRods: [
-                      BarChartRodData(
-                        toY: totalExpense.toDouble(),
-                        width: 25,
-                        borderRadius: BorderRadius.circular(4),
-                        rodStackItems: stackItems,
-                        color: Colors.red,
-                      )
-                    ]),
-                    _makeGroupData(3, futureBalance.toDouble().clamp(0, double.infinity), Colors.pink),
-                  ],
-                ),
-              ),
-            ),
-            // 凡例（支出セグメントの色）
-            if (segments.isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.only(top: 12),
-                child: Wrap(
-                  spacing: 12,
-                  runSpacing: 4,
-                  alignment: WrapAlignment.center,
-                  children: segments.map((s) {
-                    return Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Container(width: 10, height: 10, decoration: BoxDecoration(color: s.color, shape: BoxShape.circle)),
-                        const SizedBox(width: 4),
-                        Text('${s.label} ¥${yenNum(s.value)}', style: const TextStyle(fontSize: 11)),
-                      ],
-                    );
-                  }).toList(),
-                ),
-              ),
-            ],
-
-            const SizedBox(height: 30),
-
-            // 設定リスト
-            ListTile(
-              leading: const Icon(Icons.account_balance_wallet, color: Colors.blue),
-              title: const Text('現在の残高'),
-              subtitle: appState.debitsAfterSnapshot() > 0
-                  ? Text('編集後のデビット利用 -¥${yenNum(appState.debitsAfterSnapshot())} を反映',
-                      style: const TextStyle(fontSize: 11, color: Colors.orange))
-                  : null,
-              trailing: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Column(
-                    crossAxisAlignment: CrossAxisAlignment.end,
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Text('¥ ${yenNum(appState.effectiveBalance)}', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-                      if (appState.debitsAfterSnapshot() > 0)
-                        Text('編集時 ¥${yenNum(appState.currentBalance)}',
-                            style: const TextStyle(fontSize: 11, color: Colors.grey)),
-                    ],
-                  ),
-                  IconButton(icon: const Icon(Icons.edit), onPressed: () => _showEditDialog(context, '現在の残高', appState.currentBalance, appState.updateBalance)),
-                ],
-              ),
-            ),
-            // 💡 口座への入金を加算（給料・振込など）
-            ListTile(
-              leading: const Icon(Icons.savings, color: Colors.green),
-              title: const Text('口座に入金'),
-              subtitle: const Text('入金額を現在の残高に加算します'),
-              trailing: const Icon(Icons.add_circle_outline, color: Colors.green),
-              onTap: () => showManualDepositDialog(context, appState),
-            ),
-            // 💡 予定入金（給料以外に入ってくるお金）
-            ListTile(
-              leading: Badge(
-                isLabelVisible: appState.duePlannedIncomes.isNotEmpty,
-                label: Text('${appState.duePlannedIncomes.length}'),
-                child: const Icon(Icons.event_available, color: Colors.green),
-              ),
-              title: const Text('予定入金'),
-              subtitle: Text(appState.duePlannedIncomes.isNotEmpty
-                  ? '受け取り待ちが${appState.duePlannedIncomes.length}件あります'
-                  : '仕送り・返金など、これから入る予定のお金'),
-              trailing: const Icon(Icons.chevron_right),
-              onTap: () => showPlannedIncomeSheet(context, appState),
-            ),
-            // 💡 一度だけ出ていく予定のお金（車検・旅行・頭金など）
-            ListTile(
-              leading: const Icon(Icons.event_busy, color: Colors.deepOrange),
-              title: const Text('予定支出'),
-              subtitle: const Text('車検・旅行など、これから出ていく予定のお金'),
-              trailing: const Icon(Icons.chevron_right),
-              onTap: () => showPlannedExpenseSheet(context, appState),
-            ),
-            // 💡 入出金の履歴
-            ListTile(
-              leading: const Icon(Icons.receipt_long, color: Colors.indigo),
-              title: const Text('入出金の履歴'),
-              subtitle: const Text('残高に反映した入金・引き落としの記録'),
-              trailing: const Icon(Icons.chevron_right),
-              onTap: () => Navigator.push(
-                context,
-                MaterialPageRoute(builder: (_) => const BalanceHistoryScreen()),
-              ),
-            ),
-            // 💡 口座からの引き落としを反映（未反映があればバッジで知らせる）
-            ListTile(
-              leading: Badge(
-                isLabelVisible: appState.pendingDraws.isNotEmpty,
-                label: Text('${appState.pendingDraws.length}'),
-                child: const Icon(Icons.money_off, color: Colors.red),
-              ),
-              title: const Text('口座から引き落とし'),
-              subtitle: Text(appState.pendingDraws.isNotEmpty
-                  ? '未反映の引き落としが${appState.pendingDraws.length}件あります'
-                  : '引き落とし額を現在の残高から引きます'),
-              trailing: const Icon(Icons.remove_circle_outline, color: Colors.red),
-              onTap: () => showDrawSheet(context, appState),
-            ),
-            if (appState.showWalletCash)
-            ListTile(
-              leading: const Icon(Icons.wallet, color: Colors.brown),
-              title: const Text('財布の現金'),
-              subtitle: const Text('予想残高に加算されます'),
-              trailing: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text('¥ ${yenNum(appState.walletCash)}', style: const TextStyle(fontSize: 16)),
-                  IconButton(icon: const Icon(Icons.edit), onPressed: () => _showEditDialog(context, '財布の現金', appState.walletCash, appState.updateWalletCash)),
-                ],
-              ),
-            ),
-            ListTile(
-              leading: const Icon(Icons.work, color: Colors.green),
-              title: const Text('給料入金（今月）'),
-              subtitle: const Text('給料日に入金される見込み'),
-              trailing: Text('+ ¥ ${yenNum(expectedIncome)}', style: const TextStyle(fontSize: 16, color: Colors.green, fontWeight: FontWeight.bold)),
-            ),
-            ListTile(
-              leading: const Icon(Icons.credit_card, color: Colors.red),
-              title: const Text('カード請求(未払い)'),
-              trailing: Text('- ¥ ${yenNum(cardExpenses)}', style: const TextStyle(fontSize: 16, color: Colors.red)),
-            ),
-            // 💡 カード別の内訳
-            if (cardBreakdown.isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.only(left: 24, right: 16, bottom: 8),
-                child: Column(
-                  children: cardBreakdown.entries.map((e) {
-                    final style = cardStyleOf(e.key);
-                    return Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 2),
-                      child: Row(
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Container(width: 10, height: 10, decoration: BoxDecoration(color: style.color, shape: BoxShape.circle)),
-                          const SizedBox(width: 8),
-                          Expanded(child: Text(e.key, style: const TextStyle(fontSize: 13, color: Colors.black54))),
-                          Text('¥ ${yenNum(e.value)}', style: const TextStyle(fontSize: 13, color: Colors.black54)),
+                          Text('$year年', style: AppText.title),
+                          Text('年間支出 ¥${yenNum(spending.total)}', style: AppText.body),
+                          if (spending.fromSettings > 0)
+                            Text('うち設定から計算 ¥${yenNum(spending.fromSettings)}（定期・分割・ローン）',
+                                style: AppText.caption),
                         ],
                       ),
-                    );
-                  }).toList(),
-                ),
-              ),
-            ListTile(
-              leading: const Icon(Icons.subscriptions, color: Colors.purple),
-              title: const Text('定期支払い'),
-              trailing: Text('- ¥ ${yenNum(subscriptions)}', style: const TextStyle(fontSize: 16, color: Colors.red)),
-            ),
-            ListTile(
-              leading: const Icon(Icons.calendar_view_month, color: Colors.deepOrange),
-              title: const Text('分割払い(今月)'),
-              trailing: Text('- ¥ ${yenNum(installments)}', style: const TextStyle(fontSize: 16, color: Colors.red)),
-            ),
-            ListTile(
-              leading: const Icon(Icons.atm, color: Colors.brown),
-              title: const Text('ATM引き出し'),
-              trailing: Text('- ¥ ${yenNum(withdrawals)}', style: const TextStyle(fontSize: 16, color: Colors.red)),
-            ),
-
-            // 💡 年間サマリー（過去2年分・年収/カード支出）
-            if (appState.dataYears.isNotEmpty) ...[
-              const SizedBox(height: 24),
-              const Align(
-                alignment: Alignment.centerLeft,
-                child: Text('年間サマリー', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-              ),
-              const SizedBox(height: 8),
-              ...appState.dataYears.map((year) {
-                final estimated = appState.estimatedSalaryOfYear(year);
-                final actual = appState.actualSalaryOfYear(year);
-                final hasActual = appState.hasActualSalaryInYear(year);
-                final spending = appState.cardSpendingOfYear(year);
-                return Card(
-                  child: ListTile(
-                    title: Text('$year年'),
-                    subtitle: Text('カード支出 ¥${yenNum(spending)}'),
-                    trailing: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
+                    ),
+                    Column(
                       crossAxisAlignment: CrossAxisAlignment.end,
                       children: [
-                        const Text('年収（見込み）', style: TextStyle(fontSize: 10, color: Colors.grey)),
-                        Text('¥${yenNum(estimated)}',
-                            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.green)),
-                        if (hasActual) ...[
-                          const SizedBox(height: 2),
-                          const Text('年収（実）', style: TextStyle(fontSize: 10, color: Colors.grey)),
-                          Text('¥${yenNum(actual)}',
-                              style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: Colors.blue)),
+                        const Text('年収（見込み）', style: AppText.caption),
+                        Text('¥${yenNum(appState.estimatedSalaryOfYear(year))}',
+                            style: AppText.amount.copyWith(color: AppColors.income)),
+                        if (appState.hasActualSalaryInYear(year)) ...[
+                          const Text('年収（実績）', style: AppText.caption),
+                          Text('¥${yenNum(appState.actualSalaryOfYear(year))}',
+                              style: AppText.amount.copyWith(color: AppColors.confirmed)),
                         ],
                       ],
                     ),
-                  ),
+                  ],
                 );
               }),
-            ],
-          ],
-        ),
+            ),
+        ],
       ),
     );
   }

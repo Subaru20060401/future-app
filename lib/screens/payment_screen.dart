@@ -9,6 +9,7 @@ import 'trash_screen.dart';
 import '../widgets/app_sheet.dart';
 import '../widgets/payment_row.dart';
 import '../money_format.dart';
+import '../ui/tokens.dart';
 import '../widgets/billing_link_sheet.dart';
 
 class PaymentScreen extends StatefulWidget {
@@ -159,14 +160,14 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
                 mainAxisAlignment: MainAxisAlignment.center,
                 crossAxisAlignment: CrossAxisAlignment.end,
                 children: [
-                  Text('¥${yenNum(l.amountIn(DateTime(now.year, now.month)))}',
+                  Text(yen(l.amountIn(DateTime(now.year, now.month))),
                       style: const TextStyle(
                           fontWeight: FontWeight.bold, color: Colors.indigo)),
                   Text('残債 ¥${yenNum(l.remainingAmountAt(now))}',
-                      style: const TextStyle(fontSize: 11, color: Colors.grey)),
+                      style: const TextStyle(fontSize: 12, color: AppColors.subtle)),
                   if (l.hasDownPayment)
                     Text('頭金 ¥${yenNum(l.downPayment)}',
-                        style: const TextStyle(fontSize: 11, color: Colors.indigo)),
+                        style: const TextStyle(fontSize: 12, color: Colors.indigo)),
                 ],
               ),
               onTap: () => _editLoan(appState, l),
@@ -276,7 +277,7 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
                     contentPadding: EdgeInsets.zero,
                     title: const Text('返済開始', style: TextStyle(fontSize: 14)),
                     subtitle: const Text('この月から予想残高に反映されます',
-                        style: TextStyle(fontSize: 11, color: Colors.grey)),
+                        style: TextStyle(fontSize: 12, color: AppColors.subtle)),
                     trailing: Text('${start.year}年${start.month}月'),
                     onTap: () async {
                       final picked = await showDatePicker(
@@ -291,7 +292,7 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
                       }
                     },
                   ),
-                  const Text('引き落とし方法', style: TextStyle(fontSize: 12, color: Colors.grey)),
+                  const Text('引き落とし方法', style: TextStyle(fontSize: 12, color: AppColors.subtle)),
                   Wrap(
                     spacing: 6,
                     children: [
@@ -330,7 +331,7 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
                   const Text('頭金（任意）',
                       style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold)),
                   const Text('最初にまとめて払うぶん。借入額には含みません。',
-                      style: TextStyle(fontSize: 11, color: Colors.grey)),
+                      style: TextStyle(fontSize: 12, color: AppColors.subtle)),
                   TextField(
                     controller: downCtrl,
                     keyboardType: TextInputType.number,
@@ -379,20 +380,20 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
                   if (count > 0)
                     Text(
                       '支払総額 ¥${yenNum(preview.totalRepayment)}',
-                      style: const TextStyle(fontSize: 12, color: Colors.grey),
+                      style: const TextStyle(fontSize: 12, color: AppColors.subtle),
                     ),
                   if ((int.tryParse(downCtrl.text) ?? 0) > 0)
                     Text(
                       '総額 ¥${yenNum(preview.totalPrice)}'
                       '（頭金 ¥${yenNum(preview.downPayment)} ＋ 借入 ¥${yenNum(principal)}）',
-                      style: const TextStyle(fontSize: 12, color: Colors.grey),
+                      style: const TextStyle(fontSize: 12, color: AppColors.subtle),
                     ),
                   if (count > 0)
                     Text(
                       '完済予定 '
                       '${DateTime(start.year, start.month + count - 1).year}年'
                       '${DateTime(start.year, start.month + count - 1).month}月',
-                      style: const TextStyle(fontSize: 12, color: Colors.grey),
+                      style: const TextStyle(fontSize: 12, color: AppColors.subtle),
                     ),
                 ],
               ),
@@ -452,7 +453,7 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
     );
   }
 
-  Widget _empty(String text) => Center(child: Text(text, style: const TextStyle(color: Colors.grey)));
+  Widget _empty(String text) => Center(child: Text(text, style: const TextStyle(color: AppColors.subtle)));
 
   bool _sameMonth(DateTime d) => d.year == _filterMonth.year && d.month == _filterMonth.month;
 
@@ -483,22 +484,15 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
         list.sort((a, b) => b.amount.compareTo(a.amount));
         break;
     }
-    // 記録のみの明細（他のカードで計上済み）は合計に足さない
-    final searchTotal =
-        list.where((p) => !p.infoOnly).fold<int>(0, (s, p) => s + p.amount);
-    // 💡 分割払いはカードの請求に含まれて落ちるので、カード別の合計にも足す。
-    //   検索で絞っているときは明細の合計だけを見たいので足さない。
-    // ⚠️ 銀行確定済みかどうかはカードごとに見る（予想残高と同じ判定）。
-    //   どれか1枚の確定で全部止めると、まだ確定していないカードの分割が消える。
-    final byCard = appState.installmentTotalByCardOf(_filterMonth);
-    final filterCard = _filterCard;
-    final installmentPart = _search.trim().isNotEmpty
-        ? 0
-        : (filterCard == null
-            ? appState.installmentFoldedInto(_filterMonth)
-            : (appState.isCardConfirmedByBank(filterCard, _filterMonth)
-                ? 0
-                : (byCard[filterCard] ?? 0)));
+    // 💡 合計と「分割を足すか」の判定は AppState（画面では計算しない）
+    final totals = appState.paymentListTotals(
+      month: _filterMonth,
+      shown: list,
+      card: _filterCard,
+      searching: _search.trim().isNotEmpty,
+    );
+    final searchTotal = totals.shownTotal;
+    final installmentPart = totals.installmentPart;
 
     return Column(
       children: [
@@ -519,7 +513,7 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
                     Text('${_filterMonth.year}年${_filterMonth.month}月',
                         style: const TextStyle(fontWeight: FontWeight.bold)),
                     Text('利用日・支払日が${_filterMonth.month}月の明細',
-                        style: const TextStyle(fontSize: 11, color: Colors.black54)),
+                        style: const TextStyle(fontSize: 12, color: Colors.black54)),
                   ],
                 ),
               ),
@@ -888,12 +882,12 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
                       style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
                   const SizedBox(height: 4),
                   Text('${DateFormat('M/d').format(p.paymentDate)}・¥${yenNum(p.amount)}',
-                      style: const TextStyle(fontSize: 12, color: Colors.grey)),
+                      style: const TextStyle(fontSize: 12, color: AppColors.subtle)),
                   const SizedBox(height: 4),
                   const Text(
                     'Amazonのメールには支払いカードが載らないため、既定は Amazonマスター として'
                     '計上しています。別のカードで払ったなら選び直してください。',
-                    style: TextStyle(fontSize: 11, color: Colors.grey),
+                    style: TextStyle(fontSize: 12, color: AppColors.subtle),
                   ),
                 ],
               ),
@@ -1055,7 +1049,7 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
               children: [
                 Text('${p.cardName}  ¥${yenNum(p.amount)}'),
                 Text('分割可能: ¥${yenNum(minInstallmentAmount(p.cardName))}以上',
-                    style: const TextStyle(fontSize: 12, color: Colors.grey)),
+                    style: const TextStyle(fontSize: 12, color: AppColors.subtle)),
                 const SizedBox(height: 8),
                 TextField(
                   controller: countCtrl,
@@ -1148,7 +1142,7 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
                 // 💡 分割はカードの請求に含めて落ちるので、カードが決まっていないと
                 //   引き落とし日も金額も割り当てられない。
                 const Text('どのカードで組んだか（必須）',
-                    style: TextStyle(fontSize: 12, color: Colors.grey)),
+                    style: TextStyle(fontSize: 12, color: AppColors.subtle)),
                 DropdownButton<String>(
                   value: card,
                   isExpanded: true,
@@ -1223,7 +1217,7 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
               TextField(controller: countCtrl, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: '回数')),
               const SizedBox(height: 12),
               const Text('どのカードで組んだか（必須）',
-                  style: TextStyle(fontSize: 12, color: Colors.grey)),
+                  style: TextStyle(fontSize: 12, color: AppColors.subtle)),
               DropdownButton<String>(
                 value: card,
                 isExpanded: true,
@@ -1234,7 +1228,7 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
                 onChanged: (v) => setLocal(() => card = v),
               ),
               const Text('選んだカードの引き落とし日に、この月額が含まれて落ちます。',
-                  style: TextStyle(fontSize: 11, color: Colors.grey)),
+                  style: TextStyle(fontSize: 12, color: AppColors.subtle)),
             ],
           ),
           actions: [
@@ -1272,7 +1266,7 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
                     leading: const Icon(Icons.subscriptions, color: Colors.purple),
                     title: Text(s.title),
                     subtitle: Text('毎月${s.payDay}日 ・ ${s.methodLabel}'),
-                    trailing: Text('¥${yenNum(s.amount)}', style: const TextStyle(fontWeight: FontWeight.bold)),
+                    trailing: Text(yen(s.amount), style: const TextStyle(fontWeight: FontWeight.bold)),
                     onTap: () => _editSubscriptionMethod(appState, s),
                   ),
                 ),
@@ -1300,7 +1294,7 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
                 TextField(controller: amountCtrl, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: '金額(円)')),
                 TextField(controller: dayCtrl, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: '支払日(日)')),
                 const SizedBox(height: 12),
-                const Text('支払い方法', style: TextStyle(fontSize: 12, color: Colors.grey)),
+                const Text('支払い方法', style: TextStyle(fontSize: 12, color: AppColors.subtle)),
                 const SizedBox(height: 4),
                 Wrap(
                   spacing: 6,
@@ -1326,7 +1320,7 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
                 const SizedBox(height: 6),
                 Text(
                   _methodHint(method),
-                  style: const TextStyle(fontSize: 11, color: Colors.grey),
+                  style: const TextStyle(fontSize: 12, color: AppColors.subtle),
                 ),
               ],
             ),
@@ -1396,7 +1390,7 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
               const SizedBox(height: 8),
               Text(
                 _methodHint(method),
-                style: const TextStyle(fontSize: 11, color: Colors.grey),
+                style: const TextStyle(fontSize: 12, color: AppColors.subtle),
               ),
             ],
           ),
@@ -1427,7 +1421,7 @@ class _PaymentScreenState extends State<PaymentScreen> with SingleTickerProvider
                 child: Card(
                   child: ListTile(
                     leading: const Icon(Icons.atm, color: Colors.brown),
-                    title: Text('¥${yenNum(w.amount)}'),
+                    title: Text(yen(w.amount)),
                     subtitle: Text('${DateFormat('M/d').format(w.date)}${w.memo.isNotEmpty ? ' / ${w.memo}' : ''}'),
                   ),
                 ),

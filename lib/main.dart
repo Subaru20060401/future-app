@@ -22,6 +22,7 @@ import 'screens/settings_screen.dart';
 import 'widgets/app_gate.dart';
 import 'gemini_client.dart';
 import 'widgets/drive_sync_dialog.dart';
+import 'widgets/data_lock_overlay.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -64,6 +65,8 @@ void main() async {
   //   端末アプリ専用だった device_calendar と違い、Web版でも動く。
   //   ⚠️ 両方つなぐと同じ予定が二重に出るので、Apple側は繋がない。
   appState.calendarSync = GoogleCalendarSync(appState);
+  // 💡 保存の容量が足りないとき、作り直せる Gmail の解析キャッシュを消して空きを作る（補助策）
+  appState.freeStorageSpace = GmailService.instance.clearCache;
   if (!kIsWeb) {
     // 💡 データが変わるたびに通知を組み立て直す
     appState.addListener(() {
@@ -155,7 +158,8 @@ class MyApp extends StatelessWidget {
                 stops: const [0.0, 0.5, 1.0],
               ),
             ),
-            child: inner!,
+            // 💡 取り込み中は全体を覆って操作を止める（成功・失敗のどちらでも、終われば消える）
+            child: DataLockOverlay(child: inner!),
           );
         },
       ),

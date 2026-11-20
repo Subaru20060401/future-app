@@ -179,7 +179,9 @@ Future<GmailSyncResult> _syncGmail(
         items: list,
       );
     }
-    final r = appState.reconcilePayments(
+    // 💡 取り込み中（ドライブ・復元）なら、終わるまで待ってから反映する（取り込みの保存に混ぜない）。
+    //   メールが正本なので、取り込んだあとの中身に反映し直しても正しい。
+    final r = await appState.runWhenEditable(() => appState.reconcilePayments(
       list.map(
         (p) => (
           cardName: p.cardName,
@@ -192,7 +194,7 @@ Future<GmailSyncResult> _syncGmail(
       ),
       since: reconcileSince,
       mailReceivedAt: gmail.lastMailReceivedAt,
-    );
+    ));
     // ⚠️ ここから下は足すだけ（消さない）ので、失敗してもカードの結果は返す。
     //   ただし黙って「確認しました」にはしない（残高の予想に要るメールが抜けているため）。
     final partial = <String>[];
@@ -200,8 +202,8 @@ Future<GmailSyncResult> _syncGmail(
     //   起動時にポップアップで入力してもらうためキューに積む。
     var before = gmail.missTotal;
     try {
-      appState.addDepositNotices(
-          await gmail.withFreshToken(() => gmail.fetchDepositNotices(since: since)));
+      final notices = await gmail.withFreshToken(() => gmail.fetchDepositNotices(since: since));
+      await appState.runWhenEditable(() => appState.addDepositNotices(notices));
       if (gmail.missTotal > before) partial.add('振込入金のお知らせを一部確認できませんでした');
     } catch (_) {
       partial.add('振込入金のお知らせを確認できませんでした');
@@ -212,18 +214,18 @@ Future<GmailSyncResult> _syncGmail(
     try {
       final transfers =
           await gmail.withFreshToken(() => gmail.fetchPayPayTransfers(since: since));
-      appState.addPayPayTransfers(transfers.map((t) => PayPayTransfer(
+      await appState.runWhenEditable(() => appState.addPayPayTransfers(transfers.map((t) => PayPayTransfer(
             id: t.id,
             amount: t.amount,
             acceptedAt: t.acceptedAt,
             scheduledDate: t.scheduledDate,
             bank: t.bank,
-          )));
+          ))));
       if (gmail.missTotal > before) partial.add('PayPayからの出金のお知らせを一部確認できませんでした');
     } catch (_) {
       partial.add('PayPayからの出金のお知らせを確認できませんでした');
     }
-    appState.markGmailSynced();
+    await appState.runWhenEditable(appState.markGmailSynced);
     return GmailSyncResult(
       added: r.added,
       removed: r.removed,

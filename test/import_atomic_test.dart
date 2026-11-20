@@ -92,12 +92,13 @@ void main() {
     other['payments'] = [];
     var notifications = 0;
     app.addListener(() => notifications++);
-    app.importJson(jsonEncode(other));
-    await Future<void>.delayed(const Duration(milliseconds: 30));
+    await app.importJson(jsonEncode(other));
     final prefs = await SharedPreferences.getInstance();
     expect(prefs.getString('saved_payments'), '[]');
     expect(prefs.getString('saved_data_updated_at'), updatedAt!.toIso8601String());
     expect(app.dataUpdatedAt, updatedAt);
-    expect(notifications, 1);
+    // 💡 通知は「取り込み中」の表示を出すときと、取り込んだ内容で表示し直すとき（鍵を外すとき）の 2 回
+    expect(notifications, 2);
+    expect(app.dataLocked, isFalse);
   });
 }

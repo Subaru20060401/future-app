@@ -100,7 +100,7 @@ class _PasscodeSettingsState extends State<PasscodeSettings> {
                   const Text(
                     'ブラウザのパスワード管理（Chromeの自動生成など）から'
                     '入力・保存できます。',
-                    style: TextStyle(fontSize: 11, color: Colors.black54),
+                    style: TextStyle(fontSize: 12, color: Colors.black54),
                   ),
                 ],
               ),
@@ -218,7 +218,7 @@ class _PasscodeSettingsState extends State<PasscodeSettings> {
             child: Text(
               '※ データはこの端末の中にあります。ブラウザの開発者ツールを使える人には'
               '中身を読まれるため、暗号化ではなく「目隠し」と考えてください。',
-              style: TextStyle(fontSize: 11, color: Colors.black45),
+              style: TextStyle(fontSize: 12, color: Colors.black45),
             ),
           ),
         ],

@@ -30,7 +30,17 @@ iOS のビルドは macOS + Xcode でしかできない。Windows では Web と
 - データは `SharedPreferences`（Web では localStorage、キーは `flutter.saved_*`）。
   **端末×ブラウザごとに完全に独立**している
 - 端末間は Google ドライブの `appDataFolder` で同期する（`lib/drive_sync.dart`）
-- 全データ・全計算は `lib/app_state.dart` の `AppState`。**画面は計算しない**
+- 画面から使うデータ・計算の窓口は `lib/app_state.dart` の `AppState`。**画面は計算しない**
+  （合計・規則の判定は AppState に置き、画面は受け取った値を出すだけ）
+- 純粋な部品は AppState の外に置き、AppState から呼ぶ（画面からは直接呼ばない）:
+  - `lib/models/`: データ型と JSON（`app_state.dart` から再 export。既存の import のままで使える）
+  - `lib/finance/`: 日付の規則（`billing_dates.dart`）、予想の行と月（`forecast.dart`）
+  - ⚠️ この 2 つは AppState・画面・外部サービス・Flutter を import しない。`DateTime.now()` も読まない
+    （`test/architecture_test.dart` で固定）
+- 「今日」は `AppState.clockNow()`。計算・判定で `DateTime.now()` を直接読まない（テストで時刻を固定するため）
+- 見た目の決まりと共通部品は `lib/ui/`（`tokens.dart`・`components.dart`）。色だけで区別しない
+  （金額は +/− と言葉、状態は「確定」「見込み」「要確認」の文字、カレンダーの印は形も変える）。
+  金額の表記は `money_format.dart` の `yen()` 1 か所（¥85,000 ／ −¥5,000 ／ +¥5,000）
 - Google 連携（Gmail・Drive・Calendar）は `lib/gmail_service.dart` に集約。同じトークンを使う
 - カレンダーは Google カレンダーの専用カレンダー「ポケットメイド」へ一方向で書き出す
   （`lib/google_calendar_sync.dart`）。iOS/Mac の純正カレンダーには端末側で Google アカウントを
@@ -40,7 +50,23 @@ iOS のビルドは macOS + Xcode でしかできない。Windows では Web と
 
 どれも実際に踏んだもの。このアプリのバグは画面を壊さず **金額が静かに間違う** 形で出る。
 
-- **二重計上ゲート**: 残高を手で書いた日（`balanceUpdatedAt`）より後の支出だけ予想から引く
+- **二重計上ゲート**: 残高を手で書いた日（`balanceUpdatedAt`）より後の支出だけ予想から引く。
+  ゲートは「残高の予想」だけに使う。履歴・推移・年間支出（利用月の支出）には使わない
+- 金額は 3 つの意味を混ぜない（`docs/architecture-plan.md` §11）:
+  ① 利用月の支出（`expenseBreakdownOf`）② 支払日の入出金 ③ 残高の予想（②のうちゲートより後）
+- **予想の式は 1 か所**: 月末・内訳・日ごとの並び・最低残高・足りない日は、すべて `forecastMonths` の行から作る。
+  足し引きを増やすときは `_forecastLinesOf` にだけ足す
+- 予想の行は **実際の日付の月** に入れる（月末が休みで翌月にずれた引落は翌月の予想に入る）
+- 銀行の休業日は土日祝＋年末年始（12/31〜1/3）。年末年始は `isBankHoliday` だけで、祝日（`isJapaneseHoliday`）には入れない
+- 確認待ちの引き落とし（`pendingDraws`）は予想と同じ日付・金額の規則（`cardBillAmountOf`）。
+  ただし予想のゲートでは消さない（処理したときだけ消える）
+- **確認待ちは二重に引かない**: `applyDraw`・`skipDraw` は処理済みなら何もしない（判定は AppState）。
+  「入力した残高に含まれているか」は `drawReflectionOf` の推定で、断定しない（同じ日は判断できない）。
+  判断には `balanceEnteredAt`（残高そのものを入力した時刻）を使い、入金・引落の反映で進む `balanceUpdatedAt` は使わない
+- **請求の月と実際の引落日は別**: 銀行確定・請求予定が何月の請求かは `billMonthOf` 1 か所で決める（金額では決めない）。
+  設定の引落日から一意に決まらなければ「判定できない」として確認待ちで選んでもらい、それまで予想に「要確認」を付ける。
+  `PaymentSource.bank` を月で絞るときは、日付の月ではなく必ずこれを使う
+- カレンダーの引き落としも予想と同じ額・日付（`cardPaymentSummaryOnDay`）。ただし予想のゲートは使わない
 - 引き落としは「**n 月の引き落とし＝n-1 月の利用ぶん**」。
   ただし頭金・予定支出など **一度きりの出費は月ズレさせず、日付どおりの月に引く**（`oneTimeExpensesIn`）
 - 締め日が月末以外のカードは `cardClosingPeriodOf` で締め期間ごとに集計する
@@ -58,7 +84,23 @@ iOS のビルドは macOS + Xcode でしかできない。Windows では Web と
   付け替え先に同日・同額の明細があれば `infoOnly`（記録のみ）にする
 - 既定のカードは `kSeedCardPaymentDays` を **初回起動時だけ** 書き込む。コードに焼き付けない。
   `importJson` は **置き換え**（マージすると別端末で消したものが復活する）
-- **計算を直しても、既に作られた行は消えない。** 起動時・取り込み時に自己修復する処理を入れること
+- **計算を直しても、既に作られた行は消えない。** 起動時・取り込み時に自己修復する処理を入れること。
+  自己修復は `repairData()` の 1 か所（読込と `importJson` の両方が通る）。何度走らせても同じ結果にし、
+  失った情報（予定の ID など）を推測で作らない
+- 保存（`saveData`）はカードの引落日・締め日も毎回書く。`importJson` は保存の完了を待つ（`Future`）
+- **保存は全部そろったときだけ有効**: 一時保存（`saved_pending_write`）→ 全キー → 一時保存を消す。取り込みは先に
+  復旧点（`saved_restore_point`）を書く。どちらも書けなければ既存のキーを上書きしない。起動時に残っていれば整った状態へ戻す。
+  保存キーを足すときは `_persistedValues` に足す（読込・書き出し・取り込みも忘れずに。往復テストが落ちる）
+- 保存が整っていない間（`uploadsBlocked`）は、ドライブへの保存・自動バックアップをしない。取り込みと診断は使える
+- **取り込み中（`dataLocked`）は家計データの変更を受け付けない**（受け付けてから失敗の巻き戻しで消すと、入力が黙って消える）。
+  保存する公開メソッドは先頭で `_ensureEditable()`（付け忘れると `architecture_test` が落ちる）。自動の処理は `runWhenEditable` で
+  終わるまで待つ。待つ前に求めた判定は、取り込みで中身が変わったら使わない（`_dataGeneration` を比べてやり直す）。
+  待っている間に外へ作ったもの（カレンダーの予定）は、取り込んだ中身でも要るかを判定してから記録し、要らなければ消す
+  画面は `DataLockOverlay` が覆い、背後からフォーカスも外す（タップだけ止めると Enter で押せる）。
+  ドライブの取り込みは取得の前から鍵を持つ（`runWithDataLock`）
+- **家計データのキーを書く入口は `saveData` だけ**（カード設定も含む）。SharedPreferences に直接書くと保存の列を飛ばして、
+  古い値で上書きされる。保存・削除の戻り値 false も失敗として扱う（`_checked`）
+- 変更時刻・同期の基準時刻は `issueStamp()`（必ず増える）。Drive の取り込みは、取り込みを始める前の時刻までを同期済みにする
 - ドライブ同期は「新しい方で黙って上書き」しない。両方変わっていたら選ばせる（`decideSyncState`）。
   マージもしない
 
@@ -98,6 +140,8 @@ iOS のビルドは macOS + Xcode でしかできない。Windows では Web と
 ## 未対応の課題
 
 `docs/handoff.md` にまとめてある。作業を始める前に読むこと。
+2026-11 の再構築（調査・設計・進捗・レビュー用の案内）は `docs/survey.md`・`docs/architecture-plan.md`・
+`docs/refactor-progress.md`・`docs/review-handoff.md`・`docs/prepublish-review-plan.md`。
 
 ## Web 固有
 
@@ -114,6 +158,9 @@ iOS のビルドは macOS + Xcode でしかできない。Windows では Web と
 - **public リポジトリ。** 秘密情報・個人情報（メールアドレスなど）をコミットしない
 - コメントは日本語。意図は 💡、罠は ⚠️ で書く
 - お金の計算を変えたら必ずテストを足す
+- 金額の計算を変えたら、手計算のテスト（期待値をコメントの計算から書く）を足す。
+  `test/regression/` の記録は「その時点の出力」で正しさの根拠ではない。意図して変えたときだけ
+  `--dart-define=UPDATE_SNAPSHOT=true` で記録し直し、変わった項目と理由をコミットに書く
 - **推測で直さない。** 「同期の状態を確認」（`authDiagnostics` など）で実際の値を見てから直す。
   推測で直して外れたことが何度もある
 - コミットメッセージは日本語で、何が起きていて・なぜそう直したかを書く

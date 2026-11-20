@@ -3,6 +3,8 @@ import 'package:intl/intl.dart';
 import '../app_state.dart';
 import 'app_sheet.dart';
 import '../money_format.dart';
+import '../ui/components.dart';
+import '../ui/tokens.dart';
 
 // 💡 入金を反映する前に、日付の過ぎた未処理の引き落としを先に確認してもらう。
 // ⚠️ 入金を反映すると残高の基準日が今日に進み、それより前の引き落としは
@@ -144,7 +146,7 @@ Future<void> showDepositDialog(
                 transfer != null
                     ? 'PayPayの出金（${transfer.acceptedAt.month}/${transfer.acceptedAt.day}受付）の着金と見られます。金額が違えば直してください。'
                     : 'メールに金額が無いため、入金額を入力してください。',
-                style: const TextStyle(fontSize: 11, color: Colors.grey),
+                style: const TextStyle(fontSize: 12, color: Colors.grey),
               ),
               const SizedBox(height: 14),
               TextField(
@@ -238,7 +240,7 @@ Future<void> showDepositDialog(
                     padding: const EdgeInsets.only(top: 6),
                     child: Text(
                       '※ ${_workMonthLabel(appState, selectedWpId!, notice.date)}の実給料としても記録します',
-                      style: const TextStyle(fontSize: 11, color: Colors.grey),
+                      style: const TextStyle(fontSize: 12, color: Colors.grey),
                     ),
                   ),
               ],
@@ -369,43 +371,120 @@ Future<void> showManualDepositDialog(BuildContext context, AppState appState) as
   );
 }
 
-// 💡 「引き落としがありました」ポップアップ。
-//   銀行の事前お知らせには金額が載っているので、そのまま口座から引ける。
-//   （入金と違って金額が分かるので、確認してボタンを押すだけ）
+// 💡 確認待ちの引き落としが、入力した残高に含まれているかの説明（AppState の推定を言葉にする）。
+//   ⚠️ 「反映済み」とは言わない。前後関係からの推定なので「可能性」「見込み」と書く。
+String drawReflectionText(AppState appState, DrawReflection r) {
+  final at = appState.balanceEnteredAt;
+  final when = at == null ? '' : '${at.month}/${at.day} に入力した';
+  return switch (r) {
+    DrawReflection.maybeIncluded =>
+      '$when残高に、この引き落としが含まれている可能性があります。通帳やアプリの残高と比べてください',
+    DrawReflection.likelyNotIncluded => '$when残高より後の引き落としです。まだ残高に入っていない見込みです',
+    DrawReflection.unknown => at == null
+        ? '残高を入力した記録が無いため、残高に入っているか分かりません'
+        : '残高を入力した日と同じ日の引き落としです。入力の前か後か分かりません',
+  };
+}
+
+BannerKind _bannerOf(DrawReflection r) => switch (r) {
+      DrawReflection.maybeIncluded => BannerKind.info,
+      DrawReflection.likelyNotIncluded => BannerKind.caution,
+      DrawReflection.unknown => BannerKind.caution,
+    };
+
+// 💡 残高から引く前の最終確認。対象・金額・変更後の残高を必ず見せる。
+//   含まれている可能性がある／判断できないときは、二重に引くおそれを書く。
+Future<bool> confirmSubtract(
+  BuildContext context,
+  AppState appState, {
+  required List<({String label, DateTime date, int amount})> items,
+  required DrawReflection reflection,
+}) async {
+  final total = items.fold<int>(0, (s, e) => s + e.amount);
+  final before = appState.effectiveBalance;
+  final ok = await showDialog<bool>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: const Text('残高から引きますか？'),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            for (final e in items)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 2),
+                child: Row(
+                  children: [
+                    Expanded(
+                        child: Text('${e.date.month}/${e.date.day}  ${e.label}', style: AppText.body)),
+                    MoneyText(-e.amount, signed: true, style: AppText.body),
+                  ],
+                ),
+              ),
+            const Divider(height: 20),
+            Row(children: [
+              const Expanded(child: Text('いまの残高', style: AppText.body)),
+              MoneyText(before, style: AppText.body),
+            ]),
+            Row(children: [
+              const Expanded(child: Text('引く金額', style: AppText.body)),
+              MoneyText(-total, signed: true, style: AppText.body),
+            ]),
+            Row(children: [
+              const Expanded(
+                  child: Text('引いた後の残高', style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold))),
+              MoneyText(before - total, style: AppText.amount),
+            ]),
+            if (reflection != DrawReflection.likelyNotIncluded)
+              const StatusBanner(
+                kind: BannerKind.caution,
+                message: '入力した残高に含まれていると、二重に引くことになります',
+                detail: '通帳やアプリの残高で、まだ引かれていないことを確かめてから引いてください',
+              ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('やめる')),
+        ElevatedButton(onPressed: () => Navigator.pop(context, true), child: const Text('引く')),
+      ],
+    ),
+  );
+  return ok == true;
+}
+
+// 💡 確認待ちの引き落とし（ホームの確認待ちから開く）。
+//   基本の操作は「残高はそのまま（確認した）」。まだ入っていない見込みのときだけ「引く」を主にする。
+//   どちらも AppState 側で一度だけ反映する（処理済みなら何もしない）。
 Future<void> showDrawDialog(
   BuildContext context,
   AppState appState,
   ({String id, String label, int amount, DateTime date}) draw,
 ) async {
   final amountCtrl = TextEditingController(text: draw.amount.toString());
+  final reflection = appState.drawReflectionOf(draw.date);
+  final notIncluded = reflection == DrawReflection.likelyNotIncluded;
 
-  await showDialog<void>(
+  void done(String message) {
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  final action = await showDialog<String>(
     context: context,
-    barrierDismissible: false,
     builder: (context) => AlertDialog(
-      title: const Row(
-        children: [
-          Text('💳 ', style: TextStyle(fontSize: 22)),
-          Expanded(child: Text('引き落としがありました', style: TextStyle(fontSize: 18))),
-        ],
-      ),
+      title: const Text('引き落としの確認'),
       content: SingleChildScrollView(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text('${DateFormat('M月d日').format(draw.date)}  ${draw.label}',
-                style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold)),
-            const SizedBox(height: 2),
-            Text(
-              draw.label.contains('（手動）')
-                  ? '支払い済みなら、この金額を口座残高から引きます'
-                  : draw.label.contains('（予定）')
-                      ? '見込みの金額です。実際の引き落とし額に直してから引いてください'
-                      : 'この金額を口座残高から引きますか？',
-              style: const TextStyle(fontSize: 12, color: Colors.grey),
-            ),
-            const SizedBox(height: 14),
+                style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold)),
+            if (draw.label.contains('（予定）'))
+              const Text('見込みの金額です。実際の引き落とし額に直せます', style: AppText.caption),
+            const SizedBox(height: 12),
             TextField(
               controller: amountCtrl,
               keyboardType: TextInputType.number,
@@ -416,63 +495,57 @@ Future<void> showDrawDialog(
                 isDense: true,
               ),
             ),
-            const SizedBox(height: 10),
-            Container(
-              padding: const EdgeInsets.all(10),
-              decoration: BoxDecoration(
-                color: Colors.grey.withValues(alpha: 0.12),
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: Row(
-                children: [
-                  const Text('引いた後の残高', style: TextStyle(fontSize: 12)),
-                  const Spacer(),
-                  Text(
-                    // 💡 引くときはデビットも畳み込むので、実効残高から引いた額が結果になる
-                    '¥${yenNum(appState.effectiveBalance - (int.tryParse(amountCtrl.text) ?? draw.amount))}',
-                    style: const TextStyle(fontWeight: FontWeight.bold),
-                  ),
-                ],
-              ),
-            ),
+            const SizedBox(height: 8),
+            StatusBanner(kind: _bannerOf(reflection), message: drawReflectionText(appState, reflection)),
           ],
         ),
       ),
       actions: [
-        // 💡 ホームの確認待ちから自分で開くようになったので、閉じるだけの逃げ道を用意する
-        //   （以前は起動時に順番に聞いていたので、スキップか反映しか無かった）
-        TextButton(
-          onPressed: () => Navigator.pop(context),
-          child: const Text('あとで'),
-        ),
-        TextButton(
-          onPressed: () {
-            appState.skipDraw(draw.id);
-            Navigator.pop(context);
-          },
-          child: const Text('スキップ'),
-        ),
-        ElevatedButton(
-          onPressed: () {
-            final amount = int.tryParse(amountCtrl.text.replaceAll(',', '')) ?? draw.amount;
-            appState.applyDraw(draw.id, amount, label: draw.label);
-            Navigator.pop(context);
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(content: Text('¥${yenNum(amount)} を口座残高から引きました')),
-            );
-          },
-          child: const Text('口座から引く'),
-        ),
+        TextButton(onPressed: () => Navigator.pop(context), child: const Text('あとで')),
+        if (notIncluded)
+          TextButton(
+              onPressed: () => Navigator.pop(context, 'keep'), child: const Text('残高はそのまま')),
+        if (notIncluded)
+          ElevatedButton(
+              onPressed: () => Navigator.pop(context, 'subtract'), child: const Text('残高から引く…'))
+        else ...[
+          TextButton(
+              onPressed: () => Navigator.pop(context, 'subtract'), child: const Text('残高から引く…')),
+          ElevatedButton(
+              onPressed: () => Navigator.pop(context, 'keep'),
+              child: const Text('残高はそのまま（確認した）')),
+        ],
       ],
     ),
   );
+  if (action == 'keep') {
+    if (!appState.skipDraw(draw.id)) done('この引き落としは処理済みです');
+    return;
+  }
+  if (action != 'subtract' || !context.mounted) return;
+  final amount = int.tryParse(amountCtrl.text.replaceAll(',', '')) ?? draw.amount;
+  final ok = await confirmSubtract(context, appState,
+      items: [(label: draw.label, date: draw.date, amount: amount)], reflection: reflection);
+  if (!ok) return;
+  if (appState.applyDraw(draw.id, amount, label: draw.label)) {
+    done('¥${yenNum(amount)} を口座残高から引きました');
+  } else {
+    done('この引き落としは処理済みです（二重には引いていません）');
+  }
 }
 
-// 💡 引き落としの一覧＋手入力。未反映の引き落としをまとめて処理できる。
+// 💡 引き落としの一覧＋手入力。確認待ちの引き落としを1件ずつ、またはまとめて処理する。
+//   ⚠️ 以前の「すべて引く」は、入力した残高に含まれている可能性があるものまで引いていた。
+//     まとめて引けるのは「まだ入っていない見込み」のものだけにした。
 Future<void> showDrawSheet(BuildContext context, AppState appState) async {
   showAppSheet<void>(context, (ctx) => StatefulBuilder(
       builder: (ctx, setLocal) {
         final pending = appState.pendingDraws;
+        final notIncluded = [
+          for (final d in pending)
+            if (appState.drawReflectionOf(d.date) == DrawReflection.likelyNotIncluded) d,
+        ];
+        final notIncludedTotal = notIncluded.fold<int>(0, (s, d) => s + d.amount);
         return Padding(
           padding: EdgeInsets.only(
             left: 20, right: 20, top: 20,
@@ -485,93 +558,110 @@ Future<void> showDrawSheet(BuildContext context, AppState appState) async {
               const Text('口座から引き落とし',
                   style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold)),
               const SizedBox(height: 2),
-              Text('現在の残高 ¥${yenNum(appState.effectiveBalance)}',
-                  style: const TextStyle(fontSize: 12, color: Colors.grey)),
+              Text('いまの残高 ¥${yenNum(appState.effectiveBalance)}', style: AppText.caption),
               const SizedBox(height: 12),
               if (pending.isEmpty)
                 const Padding(
                   padding: EdgeInsets.symmetric(vertical: 12),
-                  child: Text('未反映の引き落としはありません',
-                      style: TextStyle(fontSize: 13, color: Colors.grey)),
+                  child: Text('確認待ちの引き落としはありません', style: AppText.caption),
                 )
               else ...[
-                const Text('未反映の引き落とし',
-                    style: TextStyle(fontSize: 12, color: Colors.grey)),
+                const Text('確認待ちの引き落とし', style: AppText.caption),
                 ConstrainedBox(
-                  constraints: const BoxConstraints(maxHeight: 260),
+                  constraints: const BoxConstraints(maxHeight: 320),
                   child: ListView(
                     shrinkWrap: true,
-                    children: pending
-                        .map((d) => Card(
-                              color: Colors.red[50],
-                              child: ListTile(
-                                dense: true,
-                                title: Text(d.label, style: const TextStyle(fontSize: 14)),
-                                subtitle: Text(DateFormat('M月d日').format(d.date),
-                                    style: const TextStyle(fontSize: 11)),
-                                trailing: Row(
-                                  mainAxisSize: MainAxisSize.min,
+                    children: [
+                      for (final d in pending)
+                        Card(
+                          child: Padding(
+                            padding: const EdgeInsets.fromLTRB(12, 8, 4, 4),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Row(
                                   children: [
-                                    Text('-¥${yenNum(d.amount)}',
-                                        style: const TextStyle(
-                                            color: Colors.red, fontWeight: FontWeight.bold)),
-                                    const SizedBox(width: 8),
-                                    TextButton(
-                                      style: TextButton.styleFrom(
-                                          visualDensity: VisualDensity.compact),
-                                      onPressed: () {
-                                        appState.applyDraw(d.id, d.amount, label: d.label);
-                                        setLocal(() {});
-                                      },
-                                      child: const Text('引く'),
+                                    Expanded(
+                                      child: Text(
+                                          '${DateFormat('M/d').format(d.date)}  ${d.label}',
+                                          style: AppText.body.copyWith(fontWeight: FontWeight.w600)),
                                     ),
-                                    IconButton(
-                                      visualDensity: VisualDensity.compact,
-                                      tooltip: 'スキップ',
-                                      icon: const Icon(Icons.close, size: 16),
+                                    MoneyText(-d.amount, signed: true, style: AppText.body),
+                                  ],
+                                ),
+                                Text(drawReflectionText(appState, appState.drawReflectionOf(d.date)),
+                                    style: AppText.caption),
+                                Row(
+                                  mainAxisAlignment: MainAxisAlignment.end,
+                                  children: [
+                                    TextButton(
                                       onPressed: () {
                                         appState.skipDraw(d.id);
                                         setLocal(() {});
                                       },
+                                      child: const Text('残高はそのまま'),
+                                    ),
+                                    TextButton(
+                                      onPressed: () async {
+                                        final ok = await confirmSubtract(ctx, appState,
+                                            items: [(label: d.label, date: d.date, amount: d.amount)],
+                                            reflection: appState.drawReflectionOf(d.date));
+                                        if (ok) appState.applyDraw(d.id, d.amount, label: d.label);
+                                        setLocal(() {});
+                                      },
+                                      child: const Text('残高から引く…'),
                                     ),
                                   ],
                                 ),
-                              ),
-                            ))
-                        .toList(),
+                              ],
+                            ),
+                          ),
+                        ),
+                    ],
                   ),
                 ),
                 const SizedBox(height: 8),
-                Row(
-                  children: [
-                    Expanded(
-                      child: ElevatedButton.icon(
-                        style: ElevatedButton.styleFrom(
-                            backgroundColor: Colors.red, foregroundColor: Colors.white),
-                        icon: const Icon(Icons.done_all, size: 18),
-                        label: Text('すべて引く（-¥${yenNum(pending.fold<int>(0, (s, d) => s + d.amount))}）'),
-                        onPressed: () {
-                          for (final d in List.of(pending)) {
-                            appState.applyDraw(d.id, d.amount, label: d.label);
-                          }
-                          setLocal(() {});
-                        },
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    TextButton(
-                      onPressed: () {
-                        appState.skipAllDraws();
+                if (notIncluded.isNotEmpty)
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton(
+                      onPressed: () async {
+                        final ok = await confirmSubtract(ctx, appState,
+                            items: [
+                              for (final d in notIncluded)
+                                (label: d.label, date: d.date, amount: d.amount),
+                            ],
+                            reflection: DrawReflection.likelyNotIncluded);
+                        if (ok) appState.applyLikelyNotIncludedDraws();
                         setLocal(() {});
                       },
-                      child: const Text('すべてスキップ'),
+                      child: Text(
+                          'まだ入っていない見込みの${notIncluded.length}件を引く（−¥${yenNum(notIncludedTotal)}）…'),
                     ),
-                  ],
+                  ),
+                TextButton(
+                  onPressed: () async {
+                    final ok = await showDialog<bool>(
+                      context: ctx,
+                      builder: (c) => AlertDialog(
+                        title: const Text('すべて確認済みにしますか？'),
+                        content: Text('${pending.length}件を、残高を変えずに確認済みにします。'),
+                        actions: [
+                          TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('やめる')),
+                          ElevatedButton(
+                              onPressed: () => Navigator.pop(c, true), child: const Text('確認済みにする')),
+                        ],
+                      ),
+                    );
+                    if (ok == true) appState.skipAllDraws();
+                    setLocal(() {});
+                  },
+                  child: const Text('すべて確認済みにする（残高はそのまま）'),
                 ),
               ],
               const Divider(height: 24),
               // 手入力（通知に無い引き落とし・現金払いなど）
-              const Text('手入力で引く', style: TextStyle(fontSize: 12, color: Colors.grey)),
+              const Text('手入力で引く', style: AppText.caption),
               const SizedBox(height: 6),
               _ManualSubtractRow(appState: appState),
             ],

@@ -3,10 +3,13 @@ import 'package:fl_chart/fl_chart.dart';
 import 'package:provider/provider.dart';
 import '../app_state.dart';
 import '../widgets/legend_dot.dart';
-import '../card_styles.dart';
 import '../money_format.dart';
+import '../ui/tokens.dart';
 
 // 💡 月々の収入(給与)と支出を棒グラフで振り返る。横スクロールで過去に遡れる。
+//   支出は「利用月の支出」（AppState.expenseBreakdownOf。予想と同じ規則・残高のゲートは無し）。
+//   ⚠️ 以前は別の規則（カード名で決め打ちした引落日・今月時点の分割の合計）で計算していて、
+//     同じ月でも推移の画面や予想と違う金額が出ていた。
 class HistoryScreen extends StatelessWidget {
   const HistoryScreen({super.key});
 
@@ -15,42 +18,40 @@ class HistoryScreen extends StatelessWidget {
     final appState = context.watch<AppState>();
 
     // 表示する月（過去24か月〜今月）
-    final now = DateTime(DateTime.now().year, DateTime.now().month);
+    final today = appState.clockNow();
+    final now = DateTime(today.year, today.month);
     final months = List.generate(24, (i) => DateTime(now.year, now.month - 23 + i));
 
     final incomes = months.map((m) => appState.salaryOf(m)).toList();
-    final expenses = months.map((m) => appState.monthlyExpenseOf(m)).toList();
+    final breakdowns = months.map((m) => appState.expenseBreakdownOf(m)).toList();
+    final expenses = [for (final b in breakdowns) b.fold<int>(0, (s, e) => s + e.amount)];
     final maxV = [
       ...incomes,
       ...expenses,
       10000,
     ].reduce((a, b) => a > b ? a : b).toDouble() * 1.2;
 
-    // 各月の支出をカード色＋定期/分割/ATMのセグメントに分解
-    List<({Color color, int value})> segmentsOf(DateTime m) {
-      return [
-        for (final e in appState.cardChargesOf(m).entries)
-          (color: cardColorOf(e.key), value: e.value),
-        if (appState.subscriptionTotal > 0) (color: Colors.purple, value: appState.subscriptionTotal),
-        if (appState.installmentTotal > 0) (color: Colors.deepOrange, value: appState.installmentTotal),
-        if (appState.withdrawalsOf(m) > 0) (color: Colors.brown, value: appState.withdrawalsOf(m)),
-      ];
-    }
+    // 各月の支出を、内訳（カード・定期・ローン・分割・ATM）ごとの色で積み上げる
+    List<({Color color, int value})> segmentsOf(int i) => [
+          for (final e in breakdowns[i]) (color: Color(e.colorValue), value: e.amount),
+        ];
 
-    List<BarChartRodStackItem> stackOf(DateTime m) {
+    List<BarChartRodStackItem> stackOf(int i) {
       final items = <BarChartRodStackItem>[];
       double from = 0;
-      for (final s in segmentsOf(m)) {
+      for (final s in segmentsOf(i)) {
         items.add(BarChartRodStackItem(from, from + s.value, s.color));
         from += s.value;
       }
       return items;
     }
 
-    // 凡例用: 期間内に登場するカード名
-    final cardsInRange = <String>{};
-    for (final m in months) {
-      cardsInRange.addAll(appState.cardChargesOf(m).keys);
+    // 凡例用: 期間内に登場する内訳（名前 → 色）
+    final legend = <String, Color>{};
+    for (final b in breakdowns) {
+      for (final e in b) {
+        legend.putIfAbsent(e.label, () => Color(e.colorValue));
+      }
     }
 
     const barW = 56.0; // 1か月あたりの幅
@@ -66,11 +67,8 @@ class HistoryScreen extends StatelessWidget {
               spacing: 12,
               runSpacing: 4,
               children: [
-                const LegendDot(color: Colors.green, label: '収入(給与)'),
-                ...cardsInRange.map((c) => LegendDot(color: cardColorOf(c), label: c)),
-                const LegendDot(color: Colors.purple, label: '定期'),
-                const LegendDot(color: Colors.deepOrange, label: '分割'),
-                const LegendDot(color: Colors.brown, label: 'ATM'),
+                const LegendDot(color: AppColors.income, label: '収入（給与の見込み・左の棒）'),
+                for (final e in legend.entries) LegendDot(color: e.value, label: e.key),
               ],
             ),
           ),
@@ -88,7 +86,7 @@ class HistoryScreen extends StatelessWidget {
                       touchTooltipData: BarTouchTooltipData(
                         getTooltipItem: (group, a, rod, b) {
                           return BarTooltipItem(
-                            '¥${yenNum(rod.toY.toInt())}',
+                            yen(rod.toY.toInt()),
                             const TextStyle(color: Colors.white, fontSize: 11),
                           );
                         },
@@ -120,12 +118,12 @@ class HistoryScreen extends StatelessWidget {
                     barGroups: [
                       for (int i = 0; i < months.length; i++)
                         BarChartGroupData(x: i, barsSpace: 2, barRods: [
-                          BarChartRodData(toY: incomes[i].toDouble(), color: Colors.green, width: 10),
+                          BarChartRodData(toY: incomes[i].toDouble(), color: AppColors.income, width: 10),
                           BarChartRodData(
                             toY: expenses[i].toDouble(),
                             width: 10,
-                            color: Colors.red,
-                            rodStackItems: stackOf(months[i]), // カード色で積み上げ
+                            color: AppColors.expense,
+                            rodStackItems: stackOf(i), // 内訳の色で積み上げ
                           ),
                         ]),
                     ],
@@ -140,16 +138,28 @@ class HistoryScreen extends StatelessWidget {
               padding: const EdgeInsets.all(16),
               child: Column(
                 children: appState.dataYears.map((y) {
+                  final ex = appState.expenseSummaryOfYear(y);
                   return Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 2),
+                    padding: const EdgeInsets.symmetric(vertical: 4),
                     child: Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text('$y年', style: const TextStyle(fontWeight: FontWeight.bold)),
-                        Text('年収 ¥${yenNum(appState.salaryOfYear(y))}',
-                            style: const TextStyle(color: Colors.green)),
-                        Text('支出 ¥${yenNum(appState.cardSpendingOfYear(y))}',
-                            style: const TextStyle(color: Colors.red)),
+                        const Spacer(),
+                        Text('年収 ${yen(appState.salaryOfYear(y))}',
+                            style: const TextStyle(color: AppColors.income)),
+                        const SizedBox(width: 12),
+                        Column(
+                          crossAxisAlignment: CrossAxisAlignment.end,
+                          children: [
+                            Text('年間支出 ${yen(ex.total)}',
+                                style: const TextStyle(color: AppColors.expense)),
+                            // 💡 定期・分割・ローンは今の設定から計算したもの（明細の記録ではない）
+                            if (ex.fromSettings > 0)
+                              Text('うち設定から計算 ${yen(ex.fromSettings)}',
+                                  style: const TextStyle(fontSize: 12, color: Colors.black54)),
+                          ],
+                        ),
                       ],
                     ),
                   );

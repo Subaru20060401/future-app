@@ -3,6 +3,7 @@ import 'package:fl_chart/fl_chart.dart';
 import 'package:provider/provider.dart';
 import '../app_state.dart';
 import '../money_format.dart';
+import '../ui/tokens.dart';
 
 // 収入・支出の月次推移（折れ線）と前月比。
 class TrendScreen extends StatelessWidget {
@@ -18,12 +19,13 @@ class TrendScreen extends StatelessWidget {
         .toDouble();
 
     // 前月比（最新と1つ前）
+    // 💡 増減は記号と言葉で示す（色だけにしない）。⚠️ 以前はマイナスが「¥-5,000」になっていた
     String diffLabel(int cur, int prev) {
       final d = cur - prev;
-      if (prev == 0) return d == 0 ? '±0' : '+¥${yenNum(d)}';
+      final word = d > 0 ? '前月より多い' : (d < 0 ? '前月より少ない' : '前月と同じ');
+      if (prev == 0) return '$word ${yen(d, signed: true)}';
       final pct = (d / prev * 100).round();
-      final sign = d >= 0 ? '+' : '';
-      return '$sign¥${yenNum(d)}（$sign$pct%）';
+      return '$word ${yen(d, signed: true)}（${pct > 0 ? '+' : (pct < 0 ? '−' : '')}${pct.abs()}%）';
     }
 
     final hasPrev = data.length >= 2;
@@ -44,17 +46,19 @@ class TrendScreen extends StatelessWidget {
               children: [
                 Expanded(
                   child: _diffCard('収入（前月比）', cur.income, diffLabel(cur.income, prev.income),
-                      Colors.green, cur.income >= prev.income),
+                      AppColors.income, cur.income >= prev.income),
                 ),
                 const SizedBox(width: 12),
                 Expanded(
                   child: _diffCard('支出（前月比）', cur.expense, diffLabel(cur.expense, prev.expense),
-                      Colors.red, cur.expense <= prev.expense),
+                      AppColors.expense, cur.expense <= prev.expense),
                 ),
               ],
             ),
           const SizedBox(height: 16),
-          const Text('過去6か月の推移', style: TextStyle(fontWeight: FontWeight.bold)),
+          const Text('過去6か月の推移', style: AppText.title),
+          const Text('収入はシフトからの給与の見込み、支出は利用月の支出（月ごとの支出詳細と同じ）',
+              style: AppText.caption),
           const SizedBox(height: 16),
           SizedBox(
             height: 260,
@@ -78,15 +82,16 @@ class TrendScreen extends StatelessWidget {
                         return Padding(
                           padding: const EdgeInsets.only(top: 6),
                           child: Text('${data[i].month.month}月',
-                              style: const TextStyle(fontSize: 11)),
+                              style: const TextStyle(fontSize: 12)),
                         );
                       },
                     ),
                   ),
                 ),
                 lineBarsData: [
-                  _line(spots((e) => e.income), Colors.green),
-                  _line(spots((e) => e.expense), Colors.red),
+                  _line(spots((e) => e.income), AppColors.income),
+                  // 💡 支出は点線（色が見分けにくくても線の種類で分かる）
+                  _line(spots((e) => e.expense), AppColors.expense, dashed: true),
                 ],
               ),
             ),
@@ -95,9 +100,9 @@ class TrendScreen extends StatelessWidget {
           Row(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              _legend('収入', Colors.green),
+              _legend('収入（実線）', AppColors.income),
               const SizedBox(width: 24),
-              _legend('支出', Colors.red),
+              _legend('支出（点線）', AppColors.expense),
             ],
           ),
           const SizedBox(height: 16),
@@ -110,10 +115,10 @@ class TrendScreen extends StatelessWidget {
                     mainAxisAlignment: MainAxisAlignment.center,
                     crossAxisAlignment: CrossAxisAlignment.end,
                     children: [
-                      Text('収入 ¥${yenNum(e.income)}',
-                          style: const TextStyle(color: Colors.green, fontSize: 13)),
-                      Text('支出 ¥${yenNum(e.expense)}',
-                          style: const TextStyle(color: Colors.red, fontSize: 13)),
+                      Text('収入 ${yen(e.income)}',
+                          style: const TextStyle(color: AppColors.income, fontSize: 13)),
+                      Text('支出 ${yen(e.expense)}',
+                          style: const TextStyle(color: AppColors.expense, fontSize: 13)),
                     ],
                   ),
                 ),
@@ -123,9 +128,13 @@ class TrendScreen extends StatelessWidget {
     );
   }
 
-  LineChartBarData _line(List<FlSpot> spots, Color color) => LineChartBarData(
+  LineChartBarData _line(List<FlSpot> spots, Color color, {bool dashed = false}) =>
+      LineChartBarData(
         spots: spots,
         color: color,
+        dashArray: dashed ? const [8, 4] : null,
+        // ⚠️ 曲線で結ぶと、0円の月の前後で線がマイナスへ膨らんで見えていた（実際の値には無い）
+        preventCurveOverShooting: true,
         isCurved: true,
         barWidth: 3,
         dotData: const FlDotData(show: true),
@@ -148,14 +157,14 @@ class TrendScreen extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(title, style: const TextStyle(fontSize: 12, color: Colors.grey)),
+            Text(title, style: AppText.caption),
             const SizedBox(height: 4),
-            Text('¥${yenNum(value)}', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: color)),
+            Text(yen(value), style: AppText.amountLarge.copyWith(color: color)),
             const SizedBox(height: 2),
             Text(diff,
                 style: TextStyle(
                     fontSize: 12,
-                    color: good ? Colors.green : Colors.red,
+                    color: good ? AppColors.income : AppColors.expense,
                     fontWeight: FontWeight.bold)),
           ],
         ),

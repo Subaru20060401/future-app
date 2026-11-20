@@ -268,7 +268,7 @@ class _ReviewBodyState extends State<_ReviewBody> {
                     color: Colors.grey[200],
                     borderRadius: BorderRadius.circular(10),
                   ),
-                  child: const Text('見本', style: TextStyle(fontSize: 11)),
+                  child: const Text('見本', style: TextStyle(fontSize: 12)),
                 ),
             ],
           ),

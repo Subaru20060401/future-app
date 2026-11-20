@@ -304,7 +304,7 @@ void main() {
       a.approveScheduleSuggestion('a:m1#R1');
       final json = a.exportJson();
       final b = await app();
-      b.importJson(json);
+      await b.importJson(json); // 💡 取り込み中は変更を断るので、保存まで終わってから次の提案を受け取る
       expect(b.scheduleSuggestions.single.status, SuggestionStatus.approved);
       expect(
         b.mailEntityLinks.values.single.targetRef,

@@ -1,167 +1,30 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/foundation.dart' show kIsWeb, visibleForTesting;
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:crypto/crypto.dart';
 import 'package:intl/intl.dart';
 import 'package:path_provider/path_provider.dart';
 import 'card_styles.dart';
+import 'finance/billing_dates.dart';
+import 'finance/forecast.dart';
 import 'japanese_holidays.dart';
 import 'workplace_styles.dart';
 import 'mail_schedule_models.dart';
 export 'mail_schedule_models.dart';
+import 'models/calendar_items.dart';
+import 'models/money.dart';
+import 'models/shift.dart';
+import 'models/workplace.dart';
+// 💡 データ型は lib/models/ に分けた。今までどおり app_state.dart だけを import すれば使えるよう再 export する。
+export 'models/calendar_items.dart';
+export 'models/money.dart';
+export 'models/shift.dart';
+export 'models/workplace.dart';
+export 'finance/forecast.dart' show ForecastLine, MonthForecast, Certainty, CertaintyLabel, ForecastKind;
 import 'money_format.dart';
-
-// ───────────────────────── 列挙型 ─────────────────────────
-enum Priority { high, middle, low }
-
-enum RepeatType { none, daily, weekly, monthly }
-
-// ───────────────────────── シフト ─────────────────────────
-// 💡 新仕様: 開始/終了時刻 + 休憩(分)から勤務時間を自動算出
-class ShiftData {
-  // 💡 シフトの固定ID。メールから来た「変更・取消」を、再起動後も同じシフトに当てるため。
-  //   ⚠️ 旧データにはIDが無い。読み込み時に採番し（legacyId）、起動時の自己修復で保存する。
-  //   別の端末が同じ旧データから独立に採番すると別のIDになる（同じIDになるとは仮定しない）。
-  String id;
-  final bool legacyId;
-  final String workplace;
-  final int hourlyWage;
-  final DateTime start;
-  final DateTime end;
-  final int breakMinutes;
-  // 💡 勤務先マスタ連携。入力時にその日の給料情報をスナップショットして保持するため、
-  //    後から勤務先設定を変えても過去シフトの給与は変わらない。旧データは未設定（既定値）。
-  final String? workplaceId;
-  final int transportPerDay; // 交通費（1勤務あたり定額）
-  final int transportMonthlyCap; // 交通費の月上限（0=上限なし。月集計時に適用）
-  final double nightMultiplier; // 深夜割増の倍率（1.0=なし）
-  final double overtimeMultiplier; // 残業割増の倍率（1.0=なし）
-  final double holidayMultiplier; // 休日割増の倍率（1.0=なし）
-  String? calendarEventId; // Appleカレンダー連携で作成したイベントID（更新/削除用）
-
-  ShiftData({
-    String? id,
-    this.legacyId = false,
-    required this.workplace,
-    required this.hourlyWage,
-    required this.start,
-    required this.end,
-    this.breakMinutes = 0,
-    this.workplaceId,
-    this.transportPerDay = 0,
-    this.transportMonthlyCap = 0,
-    this.nightMultiplier = 1.0,
-    this.overtimeMultiplier = 1.0,
-    this.holidayMultiplier = 1.0,
-    this.calendarEventId,
-  }) : id = id ?? newShiftId();
-
-  static int _seq = 0;
-  static String newShiftId() =>
-      'sh-${DateTime.now().microsecondsSinceEpoch}-${_seq++}';
-
-  // 実働時間（時間）
-  double get workHours {
-    final total = end.difference(start).inMinutes - breakMinutes;
-    return total <= 0 ? 0 : total / 60.0;
-  }
-
-  // [start, end] のうち深夜帯（22:00〜翌5:00）に重なる時間（時間）
-  double get nightHours => _nightOverlapMinutes(start, end) / 60.0;
-
-  // 交通費を除いた給与（基本給＋深夜割増＋残業割増＋休日割増）。
-  // 交通費は月上限の対象なので分離し、月集計側で合算・上限適用する。
-  int get wageEarnings {
-    final hours = workHours;
-    if (hours <= 0) return 0;
-    double total = hourlyWage * hours;
-    // 深夜割増（重なり時間ぶんだけ上乗せ）
-    if (nightMultiplier > 1.0) {
-      total += nightHours * hourlyWage * (nightMultiplier - 1.0);
-    }
-    // 残業割増（8時間超ぶん）
-    if (overtimeMultiplier > 1.0 && hours > 8) {
-      total += (hours - 8) * hourlyWage * (overtimeMultiplier - 1.0);
-    }
-    // 休日割増（土日のみ・実働全体）
-    if (holidayMultiplier > 1.0 &&
-        (start.weekday == DateTime.saturday || start.weekday == DateTime.sunday)) {
-      total += hours * hourlyWage * (holidayMultiplier - 1.0);
-    }
-    return total.round();
-  }
-
-  // 1勤務あたりの給与（交通費込み・月上限は未適用＝単体表示用）
-  int get earnings => wageEarnings + transportPerDay;
-
-  Map<String, dynamic> toJson() => {
-        'id': id,
-        'workplace': workplace,
-        'hourlyWage': hourlyWage,
-        'start': start.toIso8601String(),
-        'end': end.toIso8601String(),
-        'breakMinutes': breakMinutes,
-        'workplaceId': workplaceId,
-        'transportPerDay': transportPerDay,
-        'transportMonthlyCap': transportMonthlyCap,
-        'nightMultiplier': nightMultiplier,
-        'overtimeMultiplier': overtimeMultiplier,
-        'holidayMultiplier': holidayMultiplier,
-        'calendarEventId': calendarEventId,
-      };
-
-  factory ShiftData.fromJson(Map<String, dynamic> json) {
-    // 💡 旧形式 (title / hours) からの移行も吸収
-    if (json.containsKey('start')) {
-      final savedId = json['id'] as String?;
-      return ShiftData(
-        id: savedId,
-        legacyId: savedId == null,
-        workplace: json['workplace'] ?? json['title'] ?? 'バイト',
-        hourlyWage: json['hourlyWage'] ?? 0,
-        start: DateTime.parse(json['start']),
-        end: DateTime.parse(json['end']),
-        breakMinutes: json['breakMinutes'] ?? 0,
-        workplaceId: json['workplaceId'],
-        transportPerDay: json['transportPerDay'] ?? 0,
-        transportMonthlyCap: json['transportMonthlyCap'] ?? 0,
-        nightMultiplier: (json['nightMultiplier'] as num?)?.toDouble() ?? 1.0,
-        overtimeMultiplier: (json['overtimeMultiplier'] as num?)?.toDouble() ?? 1.0,
-        holidayMultiplier: (json['holidayMultiplier'] as num?)?.toDouble() ?? 1.0,
-        calendarEventId: json['calendarEventId'],
-      );
-    } else {
-      // 旧データ: hours 形式 → 仮の時刻に変換
-      final hours = (json['hours'] is int)
-          ? (json['hours'] as int).toDouble()
-          : (json['hours'] ?? 0.0) as double;
-      final base = DateTime(2020, 1, 1, 9, 0);
-      return ShiftData(
-        legacyId: true,
-        workplace: json['title'] ?? 'バイト',
-        hourlyWage: json['hourlyWage'] ?? 0,
-        start: base,
-        end: base.add(Duration(minutes: (hours * 60).round())),
-        breakMinutes: 0,
-      );
-    }
-  }
-}
-
-// [start, end] のうち深夜帯（22:00〜翌05:00）に重なる分数を返す。
-// 日付をまたぐシフトにも対応するため、分単位で1日ぶんを走査する。
-int _nightOverlapMinutes(DateTime start, DateTime end) {
-  if (!end.isAfter(start)) return 0;
-  var overlap = 0;
-  // 1分刻みは多めだが、シフトは最大でも数十時間なので十分軽量。
-  for (var t = start; t.isBefore(end); t = t.add(const Duration(minutes: 1))) {
-    final h = t.hour;
-    if (h >= 22 || h < 5) overlap++;
-  }
-  return overlap;
-}
 
 // ───────────────────────── CSV取り込み用の補助 ─────────────────────────
 // シフトCSVの1行（給与列を「答え」として持ち、設定の逆算に使う）
@@ -187,7 +50,7 @@ class _CsvShiftRow {
     return m <= 0 ? 0 : m / 60.0;
   }
 
-  double get nightHours => _nightOverlapMinutes(start, end) / 60.0;
+  double get nightHours => nightOverlapMinutes(start, end) / 60.0;
 
   bool get isWeekend =>
       start.weekday == DateTime.saturday || start.weekday == DateTime.sunday;
@@ -265,936 +128,6 @@ List<String> _splitCsvLine(String line) {
   return out;
 }
 
-// ───────────────────────── 勤務先マスタ ─────────────────────────
-// 💡 給料情報（時給の変更履歴の1区間）。各区間に交通費・各種手当の倍率を持つ。
-class WagePeriod {
-  // この時給が有効になる開始日。null は「最古（それ以前すべて）」を表す。
-  final DateTime? effectiveFrom;
-  final int hourlyWage; // 時給
-  final int transportPerDay; // 交通費（1勤務あたり定額。0=なし）
-  final int transportMonthlyCap; // 交通費の月上限（0=上限なし）
-  final double holidayMultiplier; // 休日給料の倍率（1.0=なし）
-  final double nightMultiplier; // 深夜給料の倍率（1.0=なし）
-  final double overtimeMultiplier; // 残業手当の倍率（1.0=なし）
-
-  WagePeriod({
-    this.effectiveFrom,
-    required this.hourlyWage,
-    this.transportPerDay = 0,
-    this.transportMonthlyCap = 0,
-    this.holidayMultiplier = 1.0,
-    this.nightMultiplier = 1.0,
-    this.overtimeMultiplier = 1.0,
-  });
-
-  WagePeriod copyWith({
-    Object? effectiveFrom = _noChange,
-    int? hourlyWage,
-    int? transportPerDay,
-    int? transportMonthlyCap,
-    double? holidayMultiplier,
-    double? nightMultiplier,
-    double? overtimeMultiplier,
-  }) =>
-      WagePeriod(
-        effectiveFrom: identical(effectiveFrom, _noChange)
-            ? this.effectiveFrom
-            : effectiveFrom as DateTime?,
-        hourlyWage: hourlyWage ?? this.hourlyWage,
-        transportPerDay: transportPerDay ?? this.transportPerDay,
-        transportMonthlyCap: transportMonthlyCap ?? this.transportMonthlyCap,
-        holidayMultiplier: holidayMultiplier ?? this.holidayMultiplier,
-        nightMultiplier: nightMultiplier ?? this.nightMultiplier,
-        overtimeMultiplier: overtimeMultiplier ?? this.overtimeMultiplier,
-      );
-
-  Map<String, dynamic> toJson() => {
-        'effectiveFrom': effectiveFrom?.toIso8601String(),
-        'hourlyWage': hourlyWage,
-        'transportPerDay': transportPerDay,
-        'transportMonthlyCap': transportMonthlyCap,
-        'holidayMultiplier': holidayMultiplier,
-        'nightMultiplier': nightMultiplier,
-        'overtimeMultiplier': overtimeMultiplier,
-      };
-
-  factory WagePeriod.fromJson(Map<String, dynamic> json) => WagePeriod(
-        effectiveFrom: (json['effectiveFrom'] as String?) != null
-            ? DateTime.parse(json['effectiveFrom'])
-            : null,
-        hourlyWage: json['hourlyWage'] ?? 0,
-        transportPerDay: json['transportPerDay'] ?? 0,
-        transportMonthlyCap: json['transportMonthlyCap'] ?? 0,
-        holidayMultiplier: (json['holidayMultiplier'] as num?)?.toDouble() ?? 1.0,
-        nightMultiplier: (json['nightMultiplier'] as num?)?.toDouble() ?? 1.0,
-        overtimeMultiplier: (json['overtimeMultiplier'] as num?)?.toDouble() ?? 1.0,
-      );
-}
-
-const Object _noChange = Object();
-
-// 💡 勤務先（バイト先）マスタ。表示色・ジャンル・場所・締日・給料日・時給履歴を持つ。
-// 給料日が土日祝のときの振込タイミング
-enum PaydayAdjust {
-  before, // 前営業日（休みの前にもらえる。日本では一般的）
-  after, // 翌営業日（休み明けにもらえる）
-  none, // 調整しない（そのままの日付）
-}
-
-extension PaydayAdjustLabel on PaydayAdjust {
-  String get label {
-    switch (this) {
-      case PaydayAdjust.before:
-        return '前営業日にする';
-      case PaydayAdjust.after:
-        return '翌営業日にする';
-      case PaydayAdjust.none:
-        return '調整しない';
-    }
-  }
-
-  String get shortLabel {
-    switch (this) {
-      case PaydayAdjust.before:
-        return '前倒し';
-      case PaydayAdjust.after:
-        return '後ろ倒し';
-      case PaydayAdjust.none:
-        return 'そのまま';
-    }
-  }
-}
-
-class Workplace {
-  final String id;
-  String name; // 勤務先名（必須）
-  int colorValue; // 表示色（ARGB）
-  String genre; // ジャンル（情報用）
-  String location; // 場所（情報用）
-  int closingDay; // 締日（1〜28、31=月末）
-  int paydayMonthOffset; // 給料日：当月0/翌月1/翌々月2
-  int paydayDay; // 給料日（日）
-  PaydayAdjust paydayAdjust; // 給料日が土日祝のときの扱い
-  List<WagePeriod> wagePeriods; // 給料情報（effectiveFrom昇順）
-
-  Workplace({
-    required this.id,
-    required this.name,
-    this.colorValue = 0xFF42A5F5,
-    this.genre = '',
-    this.location = '',
-    this.closingDay = 31,
-    this.paydayMonthOffset = 1,
-    this.paydayDay = 25,
-    this.paydayAdjust = PaydayAdjust.before,
-    List<WagePeriod>? wagePeriods,
-  }) : wagePeriods = wagePeriods ?? [];
-
-  // 💡 指定月の実際の給料日（土日祝を設定に応じて前後にズラす）
-  DateTime paydayIn(DateTime payMonth) {
-    final lastDay = DateTime(payMonth.year, payMonth.month + 1, 0).day;
-    final day = paydayDay > lastDay ? lastDay : paydayDay;
-    final base = DateTime(payMonth.year, payMonth.month, day);
-    switch (paydayAdjust) {
-      case PaydayAdjust.before:
-        return previousBusinessDay(base);
-      case PaydayAdjust.after:
-        return nextBusinessDay(base);
-      case PaydayAdjust.none:
-        return base;
-    }
-  }
-
-  bool get isEndOfMonthClosing => closingDay >= 31;
-
-  // 指定月の締日（実日付）。月末締めや短い月にも対応。
-  DateTime _closingDateOf(int year, int month) {
-    final lastDay = DateTime(year, month + 1, 0).day;
-    final day = isEndOfMonthClosing ? lastDay : (closingDay > lastDay ? lastDay : closingDay);
-    return DateTime(year, month, day);
-  }
-
-  // 💡 date が属する給与期間の「開始日」。締日に基づいてスナップする。
-  //   月末締め → その月の1日。N日締め → 直前の締日の翌日。
-  DateTime payPeriodStartFor(DateTime date) {
-    final d = DateTime(date.year, date.month, date.day);
-    if (isEndOfMonthClosing) return DateTime(d.year, d.month, 1);
-    final thisClosing = _closingDateOf(d.year, d.month);
-    if (!d.isAfter(thisClosing)) {
-      // 当月の締日以前 → 前月の締日の翌日が開始
-      final prev = _closingDateOf(
-          d.month == 1 ? d.year - 1 : d.year, d.month == 1 ? 12 : d.month - 1);
-      return prev.add(const Duration(days: 1));
-    } else {
-      // 当月の締日より後 → 当月の締日の翌日が開始
-      return thisClosing.add(const Duration(days: 1));
-    }
-  }
-
-  // effectiveFrom 昇順に並べ替える（null＝最古を先頭）
-  void sortWagePeriods() {
-    wagePeriods.sort((a, b) {
-      if (a.effectiveFrom == null) return -1;
-      if (b.effectiveFrom == null) return 1;
-      return a.effectiveFrom!.compareTo(b.effectiveFrom!);
-    });
-  }
-
-  Map<String, dynamic> toJson() => {
-        'id': id,
-        'name': name,
-        'colorValue': colorValue,
-        'genre': genre,
-        'location': location,
-        'closingDay': closingDay,
-        'paydayMonthOffset': paydayMonthOffset,
-        'paydayDay': paydayDay,
-        'paydayAdjust': paydayAdjust.index,
-        'wagePeriods': wagePeriods.map((e) => e.toJson()).toList(),
-      };
-
-  factory Workplace.fromJson(Map<String, dynamic> json) => Workplace(
-        id: json['id'],
-        name: json['name'] ?? '勤務先',
-        colorValue: json['colorValue'] ?? 0xFF42A5F5,
-        genre: json['genre'] ?? '',
-        location: json['location'] ?? '',
-        closingDay: json['closingDay'] ?? 31,
-        paydayMonthOffset: json['paydayMonthOffset'] ?? 1,
-        paydayDay: json['paydayDay'] ?? 25,
-        paydayAdjust: PaydayAdjust.values[json['paydayAdjust'] ?? 0],
-        wagePeriods: (json['wagePeriods'] as List?)
-                ?.map((e) => WagePeriod.fromJson(e))
-                .toList() ??
-            [],
-      );
-}
-
-// ───────────────────────── 予定 ─────────────────────────
-class EventData {
-  final String id;
-  String title;
-  String location;
-  String url;
-  String memo;
-  int colorValue; // 色タグ（ARGB）
-  bool allDay; // 終日
-  DateTime? start; // 開始日時（allDay時は日付のみ意味を持つ）
-  DateTime? end; // 終了日時
-  int? notifyMinutesBefore; // 通知（開始の何分前。null=なし）
-  String? calendarEventId; // Appleカレンダー連携で作成したイベントID
-
-  EventData({
-    required this.id,
-    required this.title,
-    this.location = '',
-    this.url = '',
-    this.memo = '',
-    this.colorValue = 0xFFFFA726, // オレンジ
-    this.allDay = false,
-    this.start,
-    this.end,
-    this.notifyMinutesBefore,
-    this.calendarEventId,
-  });
-
-  Map<String, dynamic> toJson() => {
-        'id': id,
-        'title': title,
-        'location': location,
-        'url': url,
-        'memo': memo,
-        'colorValue': colorValue,
-        'allDay': allDay,
-        'start': start?.toIso8601String(),
-        'end': end?.toIso8601String(),
-        'notifyMinutesBefore': notifyMinutesBefore,
-        'calendarEventId': calendarEventId,
-      };
-
-  factory EventData.fromJson(Map<String, dynamic> json) => EventData(
-        // 旧データ（title のみ）も吸収。id 無ければ採番。
-        id: json['id'] ?? 'ev-${DateTime.now().microsecondsSinceEpoch}-${json['title']}',
-        title: json['title'] ?? '',
-        location: json['location'] ?? '',
-        url: json['url'] ?? '',
-        memo: json['memo'] ?? '',
-        colorValue: json['colorValue'] ?? 0xFFFFA726,
-        allDay: json['allDay'] ?? false,
-        start: (json['start'] as String?) != null ? DateTime.parse(json['start']) : null,
-        end: (json['end'] as String?) != null ? DateTime.parse(json['end']) : null,
-        notifyMinutesBefore: json['notifyMinutesBefore'],
-        calendarEventId: json['calendarEventId'],
-      );
-}
-
-// ───────────────────────── Todo ─────────────────────────
-class TodoData {
-  final String id;
-  String title;
-  String description;
-  DateTime deadline; // 締切（日時。時刻も通知に使う）
-  bool completed;
-  Priority priority;
-  RepeatType repeatType;
-  String label; // ラベル（学校/就活/イベント等。空=なし）
-  List<int> reminderDaysBefore; // 何日前に通知するか（0=当日/締切時刻）。空=通知なし
-  bool hasTime; // 締切に時刻指定があるか（false=日付のみ→通知は9:00）
-
-  TodoData({
-    required this.id,
-    required this.title,
-    this.description = '',
-    required this.deadline,
-    this.completed = false,
-    this.priority = Priority.middle,
-    this.repeatType = RepeatType.none,
-    this.label = '',
-    List<int>? reminderDaysBefore,
-    this.hasTime = false,
-  }) : reminderDaysBefore = reminderDaysBefore ?? const [1, 0];
-
-  Map<String, dynamic> toJson() => {
-        'id': id,
-        'title': title,
-        'description': description,
-        'deadline': deadline.toIso8601String(),
-        'completed': completed,
-        'priority': priority.index,
-        'repeatType': repeatType.index,
-        'label': label,
-        'reminderDaysBefore': reminderDaysBefore,
-        'hasTime': hasTime,
-      };
-
-  factory TodoData.fromJson(Map<String, dynamic> json) => TodoData(
-        id: json['id'],
-        title: json['title'],
-        description: json['description'] ?? '',
-        deadline: DateTime.parse(json['deadline']),
-        completed: json['completed'] ?? false,
-        priority: Priority.values[json['priority'] ?? 1],
-        repeatType: RepeatType.values[json['repeatType'] ?? 0],
-        label: json['label'] ?? '',
-        reminderDaysBefore: (json['reminderDaysBefore'] as List?)?.map((e) => e as int).toList(),
-        hasTime: json['hasTime'] ?? false,
-      );
-}
-
-// 支払いの出所: 手動 / 利用通知 / カード請求予定 / 銀行引落確定
-enum PaymentSource { manual, usage, billing, bank }
-
-// ───────────────────────── カード支払い ─────────────────────────
-class Payment {
-  String id;
-  String cardName;
-  int amount;
-  DateTime paymentDate;
-  bool paid;
-  PaymentSource source;
-  String sourceId; // メール由来の一意キー（自動取り込みの識別用）
-  DateTime? mailReceivedAt; // 💡 検索範囲の判定用。旧データは再取得できたときに補完する
-  String note; // 利用先（店舗名）など
-  // 💡 「記録として残すが、金額は合計に足さない」明細。
-  //   同じ買い物がカード会社の通知からも入ってきたときだけ立てる。
-  bool infoOnly;
-
-  Payment({
-    required this.id,
-    required this.cardName,
-    required this.amount,
-    required this.paymentDate,
-    this.paid = false,
-    this.source = PaymentSource.manual,
-    this.sourceId = '',
-    this.mailReceivedAt,
-    this.note = '',
-    this.infoOnly = false,
-  });
-
-  Map<String, dynamic> toJson() => {
-        'id': id,
-        'cardName': cardName,
-        'amount': amount,
-        'paymentDate': paymentDate.toIso8601String(),
-        'paid': paid,
-        'source': source.index,
-        'sourceId': sourceId,
-        if (mailReceivedAt != null) 'mailReceivedAt': mailReceivedAt!.toIso8601String(),
-        'note': note,
-        'infoOnly': infoOnly,
-      };
-
-  factory Payment.fromJson(Map<String, dynamic> json) => Payment(
-        id: json['id'],
-        cardName: json['cardName'],
-        amount: json['amount'],
-        paymentDate: DateTime.parse(json['paymentDate']),
-        paid: json['paid'] ?? false,
-        source: PaymentSource.values[json['source'] ?? 0],
-        sourceId: json['sourceId'] ?? '',
-        mailReceivedAt: DateTime.tryParse(json['mailReceivedAt'] as String? ?? ''),
-        note: json['note'] ?? '',
-        infoOnly: json['infoOnly'] ?? false,
-      );
-}
-
-// ───────────────────────── 分割払い ─────────────────────────
-class Installment {
-  final String id;
-  String name;
-  String cardName; // 紐づくクレカ
-  int totalAmount; // 元金
-  int installmentCount;
-  int remainingMonths;
-  int monthlyAmount; // 金利込みの月額
-  double interestRate; // 年率(%)
-  DateTime? startDate; // 利用日（残回数の自動計算に使用）
-
-  Installment({
-    required this.id,
-    required this.name,
-    this.cardName = '',
-    required this.totalAmount,
-    required this.installmentCount,
-    required this.remainingMonths,
-    required this.monthlyAmount,
-    this.interestRate = 0,
-    this.startDate,
-  });
-
-  // 手数料込みの総支払額
-  int get totalWithInterest => monthlyAmount * installmentCount;
-
-  // 💡 その月が何回目か（1始まり）。期間外・開始日の無い旧データは0。
-  //   1回目＝利用開始月。そこから installmentCount か月ぶん。
-  //   ⚠️ 以前は同じ式が AppState に5か所あった。ここ1か所で決める。
-  int countIn(DateTime month) {
-    final start = startDate;
-    if (start == null) return 0;
-    final diff = (month.year - start.year) * 12 + (month.month - start.month);
-    if (diff < 0 || diff >= installmentCount) return 0;
-    return diff + 1;
-  }
-
-  // 💡 その月に計上する額。開始日の無い旧データは、残りがあれば「今月」だけ計上する。
-  int amountIn(DateTime month, {required DateTime now}) {
-    if (startDate == null) {
-      final thisMonth = month.year == now.year && month.month == now.month;
-      return remainingMonths > 0 && thisMonth ? monthlyAmount : 0;
-    }
-    return countIn(month) > 0 ? monthlyAmount : 0;
-  }
-
-  // 明細に出す「何回目か」
-  String countLabelIn(DateTime month) {
-    final n = countIn(month);
-    return n > 0 ? '$n/$installmentCount回目' : '残り$remainingMonths回（開始日なし）';
-  }
-
-  Map<String, dynamic> toJson() => {
-        'id': id,
-        'name': name,
-        'cardName': cardName,
-        'totalAmount': totalAmount,
-        'installmentCount': installmentCount,
-        'remainingMonths': remainingMonths,
-        'monthlyAmount': monthlyAmount,
-        'interestRate': interestRate,
-        'startDate': startDate?.toIso8601String(),
-      };
-
-  factory Installment.fromJson(Map<String, dynamic> json) => Installment(
-        id: json['id'],
-        name: json['name'],
-        cardName: json['cardName'] ?? '',
-        totalAmount: json['totalAmount'],
-        installmentCount: json['installmentCount'],
-        remainingMonths: json['remainingMonths'],
-        monthlyAmount: json['monthlyAmount'],
-        interestRate: (json['interestRate'] ?? 0).toDouble(),
-        startDate: json['startDate'] != null ? DateTime.parse(json['startDate']) : null,
-      );
-}
-
-// 分割の月額を計算（単純な年率手数料: 元金 × 年率% × 回数/12 を上乗せ）
-int computeInstallmentMonthly(int principal, int count, double annualRatePercent) {
-  if (count <= 0) return principal;
-  final fee = principal * (annualRatePercent / 100) * (count / 12);
-  return ((principal + fee) / count).round();
-}
-
-// ───────────────────────── ローン ─────────────────────────
-// 💡 分割払いとの違い: 分割はカードの請求に含まれて落ちるが、
-//   ローンは口座から直接引き落とされることが多く、返済日も独立している。
-//   奨学金のように「卒業してから返済開始」というものもあるので、
-//   返済開始の年月を持たせて、それより前の月は何も引かない。
-class Loan {
-  final String id;
-  String name; // 奨学金、車のローン など
-  int principal; // 借入総額（元金）
-  double interestRate; // 年利(%)。0＝無利息（奨学金の第一種など）
-  int totalCount; // 返済回数（月）
-  DateTime startMonth; // 初回返済の年月
-  int payDay; // 毎月の返済日
-  // 引き落とし方法。'' = 口座から直接、カード名 = そのカードの請求に含める
-  String method;
-  int monthlyOverride; // 0以外なら毎月の返済額をこの値で固定
-  // 💡 ショッピングクレジットは「初回だけ金額が違う」ことが多い
-  //   （例: 第1回 9,800円／第2回目以降 8,000円×23回）。0なら毎月と同じ。
-  int firstPaymentAmount;
-  // 💡 頭金。借入額(principal)には含まれない「最初にまとめて払うぶん」。
-  //   口座払いならその日に一度だけ出ていく。カード払いならそのカードの請求に入る。
-  int downPayment;
-  DateTime? downPaymentDate;
-  String downPaymentMethod; // '' = 口座から, カード名 = そのカード
-  // 💡 請求元表記は表示名と分けて覚える。名前を変えても紐づけは維持する。
-  List<String> bankBillingNames;
-  bool autoLinkBankBills;
-
-  Loan({
-    required this.id,
-    required this.name,
-    required this.principal,
-    required this.totalCount,
-    required this.startMonth,
-    this.interestRate = 0,
-    this.payDay = 27,
-    this.method = '',
-    this.monthlyOverride = 0,
-    this.firstPaymentAmount = 0,
-    this.downPayment = 0,
-    this.downPaymentDate,
-    this.downPaymentMethod = '',
-    List<String>? bankBillingNames,
-    this.autoLinkBankBills = true,
-  }) : bankBillingNames = bankBillingNames ?? [];
-
-  // 頭金を含めた総額（車両価格など）
-  int get totalPrice => principal + downPayment;
-  // 返済の総額（手数料込み。初回だけ違う場合も正しく足す）
-  int get totalRepayment =>
-      firstAmount + monthlyAmount * (totalCount > 0 ? totalCount - 1 : 0);
-
-  bool get hasDownPayment => downPayment > 0 && downPaymentDate != null;
-  bool get isDownPaymentFromAccount => downPaymentMethod.isEmpty;
-
-  bool get isFromAccount => method.isEmpty;
-  bool get isCardPayment => method.isNotEmpty;
-
-  // 手数料（分割払手数料）を含めた支払総額
-  int get _totalWithFee {
-    final fee = principal * (interestRate / 100) * (totalCount / 12);
-    return (principal + fee).round();
-  }
-
-  // 2回目以降の返済額。指定があればそれを使う。
-  // 初回だけ違う契約なら、残りを回数-1で割る（総額が合うように）。
-  int get monthlyAmount {
-    if (monthlyOverride > 0) return monthlyOverride;
-    if (firstPaymentAmount > 0 && totalCount > 1) {
-      return ((_totalWithFee - firstPaymentAmount) / (totalCount - 1)).round();
-    }
-    return computeInstallmentMonthly(principal, totalCount, interestRate);
-  }
-
-  // 初回の返済額（指定が無ければ毎月と同じ）
-  int get firstAmount =>
-      firstPaymentAmount > 0 ? firstPaymentAmount : monthlyAmount;
-
-  // n回目の返済額
-  int amountForCount(int n) => n == 1 ? firstAmount : monthlyAmount;
-
-  // その月に払う額（返済期間外は0）
-  int amountIn(DateTime month) {
-    final n = countIn(month);
-    return n == 0 ? 0 : amountForCount(n);
-  }
-
-  // その月が何回目の返済か（1始まり）。返済期間外なら0。
-  int countIn(DateTime month) {
-    final diff = (month.year - startMonth.year) * 12 + (month.month - startMonth.month);
-    if (diff < 0 || diff >= totalCount) return 0;
-    return diff + 1;
-  }
-
-  bool isActiveIn(DateTime month) => countIn(month) > 0;
-
-  // 完済する月（最後の返済月）
-  DateTime get finishMonth =>
-      DateTime(startMonth.year, startMonth.month + totalCount - 1);
-
-  // 基準日の時点で残っている回数
-  int remainingCountAt(DateTime now) {
-    final done = (now.year - startMonth.year) * 12 + (now.month - startMonth.month);
-    if (done < 0) return totalCount; // まだ返済が始まっていない
-    final left = totalCount - done;
-    return left < 0 ? 0 : left;
-  }
-
-  // 残債（これから払う回のぶんを足し上げる）
-  int remainingAmountAt(DateTime now) {
-    final done = (now.year - startMonth.year) * 12 + (now.month - startMonth.month);
-    if (done <= 0) return totalRepayment; // まだ1回も払っていない
-    var total = 0;
-    for (var n = done + 1; n <= totalCount; n++) {
-      total += amountForCount(n);
-    }
-    return total;
-  }
-
-  Map<String, dynamic> toJson() => {
-        'id': id,
-        'name': name,
-        'principal': principal,
-        'interestRate': interestRate,
-        'totalCount': totalCount,
-        'startMonth': startMonth.toIso8601String(),
-        'payDay': payDay,
-        'method': method,
-        'monthlyOverride': monthlyOverride,
-        'firstPaymentAmount': firstPaymentAmount,
-        'downPayment': downPayment,
-        'downPaymentDate': downPaymentDate?.toIso8601String(),
-        'downPaymentMethod': downPaymentMethod,
-        'bankBillingNames': bankBillingNames,
-        'autoLinkBankBills': autoLinkBankBills,
-      };
-
-  factory Loan.fromJson(Map<String, dynamic> json) => Loan(
-        id: json['id'],
-        name: json['name'] ?? '',
-        principal: json['principal'] ?? 0,
-        interestRate: (json['interestRate'] ?? 0).toDouble(),
-        totalCount: json['totalCount'] ?? 1,
-        startMonth: DateTime.parse(json['startMonth']),
-        payDay: json['payDay'] ?? 27,
-        method: json['method'] ?? '',
-        monthlyOverride: json['monthlyOverride'] ?? 0,
-        firstPaymentAmount: json['firstPaymentAmount'] ?? 0,
-        downPayment: json['downPayment'] ?? 0,
-        downPaymentDate: (json['downPaymentDate'] as String?) == null
-            ? null
-            : DateTime.tryParse(json['downPaymentDate']),
-        downPaymentMethod: json['downPaymentMethod'] ?? '',
-        bankBillingNames: (json['bankBillingNames'] as List? ?? [])
-            .map((e) => e.toString()).toList(),
-        autoLinkBankBills: json['autoLinkBankBills'] ?? true,
-      );
-}
-
-
-// ───────────────────────── 予定支出 ─────────────────────────
-// 💡 車検・旅行・家電の買い替えなど、決まった日に一度だけ出ていくお金。
-//   予定入金の裏返し。毎月の固定費（定期支払い）とは別物。
-class PlannedExpense {
-  final String id;
-  String title;
-  int amount;
-  DateTime date; // 支払予定日
-  bool monthly; // 毎月繰り返すか
-
-  PlannedExpense({
-    required this.id,
-    required this.title,
-    required this.amount,
-    required this.date,
-    this.monthly = false,
-  });
-
-  DateTime? dateIn(DateTime month) {
-    if (!monthly) {
-      return (date.year == month.year && date.month == month.month) ? date : null;
-    }
-    if (DateTime(month.year, month.month).isBefore(DateTime(date.year, date.month))) {
-      return null;
-    }
-    final lastDay = DateTime(month.year, month.month + 1, 0).day;
-    return DateTime(month.year, month.month, date.day > lastDay ? lastDay : date.day);
-  }
-
-  Map<String, dynamic> toJson() => {
-        'id': id,
-        'title': title,
-        'amount': amount,
-        'date': date.toIso8601String(),
-        'monthly': monthly,
-      };
-
-  factory PlannedExpense.fromJson(Map<String, dynamic> json) => PlannedExpense(
-        id: json['id'] ?? '',
-        title: json['title'] ?? '',
-        amount: json['amount'] ?? 0,
-        date: DateTime.parse(json['date']),
-        monthly: json['monthly'] ?? false,
-      );
-}
-
-// ───────────────────────── 定期支払い ─────────────────────────
-// 定期支払いの「手動」支払いを表す値（method に入る）
-const String kManualPayMethod = '手動';
-
-class Subscription {
-  final String id;
-  String title;
-  int amount;
-  int payDay;
-  // 支払い方法。
-  //   '' = 口座振替（口座から自動で引かれる）
-  //   '手動' = 自分で払う（振込・現金など。払ったら記録して残高から引く）
-  //   カード名 = そのカード払い（カードの引き落とし額に含まれるので口座からは別途引かない）
-  String method;
-
-  Subscription({
-    required this.id,
-    required this.title,
-    required this.amount,
-    required this.payDay,
-    this.method = '',
-  });
-
-  // 口座振替（自動引き落とし）か
-  bool get isFromAccount => method.isEmpty;
-  // 自分で払うか
-  bool get isManualPay => method == kManualPayMethod;
-  // カード払いか（カード請求に含まれる＝口座から別途引かない）
-  bool get isCardPayment => method.isNotEmpty && method != kManualPayMethod;
-  // 支払い方法の表示名
-  String get methodLabel => isFromAccount ? '口座振替' : method;
-
-  Map<String, dynamic> toJson() => {
-        'id': id,
-        'title': title,
-        'amount': amount,
-        'payDay': payDay,
-        'method': method,
-      };
-
-  factory Subscription.fromJson(Map<String, dynamic> json) => Subscription(
-        id: json['id'],
-        title: json['title'],
-        amount: json['amount'],
-        payDay: json['payDay'],
-        method: json['method'] ?? '',
-      );
-}
-
-// ───────────────────────── ATM引き出し ─────────────────────────
-class Withdrawal {
-  final String id;
-  DateTime date;
-  int amount;
-  String memo;
-
-  Withdrawal({
-    required this.id,
-    required this.date,
-    required this.amount,
-    this.memo = '',
-  });
-
-  Map<String, dynamic> toJson() => {
-        'id': id,
-        'date': date.toIso8601String(),
-        'amount': amount,
-        'memo': memo,
-      };
-
-  factory Withdrawal.fromJson(Map<String, dynamic> json) => Withdrawal(
-        id: json['id'],
-        date: DateTime.parse(json['date']),
-        amount: json['amount'],
-        memo: json['memo'] ?? '',
-      );
-}
-
-// ───────────────────────── 口座への入金 ─────────────────────────
-// 💡 銀行の「振込入金のお知らせ」メール。
-//   このメールには金額が載らない（SMBCダイレクトで確認する形式）ため、
-//   アプリを開いたときにポップアップで金額を入力してもらう。
-class DepositNotice {
-  final String sourceId; // メールID（重複表示を防ぐ一意キー）
-  final DateTime date; // 入金日（メール受信日時）
-
-  DepositNotice({required this.sourceId, required this.date});
-
-  Map<String, dynamic> toJson() => {
-        'sourceId': sourceId,
-        'date': date.toIso8601String(),
-      };
-
-  factory DepositNotice.fromJson(Map<String, dynamic> json) => DepositNotice(
-        sourceId: json['sourceId'] ?? '',
-        date: DateTime.parse(json['date']),
-      );
-}
-
-// ───────────────────── PayPayからの出金（口座への入金予定） ─────────────────────
-// 💡 PayPay残高を銀行へ出金すると「出金を受け付けました」メールが届く。
-//   金額と振込予定日が載っているので、着金前から予想残高に入れられる。
-//   （銀行の「振込入金のお知らせ」は金額が載らないので、それだけでは予想に入れられない）
-class PayPayTransfer {
-  final String id; // 取引番号（同じ出金を二重に数えないためのキー）
-  final int amount; // 口座に入る見込み額（手数料は差し引き済み）
-  final DateTime acceptedAt; // 出金を受け付けた日時
-  final DateTime scheduledDate; // 振込予定日（「前後」なので確定ではない）
-  final String bank;
-
-  const PayPayTransfer({
-    required this.id,
-    required this.amount,
-    required this.acceptedAt,
-    required this.scheduledDate,
-    required this.bank,
-  });
-
-  Map<String, dynamic> toJson() => {
-        'id': id,
-        'amount': amount,
-        'acceptedAt': acceptedAt.toIso8601String(),
-        'scheduledDate': scheduledDate.toIso8601String(),
-        'bank': bank,
-      };
-
-  static PayPayTransfer? fromJson(Map<String, dynamic> j) {
-    final id = j['id'];
-    final amount = j['amount'];
-    final acc = DateTime.tryParse('${j['acceptedAt']}');
-    final sch = DateTime.tryParse('${j['scheduledDate']}');
-    if (id is! String || amount is! int || acc == null || sch == null) return null;
-    return PayPayTransfer(
-      id: id,
-      amount: amount,
-      acceptedAt: acc,
-      scheduledDate: sch,
-      bank: j['bank'] as String? ?? '',
-    );
-  }
-}
-
-// ───────────────────── 予定入金 ─────────────────────
-// 💡 これから入ってくる予定のお金（仕送り・返金・臨時収入など）。
-//   給料はシフトから自動計算するので、それ以外の入金をここに登録する。
-class PlannedIncome {
-  final String id;
-  String title;
-  int amount;
-  DateTime date; // 入金予定日
-  bool monthly; // 毎月繰り返すか
-
-  PlannedIncome({
-    required this.id,
-    required this.title,
-    required this.amount,
-    required this.date,
-    this.monthly = false,
-  });
-
-  // 指定月の入金予定日（毎月繰り返しなら、その月の同じ日）
-  DateTime? dateIn(DateTime month) {
-    if (!monthly) {
-      return (date.year == month.year && date.month == month.month) ? date : null;
-    }
-    // 繰り返しは登録日以降の月だけ
-    if (DateTime(month.year, month.month).isBefore(DateTime(date.year, date.month))) {
-      return null;
-    }
-    final lastDay = DateTime(month.year, month.month + 1, 0).day;
-    return DateTime(month.year, month.month, date.day > lastDay ? lastDay : date.day);
-  }
-
-  Map<String, dynamic> toJson() => {
-        'id': id,
-        'title': title,
-        'amount': amount,
-        'date': date.toIso8601String(),
-        'monthly': monthly,
-      };
-
-  factory PlannedIncome.fromJson(Map<String, dynamic> json) => PlannedIncome(
-        id: json['id'] ?? '',
-        title: json['title'] ?? '',
-        amount: json['amount'] ?? 0,
-        date: DateTime.parse(json['date']),
-        monthly: json['monthly'] ?? false,
-      );
-}
-
-// ───────────────────── 残高の増減履歴 ─────────────────────
-// 💡 入金・引き落としを口座残高に反映したときの記録。
-//   「いつ・何を・いくら反映したか」を後から確認でき、間違えたら取り消せる。
-enum BalanceEntryKind { deposit, draw }
-
-// 💡 入出金の履歴に出す1行。
-//   保存した履歴（entry あり）と、明細から作るデビットの利用（entry なし）の両方を運ぶ。
-class LedgerRow {
-  final DateTime at;
-  final String label;
-  final int amount; // 正の数
-  final bool isDeposit;
-  final BalanceEntry? entry; // 保存した履歴なら中身（取り消しに使う）
-  final int? balanceAfter; // 反映後の残高。デビットは残高を動かさないので null
-
-  const LedgerRow({
-    required this.at,
-    required this.label,
-    required this.amount,
-    required this.isDeposit,
-    this.entry,
-    this.balanceAfter,
-  });
-
-  // デビットの利用（明細から作った行）は取り消せない。明細側で直す。
-  bool get isDebit => entry == null;
-}
-
-class BalanceEntry {
-  final String id;
-  final BalanceEntryKind kind;
-  final String label; // 勤務先名・カード名・サービス名など
-  final int amount; // 正の数（入金は＋、引き落としは−として扱う）
-  final DateTime at; // 反映した日時
-  final int balanceAfter; // 反映後の口座残高
-  final String? workplaceId; // 給料入金のとき、どのバイトか
-  final String? sourceKey; // 元の通知ID（取り消し時に再表示するため）
-
-  BalanceEntry({
-    required this.id,
-    required this.kind,
-    required this.label,
-    required this.amount,
-    required this.at,
-    required this.balanceAfter,
-    this.workplaceId,
-    this.sourceKey,
-  });
-
-  // 残高への影響（入金＝＋、引き落とし＝−）
-  int get signedAmount => kind == BalanceEntryKind.deposit ? amount : -amount;
-
-  Map<String, dynamic> toJson() => {
-        'id': id,
-        'kind': kind.index,
-        'label': label,
-        'amount': amount,
-        'at': at.toIso8601String(),
-        'balanceAfter': balanceAfter,
-        'workplaceId': workplaceId,
-        'sourceKey': sourceKey,
-      };
-
-  factory BalanceEntry.fromJson(Map<String, dynamic> json) => BalanceEntry(
-        id: json['id'] ?? '',
-        kind: BalanceEntryKind.values[json['kind'] ?? 0],
-        label: json['label'] ?? '',
-        amount: json['amount'] ?? 0,
-        at: DateTime.parse(json['at']),
-        balanceAfter: json['balanceAfter'] ?? 0,
-        workplaceId: json['workplaceId'],
-        sourceKey: json['sourceKey'],
-      );
-}
-
 // 💡 カレンダー連携のフック。実装は lib/google_calendar_sync.dart（Googleカレンダー）。
 //   AppState はプラットフォーム依存を持たないよう、この抽象だけ参照する（テストでは null）。
 abstract class CalendarSyncHook {
@@ -1258,12 +191,73 @@ String dateKey(DateTime d) => DateFormat('yyyy-MM-dd').format(d);
 // 💡 ホームの「確認待ち」に並べる1件。
 //   保存はしない。開くたびに未処理の入出金などから組み立てる
 //   （金額や状態を二重に持つと、元のデータと食い違うため）。
+// 確認待ちの引き落としが、入力した残高に含まれているか（推定）
+enum DrawReflection {
+  maybeIncluded, // 含まれている可能性がある（引落日が残高を入力した日より前）
+  likelyNotIncluded, // まだ含まれていない見込み（引落日が残高を入力した日より後）
+  unknown, // 判断できない（同じ日・残高を入力した記録が無い）
+}
+
+// 保存の状態（null＝正常）
+enum StorageIssue {
+  saveFailed, // 直近の保存に失敗した（端末には前の整った状態か、次の起動で戻せる一時保存がある）
+  recoveryPending, // 途中で止まった保存を戻せていない（中身は記録から読んだ整った状態。端末の保存は混ざっている）
+  unrecoverable, // 戻すための記録が壊れていた（端末の保存が混ざっている可能性。取り込み直しが必要）
+}
+
+class StorageWriteFailure implements Exception {
+  StorageWriteFailure(this.stage, this.cause);
+  final String stage; // どの段階で失敗したか（一時保存・復旧点・保存）
+  final Object cause;
+  @override
+  String toString() => '$stageに失敗しました: $cause';
+}
+
+// 💡 取り込み中（ドライブ・バックアップ・貼り付け）は家計データの変更を受け付けない。
+//   ⚠️ 受け付けてから取り込みの失敗で巻き戻すと「入力できたのに消えた」になる。変更は始める前に断る。
+class DataLockedException implements Exception {
+  DataLockedException(this.label);
+  final String label; // いま何をしているか（「ドライブから取り込んでいます」など）
+  @override
+  String toString() => '$label。終わるまで変更できません';
+}
+
+/// 取り込みの間だけ持つ鍵。持っている処理（取り込み本体）だけが家計データを書き換えられる。
+class DataLock {
+  DataLock._(this.label);
+  final String label;
+}
+
+// 💡 起動時の読み込み用: 戻すべき記録（一時保存・復旧点）を端末に書き戻せなかったときは、
+//   その記録の値を優先して読む（混ざった保存を正常なデータとして読まない）。
+class _PrefsView {
+  _PrefsView(this.prefs, this.overlay);
+  final SharedPreferences prefs;
+  final Map<String, Object>? overlay;
+  Object? _o(String k) => overlay?[k];
+  String? getString(String k) => overlay != null && overlay!.containsKey(k) ? _o(k) as String? : prefs.getString(k);
+  int? getInt(String k) => overlay != null && overlay!.containsKey(k) ? _o(k) as int? : prefs.getInt(k);
+  bool? getBool(String k) => overlay != null && overlay!.containsKey(k) ? _o(k) as bool? : prefs.getBool(k);
+  List<String>? getStringList(String k) => overlay != null && overlay!.containsKey(k)
+      ? [for (final e in (_o(k) as List)) '$e']
+      : prefs.getStringList(k);
+}
+
+// 引き落としの請求の月の決まり方
+enum BillMonthStatus {
+  matched, // 設定の引落日から一意に決まった
+  userChosen, // 利用者が選んだ
+  unresolved, // 判定できない（日付の月として扱い、確認待ちに出す）
+  noSetting, // 引落日の設定が無い（日付の月として扱う）
+}
+
 enum HomeNoticeKind {
   draw, // 引き落としの反映待ち
   deposit, // 入金の反映待ち（メールに金額が無いので入力が要る）
   plannedIncome, // 予定入金の受け取り確認
   installmentWithoutCard, // カード未設定の分割払い（予想から漏れる可能性）
   scheduleSuggestion, // メールから見つけた予定・単発バイトの提案（承認するまで何も登録しない）
+  bankBillMonthUnknown, // 請求の月を判定できない銀行確定（利用者が選ぶ）
 }
 
 class HomeNotice {
@@ -1277,6 +271,7 @@ class HomeNotice {
   final DepositNotice? deposit;
   final ({PlannedIncome income, DateTime date})? planned;
   final ScheduleSuggestion? suggestion;
+  final Payment? bankRecord;
 
   const HomeNotice({
     required this.kind,
@@ -1288,6 +283,7 @@ class HomeNotice {
     this.deposit,
     this.planned,
     this.suggestion,
+    this.bankRecord,
   });
 }
 
@@ -1359,11 +355,11 @@ class AppState extends ChangeNotifier {
     return Platform.isIOS ? 'iPhone/iPad' : 'この端末';
   }
 
-  void markDriveSynced({required DateTime localAt, required DateTime remoteAt}) {
+  Future<void> markDriveSynced({required DateTime localAt, required DateTime remoteAt}) async {
     driveSyncedAt = localAt;
     driveKnownRemoteAt = remoteAt;
-    _saveDriveSyncState();
     notifyListeners();
+    await _saveDriveSyncState();
   }
 
   Future<void> setRequireGoogleLogin(bool on) async {
@@ -1382,7 +378,7 @@ class AppState extends ChangeNotifier {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool('saved_drive_sync_enabled', driveSyncEnabled);
     await prefs.setBool('saved_require_google_login', requireGoogleLogin);
-    await prefs.setString('saved_data_updated_at', dataUpdatedAt?.toIso8601String() ?? '');
+    // ⚠️ saved_data_updated_at（家計データの変更時刻）は saveData の列だけが書く（ここで書くと順序が崩れる）
     await prefs.setString('saved_drive_synced_at', driveSyncedAt?.toIso8601String() ?? '');
     await prefs.setString(
         'saved_drive_remote_at', driveKnownRemoteAt?.toIso8601String() ?? '');
@@ -1411,11 +407,18 @@ class AppState extends ChangeNotifier {
   // #6 残高を最後に編集した日時。これより後のイベント（デビット/引き落とし/給料）だけ
   //    予測に反映する（編集時点の残高には過去分が既に含まれているため二重計上を防ぐ）。
   DateTime? balanceUpdatedAt;
+  // 💡 利用者が通帳・アプリの残高を見て「残高そのもの」を入力した時刻。
+  //   balanceUpdatedAt（予想のゲート）は入金・引き落としの反映でも進むので、
+  //   「この引き落としは入力した残高に含まれているか」の判断には使えない
+  //   （1件引いただけで、他の引き落としまで含まれているように見えてしまう）。
+  //   旧データには無い（null＝判断できない）。
+  DateTime? balanceEnteredAt;
 
   // カードごとの分割金利（年率%）
   final Map<String, double> cardInterestRates = {};
   double interestRateOf(String card) => cardInterestRates[card] ?? 15.0;
   void setInterestRate(String card, double rate) {
+    _ensureEditable();
     cardInterestRates[card] = rate;
     saveData();
     notifyListeners();
@@ -1424,6 +427,7 @@ class AppState extends ChangeNotifier {
   // 初回の全期間取得が済んだか（2回目以降は先月+今月だけ取得）
   bool gmailFirstSyncDone = false;
   void markGmailSynced() {
+    _ensureEditable();
     if (!gmailFirstSyncDone) {
       gmailFirstSyncDone = true;
       saveData();
@@ -1451,9 +455,18 @@ class AppState extends ChangeNotifier {
   final Set<String> deletedSourceIds = {};
   final Set<String> deletedDupKeys = {};
 
-  AppState() {
+  // 💡 時計を差し替えられるようにする（テストで「今日」を固定するため）。
+  //   ⚠️ 計算・判定は必ず clockNow() を使う。DateTime.now() を直接読むと、
+  //     テストの日付と食い違い、実行した日によって結果が変わるテストになる。
+  //     ID の採番（_id など）だけは時計と無関係に一意であればよいので DateTime.now() のまま。
+  AppState({DateTime Function()? clock}) : _clock = clock ?? DateTime.now {
     loadData();
   }
+
+  final DateTime Function() _clock;
+
+  // いまの日時（注入した時計）
+  DateTime clockNow() => _clock();
 
   // 💡 端末に保存したデータを読み終えたか。
   // ⚠️ 読み終える前の画面は初期値（残高0円・明細なし）なので、そのまま出すと
@@ -1471,6 +484,7 @@ class AppState extends ChangeNotifier {
 
   // Appleカレンダー自動連携のON/OFF。ON時は権限取得＋既存を全同期。
   Future<bool> setCalendarAutoSync(bool on) async {
+    _ensureEditable();
     calendarAutoSync = on;
     saveData();
     notifyListeners();
@@ -1519,7 +533,7 @@ class AppState extends ChangeNotifier {
     try {
       do {
         _paydaySyncAgain = false;
-        await _syncPaydaysOnce(now ?? DateTime.now());
+        await _syncPaydaysOnce(now ?? clockNow());
       } while (_paydaySyncAgain);
     } finally {
       _paydaySyncRunning = false;
@@ -1528,7 +542,7 @@ class AppState extends ChangeNotifier {
 
   Future<void> _syncPaydaysOnce(DateTime now) async {
     final today = DateTime(now.year, now.month, now.day);
-    var changed = false;
+    final gen = _dataGeneration; // 💡 この回が見ている中身（取り込みで置き換わったら、やり直す）
     // 先月〜3か月先の労働月ぶん（給料日はそれぞれの入金月に来る）
     for (var dm = -1; dm <= 3; dm++) {
       final m = DateTime(now.year, now.month + dm);
@@ -1549,15 +563,56 @@ class AppState extends ChangeNotifier {
           description: desc,
           remind: true, // 給料日の当日に通知する
         );
-        if (calId != null) {
-          specialCalendarIds[key] = calId;
-          specialCalendarSigs[key] = sig;
-          changed = true;
+        // 💡 作った予定の ID は、取り込み中なら終わるまで待ってから記録する（捨てると次に重複して作る）
+        if (calId != null &&
+            !await _recordSpecialEvent(key, calId, sig, gen,
+                stillWanted: () => _paydayKeysOf(now).contains(key))) {
+          _paydaySyncAgain = true; // 取り込みで中身が変わった → 新しい中身でやり直す
+          return;
         }
       }
     }
-    if (changed) saveData();
+    if (gen != _dataGeneration) _paydaySyncAgain = true;
   }
+
+  // いまの中身で給料日の通知を置くキー（勤務先×労働月。_syncPaydaysOnce と同じ範囲）
+  Set<String> _paydayKeysOf(DateTime now) => {
+        for (var dm = -1; dm <= 3; dm++)
+          for (final entry in paydaysInMonth(DateTime(now.year, now.month + dm)))
+            'payday_${entry.workplace.id}_${DateFormat('yyyyMM').format(DateTime(now.year, now.month + dm))}',
+      };
+
+  // 自動の処理（カレンダーへの書き出し）の記録。取り込み中は終わるまで待つ（runWhenEditable）。
+  // 戻り値: この回の中身のまま記録できたら true。取り込みで中身が変わっていたら false（呼び出し側はやり直す）。
+  // ⚠️ 中身が変わっていたら、作った予定の扱いは取り込んだ中身で決める:
+  //   ・取り込んだ中身に同じキーの別の予定がある → こちらで作った予定を消す（二重にしない。取り込んだ方は残す）
+  //   ・無い、かつ取り込んだ中身でもそのキーの通知が要る（stillWanted） → 記録する（内容はやり直しで決め直す）
+  //   ・無い、かつ要らない（勤務先が消えた・足りるようになった など） → 作った予定を消し、記録しない
+  //   ⚠️ 以前は「無ければ記録し、やり直しで片付ける」だったが、給料日にはその片付けが無く、
+  //     消した勤務先のキーと通知が残っていた（GPT 再レビュー f8a716c）。片付けに頼らず、ここで判定する。
+  Future<bool> _recordSpecialEvent(String key, String calId, String sig, int gen,
+          {required bool Function() stillWanted}) =>
+      runWhenEditable(() {
+        if (gen != _dataGeneration) {
+          final existing = specialCalendarIds[key] ?? '';
+          if (existing.isNotEmpty && existing != calId) {
+            calendarSync?.deleteEvent(calId);
+          } else if (existing.isEmpty) {
+            if (stillWanted()) {
+              specialCalendarIds[key] = calId;
+              specialCalendarSigs.remove(key); // 内容は新しい中身で決め直す（やり直しで書き直される）
+              saveData();
+            } else {
+              calendarSync?.deleteEvent(calId);
+            }
+          }
+          return false;
+        }
+        specialCalendarIds[key] = calId;
+        specialCalendarSigs[key] = sig;
+        saveData();
+        return true;
+      });
 
   // 💡 勤務先を消したら、まだ来ていない給料日のイベントも消す（通知が残らないように）
   void _removePaydayEventsOf(String workplaceId, DateTime today) {
@@ -1586,7 +641,7 @@ class AppState extends ChangeNotifier {
     notifyListeners();
     final sync = calendarSync;
     if (!calendarAutoSync || sync == null) return;
-    final now = DateTime.now();
+    final now = clockNow();
     for (final entry in shifts.entries) {
       final d = DateTime.tryParse(entry.key);
       if (d == null) continue;
@@ -1626,7 +681,7 @@ class AppState extends ChangeNotifier {
     try {
       do {
         _shortfallSyncAgain = false;
-        await _syncShortfallsOnce(now ?? DateTime.now());
+        await _syncShortfallsOnce(now ?? clockNow());
       } while (_shortfallSyncAgain);
     } finally {
       _shortfallSyncRunning = false;
@@ -1635,9 +690,16 @@ class AppState extends ChangeNotifier {
 
   static const _shortfallPrefix = 'shortfall_';
 
+  // いまの中身で不足の通知を置くキー（_syncShortfallsOnce と同じ）
+  Set<String> _shortfallKeysOf() => {
+        if (shortfallAlerts)
+          for (final day in shortfallDaysAhead())
+            '$_shortfallPrefix${DateFormat('yyyyMMdd').format(day.date)}',
+      };
+
   Future<void> _syncShortfallsOnce(DateTime now) async {
     final today = DateTime(now.year, now.month, now.day);
-    var changed = false;
+    final gen = _dataGeneration; // 💡 この回が見ている中身（取り込みで置き換わったら、やり直す）
     final wanted = <String>{};
     if (shortfallAlerts) {
       for (final day in shortfallDaysAhead()) {
@@ -1657,31 +719,42 @@ class AppState extends ChangeNotifier {
           description: desc,
           reminderMinutes: kShortfallReminderMinutes,
         );
-        if (calId != null) {
-          specialCalendarIds[key] = calId;
-          specialCalendarSigs[key] = sig;
-          changed = true;
+        if (calId != null &&
+            !await _recordSpecialEvent(key, calId, sig, gen,
+                stillWanted: () => _shortfallKeysOf().contains(key))) {
+          _shortfallSyncAgain = true; // 取り込みで中身が変わった → 新しい中身でやり直す
+          return;
         }
       }
     }
-    // 見込みが無くなった日を片付ける
-    for (final key in specialCalendarIds.keys
-        .where((k) => k.startsWith(_shortfallPrefix) && !wanted.contains(k))
-        .toList()) {
-      final placed = _sigDate(specialCalendarSigs[key]);
-      // ⚠️ もう来た日は通知済み。予定は記録として残し、管理からだけ外す
-      if (placed == null || !placed.isBefore(today)) {
-        calendarSync!.deleteEvent(specialCalendarIds[key]!);
+    // 見込みが無くなった日を片付ける（取り込み中なら終わってから）
+    // ⚠️ 「要らない日」はこの回の中身で求めたもの。待っている間に取り込みで中身が変わったら、
+    //   取り込んだ中身では必要な通知を消してしまうので片付けず、新しい中身でやり直す（GPT 再レビュー 6880887）。
+    await runWhenEditable(() {
+      if (gen != _dataGeneration) {
+        _shortfallSyncAgain = true;
+        return;
       }
-      specialCalendarIds.remove(key);
-      specialCalendarSigs.remove(key);
-      changed = true;
-    }
-    if (changed) saveData();
+      var changed = false;
+      for (final key in specialCalendarIds.keys
+          .where((k) => k.startsWith(_shortfallPrefix) && !wanted.contains(k))
+          .toList()) {
+        final placed = _sigDate(specialCalendarSigs[key]);
+        // ⚠️ もう来た日は通知済み。予定は記録として残し、管理からだけ外す
+        if (placed == null || !placed.isBefore(today)) {
+          calendarSync!.deleteEvent(specialCalendarIds[key]!);
+        }
+        specialCalendarIds.remove(key);
+        specialCalendarSigs.remove(key);
+        changed = true;
+      }
+      if (changed) saveData();
+    });
   }
 
   // ───── シフト ─────
   void addShift(DateTime date, ShiftData shift) {
+    _ensureEditable();
     shifts.putIfAbsent(_formatDate(date), () => []).add(shift);
     saveData();
     notifyListeners();
@@ -1720,6 +793,7 @@ class AppState extends ChangeNotifier {
   // 💡 まとめて登録したものだけを取り消す。
   //   ⚠️ 位置（index）ではなく、そのシフト自体で探す（元からあったシフトを巻き込まない）。
   int undoShiftsBatch(List<({String dateKey, ShiftData shift})> added) {
+    _ensureEditable();
     var removed = 0;
     final calIds = <String>[];
     for (final a in added) {
@@ -1745,6 +819,7 @@ class AppState extends ChangeNotifier {
   }
 
   void removeShift(String dateKey, int index) {
+    _ensureEditable();
     final list = shifts[dateKey];
     final calId = (list != null && index < list.length) ? list[index].calendarEventId : null;
     list?.removeAt(index);
@@ -1755,6 +830,7 @@ class AppState extends ChangeNotifier {
   }
 
   void updateShift(String dateKey, int index, ShiftData newShift) {
+    _ensureEditable();
     final list = shifts[dateKey];
     if (list == null || index < 0 || index >= list.length) return;
     final old = list[index];
@@ -1764,7 +840,7 @@ class AppState extends ChangeNotifier {
     saveData();
     notifyListeners();
     if (calendarAutoSync) {
-      final date = DateTime.tryParse(dateKey) ?? DateTime.now();
+      final date = DateTime.tryParse(dateKey) ?? clockNow();
       calendarSync?.upsertShift(date, newShift);
     }
   }
@@ -1800,6 +876,7 @@ class AppState extends ChangeNotifier {
 
   // 💡 複数日のシフトをまとめて追加（繰り返し入力用。保存・通知は1回だけ）
   void addShiftsBulk(Iterable<({DateTime date, ShiftData shift})> entries) {
+    _ensureEditable();
     for (final e in entries) {
       shifts.putIfAbsent(_formatDate(e.date), () => []).add(e.shift);
     }
@@ -1824,6 +901,7 @@ class AppState extends ChangeNotifier {
   }
 
   void addWorkplace(Workplace w) {
+    _ensureEditable();
     w.sortWagePeriods();
     workplaces.add(w);
     saveData();
@@ -1833,6 +911,7 @@ class AppState extends ChangeNotifier {
 
   // 既存の勤務先を丸ごと差し替え（編集画面の「保存する」用）
   void updateWorkplace(Workplace w) {
+    _ensureEditable();
     final i = workplaces.indexWhere((e) => e.id == w.id);
     if (i < 0) return;
     w.sortWagePeriods();
@@ -1844,7 +923,8 @@ class AppState extends ChangeNotifier {
   }
 
   void removeWorkplace(String id) {
-    _removePaydayEventsOf(id, DateTime.now());
+    _ensureEditable();
+    _removePaydayEventsOf(id, clockNow());
     workplaces.removeWhere((e) => e.id == id);
     // 削除した勤務先に紐づくデータも掃除（入金の選択肢や集計に残らないように）
     actualSalariesByWp.removeWhere((k, _) => k.endsWith('|$id'));
@@ -1904,10 +984,11 @@ class AppState extends ChangeNotifier {
 
   // 予定の追加/更新（idで照合）。開始日が変わってもバケットを移動する。
   void upsertEvent(EventData event) {
+    _ensureEditable();
     // 既存idを全バケットから除去
     events.forEach((k, list) => list.removeWhere((x) => x.id == event.id));
     events.removeWhere((k, list) => list.isEmpty);
-    final d = event.start ?? DateTime.now();
+    final d = event.start ?? clockNow();
     events.putIfAbsent(_formatDate(d), () => []).add(event);
     saveData();
     notifyListeners();
@@ -1915,6 +996,7 @@ class AppState extends ChangeNotifier {
   }
 
   void removeEvent(String dateKey, int index) {
+    _ensureEditable();
     final list = events[dateKey];
     final calId = (list != null && index < list.length) ? list[index].calendarEventId : null;
     list?.removeAt(index);
@@ -1926,6 +1008,7 @@ class AppState extends ChangeNotifier {
 
   // ───── Todo ─────
   void addTodo(TodoData todo) {
+    _ensureEditable();
     final key = _formatDate(todo.deadline);
     todos.putIfAbsent(key, () => []).add(todo);
     saveData();
@@ -1933,18 +1016,21 @@ class AppState extends ChangeNotifier {
   }
 
   void toggleTodo(TodoData todo) {
+    _ensureEditable();
     todo.completed = !todo.completed;
     saveData();
     notifyListeners();
   }
 
   void updateTodo(String oldKey, TodoData todo) {
+    _ensureEditable();
     todos[oldKey]?.removeWhere((t) => t.id == todo.id);
     if (todos[oldKey]?.isEmpty ?? false) todos.remove(oldKey);
     addTodo(todo);
   }
 
   void removeTodo(String dateKey, String id) {
+    _ensureEditable();
     todos[dateKey]?.removeWhere((t) => t.id == id);
     if (todos[dateKey]?.isEmpty ?? true) todos.remove(dateKey);
     saveData();
@@ -1963,6 +1049,7 @@ class AppState extends ChangeNotifier {
     PaymentSource source = PaymentSource.manual,
     String note = '', // 利用先（例: Amazonで購入）
   }) {
+    _ensureEditable();
     payments.add(Payment(
         id: _id(),
         cardName: cardName,
@@ -2023,6 +1110,7 @@ class AppState extends ChangeNotifier {
   }
 
   void linkBankBillingToLoan(String name, String loanId) {
+    _ensureEditable();
     final loan = loans.firstWhere((l) => l.id == loanId);
     if (!loan.isFromAccount && !loan.isDownPaymentFromAccount) return;
     final key = billingNameKey(resolveCardName(name));
@@ -2035,6 +1123,7 @@ class AppState extends ChangeNotifier {
   }
 
   void unlinkBankBillingFromLoan(String loanId, String name) {
+    _ensureEditable();
     final loan = loans.firstWhere((l) => l.id == loanId);
     loan.bankBillingNames.remove(name);
     // 💡 外したものを次の起動・取り込みで自動的に戻さない。
@@ -2043,10 +1132,103 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
+  // ════════════ 引き落としの「請求の月」 ════════════
+  // 💡 実際の引落日（銀行確定・請求予定に載っている日付）と、その引き落としが「何月の請求か」は別の概念。
+  //   ふだんは同じ月だが、月末払いが休みで翌月にずれると（10/31土 → 11/2）、11/2 の引落は10月の請求。
+  //   ⚠️ 日付の月で数えると、11月の請求と取り違えて同じ額を2回引き、11月の請求が消えていた。
+  //   決め方（金額では決めない。同じカード・同じ額でも別の請求のことがあるため）:
+  //   ・利用者が選んだ月（bankBillMonths）があればそれ
+  //   ・設定の引落日から計算した日付が、候補（日付の月・前月）のうち ちょうど1つと一致すれば、その月
+  //   ・一致しない／両方と一致する（支払日の設定を変えた、通常と違う振替日など）→ 判定できない。
+  //     集計は日付の月で扱い（以前と同じ）、確認待ちに出して利用者に選んでもらい、影響する予想に「要確認」を付ける
+  final Map<String, String> bankBillMonths = {}; // 明細のキー → 'yyyy-MM'（利用者が選んだ請求の月）
+
+  String billRecordKey(Payment p) =>
+      p.sourceId.isNotEmpty ? p.sourceId : _dupKey(p.cardName, p.amount, p.paymentDate, p.source);
+
+  // 設定から計算した、その請求の月の引落日（ローンは返済日、カードは引落日。未設定は27日）
+  DateTime _expectedDrawDate(String label, DateTime billMonth) {
+    final loan = loanForBankBillingName(label);
+    final day = loan?.payDay ?? cardPaymentDays[label] ?? _drawDayOf(label);
+    return drawDateInMonth(day, billMonth);
+  }
+
+  ({DateTime month, BillMonthStatus status}) _billMonthOf(String label, DateTime date,
+      {String? key}) {
+    final dateMonth = DateTime(date.year, date.month);
+    final chosen = key == null ? null : bankBillMonths[key];
+    if (chosen != null) {
+      final m = DateTime.tryParse('$chosen-01');
+      if (m != null) return (month: DateTime(m.year, m.month), status: BillMonthStatus.userChosen);
+    }
+    // 💡 引落日の設定が無いカード（ローンでもない）は、照らし合わせる手がかりが無い。
+    //   日付の月として扱い、確認待ちには出さない（出すと設定していないカードの確定がすべて「要確認」になる）。
+    //   ⚠️ 未設定のカードは予想でも仮に27日として扱っているので、27日以降が全部休みの月（2月など）に
+    //     翌月へずれると、この取り違えが残りうる。引落日を設定すれば判定に乗る。
+    if (!cardPaymentDays.containsKey(label) && loanForBankBillingName(label) == null) {
+      return (month: dateMonth, status: BillMonthStatus.noSetting);
+    }
+    final day = DateTime(date.year, date.month, date.day);
+    final prev = DateTime(date.year, date.month - 1);
+    final candidates = [
+      for (final m in [prev, dateMonth])
+        if (_expectedDrawDate(label, m) == day) m,
+    ];
+    if (candidates.length == 1) return (month: candidates.single, status: BillMonthStatus.matched);
+    return (month: dateMonth, status: BillMonthStatus.unresolved);
+  }
+
+  /// 銀行確定・請求予定の明細が何月の請求か（とその決まり方）
+  ({DateTime month, BillMonthStatus status}) billMonthOf(Payment p) =>
+      _billMonthOf(p.cardName, p.paymentDate, key: billRecordKey(p));
+
+  bool _isBillOf(Payment p, DateTime billMonth) {
+    final m = billMonthOf(p).month;
+    return m.year == billMonth.year && m.month == billMonth.month;
+  }
+
+  /// 請求の月の候補（日付の前月・日付の月）と、今の設定から計算した各月の引落日（選ぶ画面で見せる）
+  List<({DateTime month, DateTime expectedDate})> billMonthCandidatesOf(Payment p) => [
+        for (final m in [
+          DateTime(p.paymentDate.year, p.paymentDate.month - 1),
+          DateTime(p.paymentDate.year, p.paymentDate.month),
+        ])
+          (month: m, expectedDate: _expectedDrawDate(p.cardName, m)),
+      ];
+
+  /// 請求の月を利用者が選ぶ（判定できない銀行確定のため）。null で選択を取り消す。
+  void setBankBillMonth(Payment p, DateTime? billMonth) {
+    _ensureEditable();
+    final key = billRecordKey(p);
+    if (billMonth == null) {
+      bankBillMonths.remove(key);
+    } else {
+      bankBillMonths[key] = DateFormat('yyyy-MM').format(billMonth);
+    }
+    saveData();
+    notifyListeners();
+  }
+
+  /// 請求の月を判定できない銀行確定（利用者が選んでいないもの）
+  List<Payment> get unresolvedBankBills => [
+        for (final p in payments)
+          if (p.source == PaymentSource.bank && !p.infoOnly &&
+              billMonthOf(p).status == BillMonthStatus.unresolved)
+            p,
+      ];
+
+  // 💡 判定できない銀行確定が影響しうる「カード × 請求の月」（日付の月とその前月）
+  Set<String> get _billsNeedingReview => {
+        for (final p in unresolvedBankBills) ...{
+          '${p.cardName}|${_ym(DateTime(p.paymentDate.year, p.paymentDate.month))}',
+          '${p.cardName}|${_ym(DateTime(p.paymentDate.year, p.paymentDate.month - 1))}',
+        },
+      };
+
   bool _hasLoanBankBill(Loan loan, DateTime payMonth,
       {DateTime? onDate, int minimumAmount = 0}) => payments.any((p) =>
       p.source == PaymentSource.bank && !p.infoOnly &&
-      p.paymentDate.year == payMonth.year && p.paymentDate.month == payMonth.month &&
+      _isBillOf(p, payMonth) &&
       p.amount >= minimumAmount &&
       (onDate == null || (p.paymentDate.year == onDate.year &&
           p.paymentDate.month == onDate.month && p.paymentDate.day == onDate.day)) &&
@@ -2115,6 +1297,7 @@ class AppState extends ChangeNotifier {
   //   金額が予想から消えたり、削除した明細が次の取り込みで復活したりする。
   //   （test/card_alias_test.dart で全部の行き先を固定している）
   void renameOrMergeCard(String from, String to) {
+    _ensureEditable();
     final target = to.trim();
     if (from == target || from.trim().isEmpty || target.isEmpty) return;
 
@@ -2204,6 +1387,7 @@ class AppState extends ChangeNotifier {
   //   すでに同じ日・同じ金額の明細がそのカードにあるなら、二重になるので付け替えない。
   //   戻り値: 付け替えたら true、重複していて見送ったら false。
   bool moveAmazonPaymentTo(String paymentId, String cardName) {
+    _ensureEditable();
     final i = payments.indexWhere((e) => e.id == paymentId);
     if (i < 0) return false;
     final p = payments[i];
@@ -2229,6 +1413,7 @@ class AppState extends ChangeNotifier {
 
 
   void setPaymentNote(String paymentId, String note) {
+    _ensureEditable();
     final i = payments.indexWhere((p) => p.id == paymentId);
     if (i < 0) return;
     final p = payments[i];
@@ -2274,6 +1459,7 @@ class AppState extends ChangeNotifier {
   // 💡 分割払いへ移したはずの決済がカード側にも残っていたら取り除く（二重計上の自己修復）。
   //   旧バージョンで変換した明細は sourceId の記録が無く復活しうるため、
   //   起動時と取り込み時に既存の分割払いと突き合わせて掃除する。手動追加は対象外。
+  // ⚠️ 取り込み・起動時の自己修復（repairData）からも呼ぶので、取り込み中でも断らない（保存はしない）
   int cleanupInstallmentDuplicates() {
     if (installments.isEmpty) return 0;
     final before = payments.length;
@@ -2293,6 +1479,7 @@ class AppState extends ChangeNotifier {
   ({int added, int removed}) reconcilePayments(
       Iterable<({String cardName, int amount, DateTime date, PaymentSource source, String sourceId, String note})> rawItems,
       {DateTime? since, Map<String, DateTime>? mailReceivedAt}) {
+    _ensureEditable();
     bool inWindow(DateTime d) => since == null || !d.isBefore(since);
     String mailId(String sourceId) => sourceId.startsWith(kAmazonSourcePrefix)
         ? sourceId
@@ -2326,12 +1513,16 @@ class AppState extends ChangeNotifier {
         p.source != PaymentSource.manual && !replace(p)).toList();
 
     // 銀行確定があるカード月（請求予定を抑制）
+    // 💡 「カード|請求の月」。日付の月ではなく請求の月で比べる（休みで翌月にずれた引落の
+    //   銀行確定が、翌月の別の請求予定を消さないように）。
+    String billKeyOf(String card, DateTime date, String sourceId) =>
+        '$card|${_ym(_billMonthOf(card, date, key: sourceId.isEmpty ? null : sourceId).month)}';
     final bankKeys = <String>{
       for (final p in retained.where((p) => p.source == PaymentSource.bank))
-        '${resolveCardName(p.cardName)}|${_ym(p.paymentDate)}',
+        '${resolveCardName(p.cardName)}|${_ym(billMonthOf(p).month)}',
     };
     for (final it in items.where((e) => e.source == PaymentSource.bank)) {
-      bankKeys.add('${it.cardName}|${_ym(it.date)}');
+      bankKeys.add(billKeyOf(it.cardName, it.date, it.sourceId));
     }
 
     // 望ましい自動集合を構築（重複・変換済み・銀行に上書きされた予測を除外）
@@ -2353,7 +1544,7 @@ class AppState extends ChangeNotifier {
       if (deletedDupKeys.contains(key)) continue;
       if (it.sourceId.isNotEmpty && deletedSourceIds.contains(it.sourceId)) continue;
       if (it.source == PaymentSource.billing &&
-          bankKeys.contains('${it.cardName}|${_ym(it.date)}')) {
+          bankKeys.contains(billKeyOf(it.cardName, it.date, it.sourceId))) {
         continue; // 銀行確定が優先
       }
       if (!seen.add(key)) continue; // 同内容（同時刻）は1件に統合
@@ -2390,7 +1581,8 @@ class AppState extends ChangeNotifier {
     // 💡 確認できる範囲だけ入れ替え、保持した請求予定も銀行確定があれば除く。
     payments.removeWhere((p) => replace(p) ||
         (p.source == PaymentSource.billing &&
-         bankKeys.contains('${resolveCardName(p.cardName)}|${_ym(p.paymentDate)}')));
+         bankKeys.contains(
+             '${resolveCardName(p.cardName)}|${_ym(_billMonthOf(resolveCardName(p.cardName), p.paymentDate, key: p.sourceId.isEmpty ? null : p.sourceId).month)}')));
     for (final it in desired) {
       final k = _dupKey(it.cardName, it.amount, it.date, it.source);
       final card = amazonCardOverrides[it.sourceId] ?? it.cardName;
@@ -2433,6 +1625,7 @@ class AppState extends ChangeNotifier {
 
 
   void togglePaid(String id) {
+    _ensureEditable();
     final p = payments.firstWhere((e) => e.id == id);
     p.paid = !p.paid;
     saveData();
@@ -2441,6 +1634,7 @@ class AppState extends ChangeNotifier {
 
   // 削除＝ゴミ箱へ退避＋墓石を記録（更新で復活しない）。
   void removePayment(String id) {
+    _ensureEditable();
     final idx = payments.indexWhere((e) => e.id == id);
     if (idx < 0) return;
     final p = payments[idx];
@@ -2454,6 +1648,7 @@ class AppState extends ChangeNotifier {
 
   // ゴミ箱から復元（墓石も解除し、再び更新対象に戻す）。
   void restorePayment(String id) {
+    _ensureEditable();
     final idx = trashedPayments.indexWhere((e) => e.id == id);
     if (idx < 0) return;
     final p = trashedPayments.removeAt(idx);
@@ -2466,6 +1661,7 @@ class AppState extends ChangeNotifier {
 
   // ゴミ箱から完全削除（墓石は残す＝更新でも復活させない）。
   void deleteFromTrash(String id) {
+    _ensureEditable();
     trashedPayments.removeWhere((e) => e.id == id);
     saveData();
     notifyListeners();
@@ -2473,6 +1669,7 @@ class AppState extends ChangeNotifier {
 
   // ゴミ箱を空にする（墓石は残す）。
   void emptyTrash() {
+    _ensureEditable();
     trashedPayments.clear();
     saveData();
     notifyListeners();
@@ -2487,7 +1684,8 @@ class AppState extends ChangeNotifier {
     double interestRate = 0,
     DateTime? startDate,
   }) {
-    final start = startDate ?? DateTime.now();
+    _ensureEditable();
+    final start = startDate ?? clockNow();
     // 💡 同一取引の二重登録を防止（カード・総額・回数・利用日が同じものは追加しない）。
     final dup = installments.any((i) =>
         i.cardName == cardName &&
@@ -2534,11 +1732,14 @@ class AppState extends ChangeNotifier {
   int remainingMonthsOf(Installment i) {
     final start = i.startDate;
     if (start == null) return i.remainingMonths; // 旧データは保存値を使用
-    final now = DateTime.now();
+    final now = clockNow();
     var paid = 0;
     for (var k = 0; k < i.installmentCount; k++) {
-      // 各回の引落日を正確に算出（土日調整も各回ごと）。過ぎた回数を「支払済み」に。
-      final d = debitDateForNth(i.cardName, start, k);
+      // 各回の引落日（土日祝・年末年始の調整も各回ごと）。過ぎた回数を「支払済み」に。
+      // 💡 予想と同じ規則: k 回目は「利用開始月＋k 月」の利用ぶんとして、その翌月の
+      //   カードの引落日（設定の引落日）に落ちる。
+      // ⚠️ 以前はカード名から引落日を決め打ちしていた（楽天=27日・三井/Amazon/メル=26日）。
+      final d = cardDrawDateOf(i.cardName, DateTime(start.year, start.month + 1 + k));
       if (!d.isAfter(now)) paid++;
     }
     return (i.installmentCount - paid).clamp(0, i.installmentCount);
@@ -2546,6 +1747,7 @@ class AppState extends ChangeNotifier {
 
   // 回数を編集して月額を再計算（金利はカード規則で自動判定）
   void editInstallment(String id, {required int count, String? cardName}) {
+    _ensureEditable();
     final inst = installments.firstWhere((e) => e.id == id);
     if (cardName != null) inst.cardName = cardName;
     inst.installmentCount = count;
@@ -2558,6 +1760,7 @@ class AppState extends ChangeNotifier {
   }
 
   void removeInstallment(String id) {
+    _ensureEditable();
     installments.removeWhere((e) => e.id == id);
     saveData();
     notifyListeners();
@@ -2565,6 +1768,7 @@ class AppState extends ChangeNotifier {
 
   // 💡 カード請求を分割払いへ変換（カードからは外す）。金利はそのカードの設定値。
   void convertPaymentToInstallment(String paymentId, int count) {
+    _ensureEditable();
     final idx = payments.indexWhere((e) => e.id == paymentId);
     if (idx < 0) return;
     final p = payments[idx];
@@ -2595,6 +1799,7 @@ class AppState extends ChangeNotifier {
     required int payDay,
     String method = '',
   }) {
+    _ensureEditable();
     subscriptions.add(Subscription(
         id: _id(), title: title, amount: amount, payDay: payDay, method: method));
     saveData();
@@ -2603,6 +1808,7 @@ class AppState extends ChangeNotifier {
 
   // 定期支払いの支払い方法を変更（口座振替 / カード名）
   void setSubscriptionMethod(String id, String method) {
+    _ensureEditable();
     final i = subscriptions.indexWhere((e) => e.id == id);
     if (i < 0) return;
     subscriptions[i].method = method;
@@ -2611,6 +1817,7 @@ class AppState extends ChangeNotifier {
   }
 
   void removeSubscription(String id) {
+    _ensureEditable();
     subscriptions.removeWhere((e) => e.id == id);
     saveData();
     notifyListeners();
@@ -2618,23 +1825,27 @@ class AppState extends ChangeNotifier {
 
   // ───── ATM引き出し ─────
   void addWithdrawal({required DateTime date, required int amount, String memo = ''}) {
+    _ensureEditable();
     withdrawals.add(Withdrawal(id: _id(), date: date, amount: amount, memo: memo));
     saveData();
     notifyListeners();
   }
 
   void removeWithdrawal(String id) {
+    _ensureEditable();
     withdrawals.removeWhere((e) => e.id == id);
     saveData();
     notifyListeners();
   }
 
   void updateBalance(int balance) {
+    _ensureEditable();
     // 💡 手で書いた残高は通帳の値＝その時点までのデビットは既に引かれている。
     //   金額は動かさず「済み」とだけ記録する（引くと二重になる）。
     _markDebitsAccounted();
     currentBalance = balance;
-    balanceUpdatedAt = DateTime.now(); // #6 編集日時を記録
+    balanceUpdatedAt = clockNow(); // #6 編集日時を記録
+    balanceEnteredAt = balanceUpdatedAt;
     saveData();
     notifyListeners();
   }
@@ -2647,7 +1858,7 @@ class AppState extends ChangeNotifier {
   // 💡 いま時点までのデビットを「残高に入っている」ことにする（金額は動かさない）。
   //   手で残高を書き直したときに使う。
   void _markDebitsAccounted() {
-    final now = DateTime.now();
+    final now = clockNow();
     for (final p in payments) {
       if (!_isDebit(p.cardName)) continue;
       if (p.paymentDate.isAfter(now)) continue; // これから使うぶんは対象外
@@ -2668,6 +1879,7 @@ class AppState extends ChangeNotifier {
   }
 
   void updateWalletCash(int amount) {
+    _ensureEditable();
     walletCash = amount;
     saveData();
     notifyListeners();
@@ -2683,6 +1895,7 @@ class AppState extends ChangeNotifier {
 
   void addPlannedIncome(
       {required String title, required int amount, required DateTime date, bool monthly = false}) {
+    _ensureEditable();
     plannedIncomes.add(PlannedIncome(
         id: _id(), title: title, amount: amount, date: date, monthly: monthly));
     saveData();
@@ -2691,6 +1904,7 @@ class AppState extends ChangeNotifier {
 
   void updatePlannedIncome(String id,
       {String? title, int? amount, DateTime? date, bool? monthly}) {
+    _ensureEditable();
     final i = plannedIncomes.indexWhere((e) => e.id == id);
     if (i < 0) return;
     final p = plannedIncomes[i];
@@ -2703,6 +1917,7 @@ class AppState extends ChangeNotifier {
   }
 
   void removePlannedIncome(String id) {
+    _ensureEditable();
     plannedIncomes.removeWhere((e) => e.id == id);
     receivedPlannedKeys.removeWhere((k) => k.startsWith('$id|'));
     saveData();
@@ -2735,7 +1950,7 @@ class AppState extends ChangeNotifier {
 
   // 予定日が過ぎて、まだ受け取っていない入金
   List<({PlannedIncome income, DateTime date})> get duePlannedIncomes {
-    final now = DateTime.now();
+    final now = clockNow();
     final today = DateTime(now.year, now.month, now.day);
     final oldest = today.subtract(const Duration(days: 62));
     final out = <({PlannedIncome income, DateTime date})>[];
@@ -2751,13 +1966,14 @@ class AppState extends ChangeNotifier {
 
   // 予定入金を受け取った → 残高に加算して履歴に残す
   void receivePlannedIncome(String id, int amount, DateTime date) {
+    _ensureEditable();
     final p = plannedIncomes.firstWhere((e) => e.id == id,
         orElse: () => PlannedIncome(id: '', title: '入金', amount: 0, date: date));
     receivedPlannedKeys.add(_plannedKey(id, date));
     if (amount > 0) {
       _foldDebitsIntoBalance();
       currentBalance += amount;
-      balanceUpdatedAt = DateTime.now();
+      balanceUpdatedAt = clockNow();
       _recordBalanceEntry(
         kind: BalanceEntryKind.deposit,
         label: p.title.isEmpty ? '予定入金' : p.title,
@@ -2770,6 +1986,7 @@ class AppState extends ChangeNotifier {
 
   // 予定入金を「受け取らなかった」ことにする（残高は変えない）
   void skipPlannedIncome(String id, DateTime date) {
+    _ensureEditable();
     receivedPlannedKeys.add(_plannedKey(id, date));
     saveData();
     notifyListeners();
@@ -2815,7 +2032,7 @@ class AppState extends ChangeNotifier {
         kind: kind,
         label: label,
         amount: amount,
-        at: DateTime.now(),
+        at: clockNow(),
         balanceAfter: currentBalance,
         workplaceId: workplaceId,
         sourceKey: sourceKey,
@@ -2866,6 +2083,7 @@ class AppState extends ChangeNotifier {
     required DateTime at,
     String? workplaceId,
   }) {
+    _ensureEditable();
     if (amount <= 0) return;
     balanceHistory.add(BalanceEntry(
       id: _id(),
@@ -2884,12 +2102,13 @@ class AppState extends ChangeNotifier {
   // 💡 履歴を取り消して残高を元に戻す（入力ミスの修正用）。
   //   元の通知も未処理に戻すので、もう一度入力し直せる。
   void undoBalanceEntry(String entryId) {
+    _ensureEditable();
     final i = balanceHistory.indexWhere((e) => e.id == entryId);
     if (i < 0) return;
     final e = balanceHistory[i];
     _foldDebitsIntoBalance();
     currentBalance -= e.signedAmount; // 反映を打ち消す
-    balanceUpdatedAt = DateTime.now();
+    balanceUpdatedAt = clockNow();
     balanceHistory.removeAt(i);
     final key = e.sourceKey;
     if (key != null && key.isNotEmpty) {
@@ -2927,6 +2146,7 @@ class AppState extends ChangeNotifier {
   // ⚠️ 取り込みの「作り直し」はしない（取得に失敗したときに消えないよう、足すだけ）。
   //   同じ取引番号は1件として扱う。古いもの（振込予定日から120日超）は掃除する。
   void addPayPayTransfers(Iterable<PayPayTransfer> list) {
+    _ensureEditable();
     var changed = false;
     for (final t in list) {
       if (!_isTrackedBank(t.bank)) continue;
@@ -2934,7 +2154,7 @@ class AppState extends ChangeNotifier {
       paypayTransfers.add(t);
       changed = true;
     }
-    final oldest = DateTime.now().subtract(const Duration(days: 120));
+    final oldest = clockNow().subtract(const Duration(days: 120));
     final before = paypayTransfers.length;
     paypayTransfers.removeWhere((t) => t.scheduledDate.isBefore(oldest));
     receivedTransfers.removeWhere((id, _) => !paypayTransfers.any((t) => t.id == id));
@@ -3003,11 +2223,12 @@ class AppState extends ChangeNotifier {
   //   残高の編集日時も更新するので、この入金が予想残高で二重計上されない。
   void addDeposit(int amount,
       {String? workplaceId, DateTime? date, String? sourceKey, String? label}) {
+    _ensureEditable();
     if (amount == 0) return;
     _foldDebitsIntoBalance();
     currentBalance += amount;
-    balanceUpdatedAt = DateTime.now();
-    final d = date ?? DateTime.now();
+    balanceUpdatedAt = clockNow();
+    final d = date ?? clockNow();
     // バイトの給料として入力された場合は、その労働月の実給料にも反映する
     final w = workplaceById(workplaceId);
     if (w != null) {
@@ -3046,6 +2267,7 @@ class AppState extends ChangeNotifier {
 
   // メールから見つけた入金通知を取り込む（処理済み・既存は無視）
   int addDepositNotices(Iterable<({String sourceId, DateTime date})> notices) {
+    _ensureEditable();
     var added = 0;
     for (final n in notices) {
       if (n.sourceId.isEmpty) continue;
@@ -3065,8 +2287,9 @@ class AppState extends ChangeNotifier {
   // 入金通知に金額を入力して残高へ反映
   void applyDepositNotice(String sourceId, int amount,
       {String? workplaceId, String? transferId}) {
+    _ensureEditable();
     final idx = pendingDeposits.indexWhere((e) => e.sourceId == sourceId);
-    final date = idx >= 0 ? pendingDeposits[idx].date : DateTime.now();
+    final date = idx >= 0 ? pendingDeposits[idx].date : clockNow();
     if (idx >= 0) pendingDeposits.removeAt(idx);
     handledDepositIds.add(sourceId);
     // 💡 PayPayの出金の着金なら「受け取り済み」にする。
@@ -3089,7 +2312,7 @@ class AppState extends ChangeNotifier {
   //   残高を編集した日より後のものだけが対象（それ以前は残高に反映済みとみなす）。
   List<({String id, String label, int amount, DateTime date})> get pendingDraws {
     final out = <({String id, String label, int amount, DateTime date})>[];
-    final now = DateTime.now();
+    final now = clockNow();
     final today = DateTime(now.year, now.month, now.day);
 
     // 💡 対象は「直近2か月以内に引き落とし日が過ぎたもの」。
@@ -3102,7 +2325,8 @@ class AppState extends ChangeNotifier {
     final bankDone = <String>{}; // 「カード|yyyy-MM」= 事前お知らせが来ている
     for (final p in payments) {
       if (p.source != PaymentSource.bank) continue;
-      bankDone.add('${p.cardName}|${DateFormat('yyyy-MM').format(p.paymentDate)}');
+      // 💡 請求の月で記録する（休みで翌月にずれた引落の確定が、翌月の別の請求を隠さないように）
+      bankDone.add('${p.cardName}|${DateFormat('yyyy-MM').format(billMonthOf(p).month)}');
       if (!inWindow(p.paymentDate)) continue;
       final id = 'bank:${p.sourceId.isNotEmpty ? p.sourceId : _dupKey(p.cardName, p.amount, p.paymentDate, p.source)}';
       if (handledDrawIds.contains(id)) continue;
@@ -3111,17 +2335,25 @@ class AppState extends ChangeNotifier {
 
     // ①' 事前お知らせメールが来ていないカードは、設定した引き落とし日で知らせる。
     //   金額は前月の利用合計から見込みで出す（ダイアログで直せる）。
-    for (final e in cardPaymentDays.entries) {
-      final card = e.key;
-      for (var back = 0; back < 3; back++) {
-        final m = DateTime(now.year, now.month - back);
-        final date = cardDrawDateOf(card, m); // 土日祝は翌営業日
+    // 💡 日付・金額は予想と同じ規則（cardDrawDateOf・cardBillAmountOf）。締め日が月末以外のカードは
+    //   締め期間で集計し、分割払い・カード払いのローン・頭金も合算する（以前は暦月の利用合計だけ）。
+    //   ⚠️ 予想のゲート（残高を書いた日）はここでは使わない。確認待ちは「処理したか」で消える。
+    for (final card in cardPaymentDays.keys) {
+      if (_excludedFromDraw(card)) continue; // デビットなどは口座の引き落としではない
+      for (var back = 0; back < 4; back++) {
+        final m = DateTime(now.year, now.month - back); // 請求の月
+        final date = cardDrawDateOf(card, m); // 土日祝・年末年始は翌営業日
         if (!inWindow(date)) continue;
-        final ym = DateFormat('yyyy-MM').format(date);
+        final ym = DateFormat('yyyy-MM').format(m); // 請求の月
         if (bankDone.contains('$card|$ym')) continue; // 事前お知らせ優先
-        // 引き落とし額＝前月の利用分
-        final amount = paymentTotalsByCardOf(DateTime(m.year, m.month - 1))[card] ?? 0;
+        final amount = cardBillAmountOf(card, m);
         if (amount <= 0) continue;
+        // ⚠️ ID は「請求の月」。休みで翌月にずれた引落（10/31→11/2 など）も、翌月分と別の ID になる。
+        //   ずれていない引落は以前と同じ ID（引落日の月＝請求の月）なので、処理済みの記録はそのまま効く。
+        //   ⚠️ 以前の版で「ずれた引落」を処理した記録（引落日の月の ID）は、翌月の別の請求と同じ文字列なので
+        //     ここでは使わない（使うと翌月の正当な請求まで処理済みに見える）。そのため、ずれた引落が
+        //     一度だけ再び出ることがあるが、「入力した残高に含まれている可能性」が表示され、
+        //     基本の操作は「残高はそのまま確認」なので二重には引かれにくい。
         final id = 'card:$card:$ym';
         if (handledDrawIds.contains(id)) continue;
         out.add((id: id, label: '$card（予定）', amount: amount, date: date));
@@ -3134,9 +2366,8 @@ class AppState extends ChangeNotifier {
     for (final sub in subscriptions.where((e) => !e.isCardPayment)) {
       for (var back = 0; back < 3; back++) {
         final m = DateTime(now.year, now.month - back);
-        final lastDay = DateTime(m.year, m.month + 1, 0).day;
-        final day = sub.payDay > lastDay ? lastDay : sub.payDay;
-        final date = DateTime(m.year, m.month, day);
+        // 💡 予想（subscriptionDrawsIn）と同じく、休みなら翌営業日（以前はそのままの日付だった）
+        final date = drawDateInMonth(sub.payDay, m);
         if (!inWindow(date)) continue;
         final id = 'sub:${sub.id}:${DateFormat('yyyy-MM').format(m)}';
         if (handledDrawIds.contains(id)) continue;
@@ -3165,8 +2396,12 @@ class AppState extends ChangeNotifier {
     for (final d in pendingDraws) {
       out.add(HomeNotice(
         kind: HomeNoticeKind.draw,
-        title: '引き落としの反映待ち：${d.label}',
-        detail: '${d.date.month}/${d.date.day} に口座から引かれています',
+        title: '引き落としの確認：${d.label}',
+        detail: '${d.date.month}/${d.date.day} の引き落とし・${switch (drawReflectionOf(d.date)) {
+          DrawReflection.maybeIncluded => '入力した残高に含まれている可能性があります',
+          DrawReflection.likelyNotIncluded => 'まだ残高に入っていない見込みです',
+          DrawReflection.unknown => '残高に入っているか確かめてください',
+        }}',
         date: d.date,
         amount: d.amount,
         draw: d,
@@ -3194,6 +2429,20 @@ class AppState extends ChangeNotifier {
         date: e.date,
         amount: e.income.amount,
         planned: e,
+      ));
+    }
+    // 💡 請求の月を判定できない銀行確定（直近62日）。利用者が選ぶまで、影響する予想は「要確認」
+    final recentFrom = DateTime(clockNow().year, clockNow().month, clockNow().day)
+        .subtract(const Duration(days: 62));
+    for (final p in unresolvedBankBills) {
+      if (p.paymentDate.isBefore(recentFrom)) continue;
+      out.add(HomeNotice(
+        kind: HomeNoticeKind.bankBillMonthUnknown,
+        title: 'どの月の請求か確認してください：${p.cardName}',
+        detail: '${p.paymentDate.month}/${p.paymentDate.day} の引落確定（設定の引落日と合いません）',
+        date: p.paymentDate,
+        amount: p.amount,
+        bankRecord: p,
       ));
     }
     final noCard = installmentsWithoutCard.where((i) => remainingMonthsOf(i) > 0);
@@ -3277,6 +2526,7 @@ class AppState extends ChangeNotifier {
   //   ・本人が消した予約の「追加」は復活させない
   //   戻り値は新しく増えた件数。
   int addScheduleSuggestions(Iterable<ScheduleSuggestion> incoming) {
+    _ensureEditable();
     final alreadyOpen = scheduleSuggestions.where((s) => s.isOpen).map((s) => s.id).toSet();
     final ordered = incoming.toList()..sort((a, b) {
       final byTime = a.receivedAt.compareTo(b.receivedAt);
@@ -3372,6 +2622,7 @@ class AppState extends ChangeNotifier {
 
   // 💡 本人の操作で保留・不要から確認待ちへ戻す。登録済みや取消履歴は戻さない。
   void reopenScheduleSuggestion(String id) {
+    _ensureEditable();
     final s = scheduleSuggestions.where((e) => e.id == id).firstOrNull;
     if (s == null || (s.status != SuggestionStatus.held &&
         s.status != SuggestionStatus.rejected)) {
@@ -3383,6 +2634,7 @@ class AppState extends ChangeNotifier {
   }
 
   void _setSuggestionStatus(String id, SuggestionStatus st) {
+    _ensureEditable();
     final s = scheduleSuggestions.where((e) => e.id == id).firstOrNull;
     if (s == null || !s.isOpen) return;
     s.status = st;
@@ -3399,6 +2651,7 @@ class AppState extends ChangeNotifier {
     required bool allDay,
     required String location,
   }) {
+    _ensureEditable();
     final s = scheduleSuggestions.where((e) => e.id == id).firstOrNull;
     if (s == null || !s.isOpen) return;
     s
@@ -3418,6 +2671,7 @@ class AppState extends ChangeNotifier {
   static const Duration kSuggestionHistoryKeep = Duration(days: 90);
 
   int pruneScheduleSuggestions(DateTime now) {
+    _ensureEditable();
     final limit = now.subtract(kSuggestionHistoryKeep);
     final before = scheduleSuggestions.length;
     scheduleSuggestions.removeWhere((s) {
@@ -3435,6 +2689,7 @@ class AppState extends ChangeNotifier {
 
   // 見本の提案をまとめて消す（登録済みの予定・シフトは残す）
   void removeSampleSuggestions() {
+    _ensureEditable();
     scheduleSuggestions
         .removeWhere((s) => s.sample && s.status != SuggestionStatus.approved);
     saveData();
@@ -3468,6 +2723,7 @@ class AppState extends ChangeNotifier {
     String? workplaceId,
     int? breakMinutes,
   }) {
+    _ensureEditable();
     final s = scheduleSuggestions.where((e) => e.id == id).firstOrNull;
     if (s == null) return '提案が見つかりません';
     if (!s.isOpen) return 'この提案はもう処理済みです';
@@ -3600,7 +2856,7 @@ class AppState extends ChangeNotifier {
   //   終わったものは出さない。終日の予定はその日の先頭に置く。
   List<({DateTime start, DateTime? end, String title, bool isShift, bool allDay})>
       upcomingSchedule({int days = 3, DateTime? from}) {
-    final now = from ?? DateTime.now();
+    final now = from ?? clockNow();
     final today = DateTime(now.year, now.month, now.day);
     final out = <({DateTime start, DateTime? end, String title, bool isShift, bool allDay})>[];
     for (var i = 0; i < days; i++) {
@@ -3622,11 +2878,16 @@ class AppState extends ChangeNotifier {
   }
 
   // 💡 引き落としを口座残高から引く（残高の編集日時も更新するので二重計上しない）
-  void applyDraw(String id, int amount, {String? label}) {
+  // 💡 確認待ちの引き落としを残高から引く。戻り値: 実際に引いたら true。
+  // ⚠️ 同じ引き落とし（同じ ID）は一度だけ。処理済みなら何もしない（連打・古い画面からの再操作・
+  //   再起動後の再操作で二重に引かない）。判定は画面ではなくここで行う。
+  bool applyDraw(String id, int amount, {String? label}) {
+    _ensureEditable();
+    if (handledDrawIds.contains(id)) return false;
     if (amount != 0) {
       _foldDebitsIntoBalance();
       currentBalance -= amount;
-      balanceUpdatedAt = DateTime.now();
+      balanceUpdatedAt = clockNow();
       _recordBalanceEntry(
         kind: BalanceEntryKind.draw,
         label: label ?? '引き落とし',
@@ -3637,17 +2898,52 @@ class AppState extends ChangeNotifier {
     handledDrawIds.add(id);
     saveData();
     notifyListeners();
+    return true;
   }
 
-  // 引き落としをスキップ（残高は変えない。同じものは二度と出さない）
-  void skipDraw(String id) {
-    handledDrawIds.add(id);
+  // 引き落としを「確認した」にする（残高は変えない。同じものは二度と出さない）。
+  // 💡 入力した残高に含まれている可能性があるときの基本の操作。戻り値: 状態を変えたら true。
+  bool skipDraw(String id) {
+    _ensureEditable();
+    if (!handledDrawIds.add(id)) return false;
     saveData();
     notifyListeners();
+    return true;
+  }
+
+  // 💡 確認待ちの引き落としが、利用者が入力した残高に含まれているか（推定）。
+  //   ⚠️ 前後関係だけで「反映済み」とは断定しない。表示も「可能性」「見込み」と言う。
+  //   ・引落日が、残高を入力した日より前 → 含まれている可能性がある（基本は「残高はそのまま確認」）
+  //   ・引落日が、残高を入力した日より後 → まだ含まれていない見込み
+  //   ・同じ日・残高を入力した記録が無い → 判断できない（利用者に聞く）
+  DrawReflection drawReflectionOf(DateTime drawDate) {
+    final at = balanceEnteredAt;
+    if (at == null) return DrawReflection.unknown;
+    final d = DateTime(drawDate.year, drawDate.month, drawDate.day);
+    final b = DateTime(at.year, at.month, at.day);
+    if (d.isBefore(b)) return DrawReflection.maybeIncluded;
+    if (d.isAfter(b)) return DrawReflection.likelyNotIncluded;
+    return DrawReflection.unknown;
+  }
+
+  // 💡 未反映の見込みの引き落としだけをまとめて引く（含まれている可能性があるもの・判断できないものは引かない）。
+  //   戻り値: 引いた件数と金額。
+  ({int count, int amount}) applyLikelyNotIncludedDraws() {
+    _ensureEditable();
+    var count = 0, amount = 0;
+    for (final d in List.of(pendingDraws)) {
+      if (drawReflectionOf(d.date) != DrawReflection.likelyNotIncluded) continue;
+      if (applyDraw(d.id, d.amount, label: d.label)) {
+        count++;
+        amount += d.amount;
+      }
+    }
+    return (count: count, amount: amount);
   }
 
   // 未反映の引き落としをまとめてスキップ（過去分の一括整理用）
   void skipAllDraws() {
+    _ensureEditable();
     for (final d in pendingDraws) {
       handledDrawIds.add(d.id);
     }
@@ -3657,10 +2953,11 @@ class AppState extends ChangeNotifier {
 
   // 口座からの支払いを手入力で引く（引き落とし・現金払いなど）
   void subtractFromBalance(int amount, {String label = '手入力'}) {
+    _ensureEditable();
     if (amount == 0) return;
     _foldDebitsIntoBalance();
     currentBalance -= amount;
-    balanceUpdatedAt = DateTime.now();
+    balanceUpdatedAt = clockNow();
     _recordBalanceEntry(
       kind: BalanceEntryKind.draw,
       label: label,
@@ -3672,6 +2969,7 @@ class AppState extends ChangeNotifier {
 
   // 入金通知をスキップ（残高は変えない。同じ通知は二度と出さない）
   void skipDepositNotice(String sourceId) {
+    _ensureEditable();
     pendingDeposits.removeWhere((e) => e.sourceId == sourceId);
     handledDepositIds.add(sourceId);
     saveData();
@@ -3779,6 +3077,7 @@ class AppState extends ChangeNotifier {
   // ───── 予算（カテゴリ別の月上限。カテゴリ名＝支出内訳のラベル）─────
   final Map<String, int> budgets = {};
   void setBudget(String category, int amount) {
+    _ensureEditable();
     if (amount <= 0) {
       budgets.remove(category);
     } else {
@@ -3802,12 +3101,13 @@ class AppState extends ChangeNotifier {
 
   // 今月に予算超過しているカテゴリ
   List<({String label, int budget, int spent, bool over})> get overBudgetThisMonth =>
-      budgetStatus(DateTime.now()).where((e) => e.over).toList();
+      budgetStatus(clockNow()).where((e) => e.over).toList();
 
   // ───── 目標貯金（目標額＋目標年月）─────
   int goalAmount = 0; // 0 = 未設定
   DateTime? goalDate; // 目標年月（その月末までに達成したい）
   void setGoal(int amount, DateTime? date) {
+    _ensureEditable();
     goalAmount = amount;
     goalDate = date;
     saveData();
@@ -3821,7 +3121,7 @@ class AppState extends ChangeNotifier {
   ({int goal, DateTime date, int monthsLeft, int pace, int projected, bool achievable, int requiredMonthly})?
       savingsForecast() {
     if (goalAmount <= 0 || goalDate == null) return null;
-    final now = DateTime.now();
+    final now = clockNow();
     final monthsLeft =
         ((goalDate!.year - now.year) * 12 + (goalDate!.month - now.month)).clamp(0, 600);
     final pace = monthlyNetPace;
@@ -3878,6 +3178,7 @@ class AppState extends ChangeNotifier {
   int? actualSalaryOfWorkplace(DateTime month, String wpKey) =>
       actualSalariesByWp[_wpSalKey(month, wpKey)];
   void setActualSalaryOfWorkplace(DateTime month, String wpKey, int? amount) {
+    _ensureEditable();
     final key = _wpSalKey(month, wpKey);
     if (amount == null || amount <= 0) {
       actualSalariesByWp.remove(key);
@@ -3934,10 +3235,7 @@ class AppState extends ChangeNotifier {
   //   ＝翌月(M+1)に引き落とされる bank 明細が存在するか。
   bool isExpenseConfirmedByBank(DateTime month) {
     final nextMonth = DateTime(month.year, month.month + 1);
-    return payments.any((p) =>
-        p.source == PaymentSource.bank &&
-        p.paymentDate.year == nextMonth.year &&
-        p.paymentDate.month == nextMonth.month);
+    return payments.any((p) => p.source == PaymentSource.bank && _isBillOf(p, nextMonth));
   }
 
   // 💡 その月（利用月）の請求が銀行の引落確定で決まっているカードと、その確定額。
@@ -3945,9 +3243,7 @@ class AppState extends ChangeNotifier {
     final nextMonth = DateTime(month.year, month.month + 1);
     final bank = <String, int>{};
     for (final p in payments) {
-      if (p.source == PaymentSource.bank &&
-          p.paymentDate.year == nextMonth.year &&
-          p.paymentDate.month == nextMonth.month) {
+      if (p.source == PaymentSource.bank && _isBillOf(p, nextMonth)) {
         bank[p.cardName] = (bank[p.cardName] ?? 0) + p.amount;
       }
     }
@@ -3984,7 +3280,7 @@ class AppState extends ChangeNotifier {
     // ① 翌月に引き落とされる銀行確定（＝この月の利用分）
     final bank = <String, int>{};
     for (final p in payments) {
-      if (p.source == PaymentSource.bank && sameYm(p.paymentDate, nextMonth)) {
+      if (p.source == PaymentSource.bank && _isBillOf(p, nextMonth)) {
         bank[p.cardName] = (bank[p.cardName] ?? 0) + p.amount;
       }
     }
@@ -4022,7 +3318,7 @@ class AppState extends ChangeNotifier {
   //   （引き落とし月ではなく利用月で集計。例: 4月利用→4月の支出に表示）
   int installmentTotalOf(DateTime month) {
     int total = 0;
-    final now = DateTime.now();
+    final now = clockNow();
     for (final i in installments) {
       total += i.amountIn(month, now: now);
     }
@@ -4034,7 +3330,7 @@ class AppState extends ChangeNotifier {
   //   それぞれのカードの請求に含まれて、そのカードの引き落とし日に落ちるため。
   Map<String, int> installmentTotalByCardOf(DateTime month) {
     final out = <String, int>{};
-    final now = DateTime.now();
+    final now = clockNow();
     for (final i in installments) {
       final card = i.cardName.trim();
       if (card.isEmpty) continue; // カード未設定は割り当てられない
@@ -4055,6 +3351,28 @@ class AppState extends ChangeNotifier {
         (downPaymentByCardOf(useMonth)[cardName] ?? 0);
   }
 
+  // 💡 支払い画面の一覧の合計。表示中の明細（記録のみを除く）と、そのカードの請求に合算される分割払い。
+  //   ・検索で絞っているときは明細の合計だけ（分割は足さない）
+  //   ・カードで絞っているときはそのカードの分割（銀行確定済みなら確定額に含まれるので 0）
+  //   ・絞っていないときは、確定していないカードの分割の合計（installmentFoldedInto）
+  //   ⚠️ 以前は画面の中で同じ判定を書いていた（確定済みの判定を画面が複製していた）。
+  ({int shownTotal, int installmentPart}) paymentListTotals({
+    required DateTime month,
+    required Iterable<Payment> shown,
+    String? card,
+    bool searching = false,
+  }) {
+    final shownTotal = shown.where((p) => !p.infoOnly).fold(0, (s, p) => s + p.amount);
+    final installmentPart = searching
+        ? 0
+        : (card == null
+            ? installmentFoldedInto(month)
+            : (isCardConfirmedByBank(card, month)
+                ? 0
+                : (installmentTotalByCardOf(month)[card] ?? 0)));
+    return (shownTotal: shownTotal, installmentPart: installmentPart);
+  }
+
   // 💡 「うち分割払い」の注記に出す額＝実際にカードへ足し込んだ分割払いの合計。
   //   確定済みのカードは確定額の中に入っていて内訳が分からないので数えない
   //   （注記が合計より大きくなる、という食い違いを出さないため）。
@@ -4072,7 +3390,7 @@ class AppState extends ChangeNotifier {
   //   別枠で残して、カードを設定するよう促す。
   int unassignedInstallmentTotalOf(DateTime month) {
     var total = 0;
-    final now = DateTime.now();
+    final now = clockNow();
     for (final i in installments) {
       if (i.cardName.trim().isNotEmpty) continue;
       total += i.amountIn(month, now: now);
@@ -4084,9 +3402,14 @@ class AppState extends ChangeNotifier {
   List<Installment> get installmentsWithoutCard =>
       installments.where((i) => i.cardName.trim().isEmpty).toList();
 
-  List<({String label, int amount, int colorValue})> expenseBreakdownOf(DateTime month) {
-    final out = <({String label, int amount, int colorValue})>[];
+  // 💡 利用月の支出（①）。カード・定期・ローン・分割・ATM を、月 M に使ったお金として集計する。
+  //   残高のゲートは使わない（残高を書き直しても過去の支出は変わらない）。
+  //   fromSettings は「明細の記録ではなく、今の設定（定期・分割・ローン）から計算したぶん」。
+  //   定期には開始日が無いので、過去の月の定期は今の設定からの推定になる。
+  List<({String label, int amount, int colorValue, int fromSettings})> _expenseItemsOf(
+      DateTime month) {
     final totals = Map<String, int>.from(paymentTotalsByCardOf(month));
+    final settings = <String, int>{};
     final bank = _bankConfirmedTotalsOf(month);
 
     // 💡 分割払い・カード払いのローン・頭金はカードの請求に含めて落ちるので、
@@ -4096,6 +3419,7 @@ class AppState extends ChangeNotifier {
       byCard.forEach((card, amount) {
         if (_isConfirmedIn(card, bank)) return;
         totals[card] = (totals[card] ?? 0) + amount;
+        settings[card] = (settings[card] ?? 0) + amount;
       });
     }
 
@@ -4103,9 +3427,15 @@ class AppState extends ChangeNotifier {
     fold(loanTotalByCardOf(month));
     fold(downPaymentByCardOf(month));
 
+    final out = <({String label, int amount, int colorValue, int fromSettings})>[];
     totals.forEach((card, amount) {
       if (amount > 0) {
-        out.add((label: card, amount: amount, colorValue: cardColorOf(card).toARGB32()));
+        out.add((
+          label: card,
+          amount: amount,
+          colorValue: cardColorOf(card).toARGB32(),
+          fromSettings: settings[card] ?? 0,
+        ));
       }
     });
 
@@ -4120,6 +3450,7 @@ class AppState extends ChangeNotifier {
           label: '分割払い（カード未設定）',
           amount: unassigned,
           colorValue: Colors.deepOrange.toARGB32(),
+          fromSettings: unassigned,
         ));
       }
     }
@@ -4128,22 +3459,56 @@ class AppState extends ChangeNotifier {
       if (!l.isFromAccount) continue;
       // 💡 この利用月の翌月に銀行確定があれば、手動の予定額は足さない。
       if (_hasLoanBankBill(l, DateTime(month.year, month.month + 1))) continue;
+      final amount = l.amountIn(month);
       out.add((
         label: l.name,
-        amount: l.amountIn(month),
+        amount: amount,
         colorValue: Colors.indigo.toARGB32(),
+        fromSettings: amount,
       ));
     }
     final subTotal = subscriptionTotalOf(month);
     if (subTotal > 0) {
-      out.add((label: '定期支払い', amount: subTotal, colorValue: Colors.purple.toARGB32()));
+      out.add((
+        label: '定期支払い',
+        amount: subTotal,
+        colorValue: Colors.purple.toARGB32(),
+        fromSettings: subTotal,
+      ));
     }
     final atm = withdrawalsOf(month);
     if (atm > 0) {
-      out.add((label: 'ATM', amount: atm, colorValue: Colors.brown.toARGB32()));
+      out.add((label: 'ATM', amount: atm, colorValue: Colors.brown.toARGB32(), fromSettings: 0));
     }
     out.sort((a, b) => b.amount.compareTo(a.amount));
     return out;
+  }
+
+  List<({String label, int amount, int colorValue})> expenseBreakdownOf(DateTime month) => [
+        for (final e in _expenseItemsOf(month))
+          (label: e.label, amount: e.amount, colorValue: e.colorValue),
+      ];
+
+  /// 利用月の支出の合計と、そのうち今の設定から計算したぶん（推定）。
+  ({int total, int fromSettings}) expenseSummaryOf(DateTime month) {
+    var total = 0, settings = 0;
+    for (final e in _expenseItemsOf(month)) {
+      total += e.amount;
+      settings += e.fromSettings;
+    }
+    return (total: total, fromSettings: settings);
+  }
+
+  /// 年間支出（利用月の支出を 1〜12 月ぶん足したもの）と、そのうち設定から計算したぶん。
+  /// 💡 12 月の利用は翌年 1 月に引き落とされても、その年（12 月）の支出に入る。
+  ({int total, int fromSettings}) expenseSummaryOfYear(int year) {
+    var total = 0, settings = 0;
+    for (var m = 1; m <= 12; m++) {
+      final s = expenseSummaryOf(DateTime(year, m));
+      total += s.total;
+      settings += s.fromSettings;
+    }
+    return (total: total, fromSettings: settings);
   }
 
   // 支払い種別の表示名（明細詳細のサブ情報用）
@@ -4169,10 +3534,20 @@ class AppState extends ChangeNotifier {
       for (final s in subscriptions) {
         out.add((title: s.title, subtitle: '毎月${s.payDay}日', amount: s.amount));
       }
+    } else if (label == '分割払い（カード未設定）') {
+      // 💡 合計（unassignedInstallmentTotalOf）と同じ判定で並べる
+      final now = clockNow();
+      for (final i in installments) {
+        if (i.cardName.trim().isNotEmpty) continue;
+        final amount = i.amountIn(month, now: now);
+        if (amount > 0) {
+          out.add((title: i.name, subtitle: i.countLabelIn(month), amount: amount));
+        }
+      }
     } else if (label == '分割払い') {
       // ⚠️ 合計（installmentTotalOf）と同じ判定で並べる。以前は開始日の無い旧データを
       //   合計には入れて内訳からは外していたので、内訳を足しても合計に届かなかった。
-      final now = DateTime.now();
+      final now = clockNow();
       for (final i in installments) {
         final amount = i.amountIn(month, now: now);
         if (amount > 0) {
@@ -4210,11 +3585,11 @@ class AppState extends ChangeNotifier {
       final cardHasBank = payments.any((p) =>
           p.cardName == label &&
           p.source == PaymentSource.bank &&
-          sameYm(p.paymentDate, nextMonth));
+          _isBillOf(p, nextMonth));
       for (final p in payments) {
         if (p.cardName != label) continue;
         final belongs = cardHasBank
-            ? (p.source == PaymentSource.bank && sameYm(p.paymentDate, nextMonth))
+            ? (p.source == PaymentSource.bank && _isBillOf(p, nextMonth))
             : (p.source != PaymentSource.bank && sameYm(p.paymentDate, month));
         if (!belongs) continue;
         if (p.infoOnly) continue; // 記録のみ（他カードで計上済み）は合計に入っていない
@@ -4226,10 +3601,13 @@ class AppState extends ChangeNotifier {
       }
       // 💡 このカードで組んだ分割払いの当月ぶん。カードの請求に含めて落ちるので、
       //   合計にも足してあり、明細にも出す（銀行確定済みなら確定額に含まれるので出さない）。
-      if (!cardHasBank) {
+      // 💡 このカードの請求に合算されるもの（分割払い・カード払いのローン・頭金）。
+      //   合計（expenseBreakdownOf の fold）と同じ判定で並べる。銀行確定済みなら確定額に含まれるので出さない。
+      // ⚠️ 以前は分割払いだけを出していて、ローン・頭金は合計にだけ入っていた（内訳を足しても届かない＝B5）。
+      if (!_isConfirmedIn(label, _bankConfirmedTotalsOf(month))) {
         // ⚠️ 合計（installmentTotalByCardOf）と同じ判定で並べる（開始日の無い旧データも出す）
-        final now = DateTime.now();
-        for (final inst in installments.where((e) => e.cardName == label)) {
+        final now = clockNow();
+        for (final inst in installments.where((e) => e.cardName.trim() == label)) {
           final amount = inst.amountIn(month, now: now);
           if (amount > 0) {
             out.add((
@@ -4238,6 +3616,26 @@ class AppState extends ChangeNotifier {
               amount: amount,
             ));
           }
+        }
+        for (final l in loans) {
+          if (!l.isCardPayment || l.method != label || !l.isActiveIn(month)) continue;
+          out.add((
+            title: 'ローン: ${l.name}',
+            subtitle: '${l.countIn(month)}/${l.totalCount}回目',
+            amount: l.amountIn(month),
+          ));
+        }
+        for (final l in loans) {
+          final d = l.downPaymentDate;
+          if (!l.hasDownPayment || l.isDownPaymentFromAccount || l.downPaymentMethod != label) {
+            continue;
+          }
+          if (d!.year != month.year || d.month != month.month) continue;
+          out.add((
+            title: '頭金: ${l.name}',
+            subtitle: '${d.month}/${d.day}',
+            amount: l.downPayment,
+          ));
         }
       }
     }
@@ -4345,20 +3743,9 @@ class AppState extends ChangeNotifier {
     return false;
   }
 
-  // 指定年のカード支出合計（利用通知・確定を含む実支出）
-  int cardSpendingOfYear(int year) {
-    return payments
-        .where((p) => p.paymentDate.year == year)
-        .fold(0, (sum, p) => sum + p.amount);
-  }
-
-  // 指定月の総支出（カード＋定期＋ATM＋分割）
-  int monthlyExpenseOf(DateTime month) =>
-      cardPaymentsOf(month) + subscriptionTotal + withdrawalsOf(month) + installmentTotal;
-
   // 直近 months か月の月次推移（収入＝給料見込み・支出＝支出内訳合計）。古い順。
   List<({DateTime month, int income, int expense})> monthlyTrend(int months) {
-    final now = DateTime.now();
+    final now = clockNow();
     final out = <({DateTime month, int income, int expense})>[];
     for (var i = months - 1; i >= 0; i--) {
       final m = DateTime(now.year, now.month - i);
@@ -4370,84 +3757,7 @@ class AppState extends ChangeNotifier {
   }
 
   // 指定年の総支出（各月の支出内訳合計を12か月ぶん。円グラフ中央の年支出用）
-  int expenseOfYear(int year) {
-    int total = 0;
-    for (var m = 1; m <= 12; m++) {
-      total += expenseBreakdownOf(DateTime(year, m)).fold(0, (s, e) => s + e.amount);
-    }
-    return total;
-  }
-
-  // 💡 引き落とし日ルール（締め＝末日）
-  //   楽天        : 利用月の翌月27日（月末締め・翌月27日払い）
-  //   三井OLIVE/Amazonマスター : 利用月の翌月26日
-  //   その他       : 利用月の翌月27日
-  //   土日は翌営業日へ（祝日は未対応）
-  ({int monthsAhead, int day}) _cardDrawRule(String cardName) {
-    if (cardName.contains('楽天')) return (monthsAhead: 1, day: 27);
-    if (cardName.contains('OLIVE') ||
-        cardName.contains('Amazon') ||
-        cardName.contains('メル') ||
-        cardName.contains('三井')) {
-      return (monthsAhead: 1, day: 26);
-    }
-    return (monthsAhead: 1, day: 27);
-  }
-
-  // 土日祝は翌営業日へ（カードの引き落としは後ろ倒し）
-  DateTime _businessDay(DateTime d) => nextBusinessDay(d);
-
-  // 利用日から1回目の引き落とし日。
-  DateTime debitDateFor(String cardName, DateTime purchaseDate) =>
-      debitDateForNth(cardName, purchaseDate, 0);
-
-  // 利用日からk回目(0始まり)の引き落とし日。分割の各回の引落日を正確に出す。
-  //   ※各回ごとに土日調整するので、1回目の土日ズレを後続へ持ち越さない。
-  DateTime debitDateForNth(String cardName, DateTime purchaseDate, int k) {
-    final r = _cardDrawRule(cardName);
-    return _businessDay(
-        DateTime(purchaseDate.year, purchaseDate.month + r.monthsAhead + k, r.day));
-  }
-
-  // 💡 指定月に引き落とされるカード請求を「カード別」に集計。
-  //   ・請求予定/銀行確定/手動 … paymentDate がその月のものを採用
-  //   ・利用通知(usage) … 引落日ルールで引落月を推定。ただし同カードに
-  //     確定/予測(explicit)があればそちらを優先（二重計上を防ぐ）
-  Map<String, int> cardChargesOf(DateTime month) {
-    bool sameYm(DateTime d) => d.year == month.year && d.month == month.month;
-    final result = <String, int>{};
-
-    for (final p in payments) {
-      if (p.paid || p.source == PaymentSource.usage) continue;
-      if (sameYm(p.paymentDate)) {
-        result[p.cardName] = (result[p.cardName] ?? 0) + p.amount;
-      }
-    }
-
-    // 利用通知 → 引落月を推定して、確定/予測が無いカードだけ予測計上。
-    // 💡 以下は将来の引落ではないため残高予測に含めない（情報のみ）:
-    //   ・Amazon発送由来(amazon#) … 支払カード不明
-    //   ・デビット … 即時に口座から引落済み
-    //   ・Vポイントペイ … プリペイド残高から支払済み
-    final usageByCard = <String, int>{};
-    for (final p in payments) {
-      if (p.paid || p.source != PaymentSource.usage) continue;
-      if (p.sourceId.startsWith('amazon#')) continue;
-      if (p.cardName.contains('デビット') || p.cardName.contains('ポイントペイ')) continue;
-      if (sameYm(debitDateFor(p.cardName, p.paymentDate))) {
-        usageByCard[p.cardName] = (usageByCard[p.cardName] ?? 0) + p.amount;
-      }
-    }
-    usageByCard.forEach((card, amt) {
-      result.putIfAbsent(card, () => amt);
-    });
-
-    return result;
-  }
-
-  // 指定月の未払いカード請求合計
-  int cardPaymentsOf(DateTime month) =>
-      cardChargesOf(month).values.fold(0, (sum, v) => sum + v);
+  int expenseOfYear(int year) => expenseSummaryOfYear(year).total;
 
   // 定期支払い（毎月固定）合計
   int get subscriptionTotal =>
@@ -4492,6 +3802,7 @@ class AppState extends ChangeNotifier {
     int monthlyOverride = 0,
     int firstPaymentAmount = 0,
   }) {
+    _ensureEditable();
     loans.add(Loan(
       id: _id(),
       name: name.trim(),
@@ -4510,6 +3821,7 @@ class AppState extends ChangeNotifier {
   }
 
   void updateLoan(Loan loan) {
+    _ensureEditable();
     repairLoanBillingLinks();
     saveData();
     notifyListeners();
@@ -4527,6 +3839,7 @@ class AppState extends ChangeNotifier {
       required int amount,
       required DateTime date,
       bool monthly = false}) {
+    _ensureEditable();
     plannedExpenses.add(PlannedExpense(
         id: _id(), title: title.trim(), amount: amount, date: date, monthly: monthly));
     saveData();
@@ -4534,6 +3847,7 @@ class AppState extends ChangeNotifier {
   }
 
   void removePlannedExpense(String id) {
+    _ensureEditable();
     plannedExpenses.removeWhere((e) => e.id == id);
     paidPlannedExpenseKeys.removeWhere((k) => k.startsWith('$id|'));
     saveData();
@@ -4546,6 +3860,7 @@ class AppState extends ChangeNotifier {
     required DateTime date,
     required bool monthly,
   }) {
+    _ensureEditable();
     final expense = plannedExpenses.firstWhere((e) => e.id == id);
     expense
       ..title = title.trim()
@@ -4560,6 +3875,7 @@ class AppState extends ChangeNotifier {
   // 💡 予定日より前に払ったとき用。予定日を過ぎていれば、残高を書き直した時点で
   //   二重計上ゲート（_forecastInclude）が外すので、ここを使わなくても二重にはならない。
   void markPlannedExpensePaid(String id, DateTime date) {
+    _ensureEditable();
     paidPlannedExpenseKeys.add(_plannedExpenseKey(id, date));
     saveData();
     notifyListeners();
@@ -4567,6 +3883,7 @@ class AppState extends ChangeNotifier {
 
   // 払い済みを取り消す（押し間違えたとき）
   void unmarkPlannedExpensePaid(String id, DateTime date) {
+    _ensureEditable();
     paidPlannedExpenseKeys.remove(_plannedExpenseKey(id, date));
     saveData();
     notifyListeners();
@@ -4578,7 +3895,7 @@ class AppState extends ChangeNotifier {
   // 💡 次に来る、まだ払っていない回の予定日（今日以降。1年先まで探す）。
   //   毎月の予定支出は、今月分を払い済みにすると来月分になる。
   DateTime? nextUnpaidPlannedExpenseDate(PlannedExpense e, {DateTime? now}) {
-    final n = now ?? DateTime.now();
+    final n = now ?? clockNow();
     final today = DateTime(n.year, n.month, n.day);
     for (var dm = 0; dm <= 12; dm++) {
       final d = e.dateIn(DateTime(n.year, n.month + dm));
@@ -4642,6 +3959,7 @@ class AppState extends ChangeNotifier {
   }
 
   void removeLoan(String id) {
+    _ensureEditable();
     loans.removeWhere((l) => l.id == id);
     saveData();
     notifyListeners();
@@ -4654,11 +3972,6 @@ class AppState extends ChangeNotifier {
         .where((w) => DateFormat('yyyy-MM').format(w.date) == prefix)
         .fold(0, (sum, w) => sum + w.amount);
   }
-
-  // 分割払い（残回数があるもの）の今月分合計。残回数は経過に応じて動的算出。
-  int get installmentTotal => installments
-      .where((i) => remainingMonthsOf(i) > 0)
-      .fold(0, (sum, i) => sum + i.monthlyAmount);
 
   // 💡 給料日までのズレ（月）。勤務先の paydayMonthOffset の最頻値（無ければ翌月=1）。
   //   締日締め→給料日に入金、を予測へ反映するために使う。
@@ -4724,12 +4037,8 @@ class AppState extends ChangeNotifier {
   // 引き落とし項目の「引き落とし日(日)」を推定（ゲート判定用）。
   // 💡 そのカードの、その月の実際の引き落とし日。
   //   設定した日が土日祝なら翌営業日にずれる（カードの引き落としは後ろ倒しが一般的）。
-  DateTime cardDrawDateOf(String cardName, DateTime month) {
-    final day = cardPaymentDays[cardName] ?? 27;
-    final lastDay = DateTime(month.year, month.month + 1, 0).day;
-    final base = DateTime(month.year, month.month, day > lastDay ? lastDay : day);
-    return nextBusinessDay(base);
-  }
+  DateTime cardDrawDateOf(String cardName, DateTime month) =>
+      drawDateInMonth(cardPaymentDays[cardName] ?? 27, month);
 
   int _drawDayOf(String label) {
     final card = cardPaymentDays[label];
@@ -4754,14 +4063,12 @@ class AppState extends ChangeNotifier {
     DateTime? bankDate;
     for (final p in payments) {
       if (p.source != PaymentSource.bank || p.cardName != label) continue;
-      if (p.paymentDate.year != payMonth.year || p.paymentDate.month != payMonth.month) continue;
+      if (!_isBillOf(p, payMonth)) continue; // 請求の月で選ぶ（日付は実際の引落日のまま）
       final d = DateTime(p.paymentDate.year, p.paymentDate.month, p.paymentDate.day);
       if (bankDate == null || d.isAfter(bankDate)) bankDate = d;
     }
-    if (bankDate != null) return bankDate;
-    final lastDay = DateTime(payMonth.year, payMonth.month + 1, 0).day;
-    final day = _drawDayOf(label).clamp(1, lastDay);
-    return nextBusinessDay(DateTime(payMonth.year, payMonth.month, day));
+    if (bankDate != null) return bankDate; // ⚠️ 確定の日付は再調整しない
+    return drawDateInMonth(_drawDayOf(label), payMonth);
   }
 
   // 💡 この日に使ったら、どの引き落とし日に入るか（手入力の画面と明細の詳細で見せる）。
@@ -4771,14 +4078,8 @@ class AppState extends ChangeNotifier {
   //     n日締め  … n日までの利用は翌月、n+1日以降は翌々月
   DateTime? drawDateForUsage(String cardName, DateTime usageDate) {
     if (!cardPaymentDays.containsKey(cardName)) return null;
-    final d = DateTime(usageDate.year, usageDate.month, usageDate.day);
-    var payMonth = DateTime(d.year, d.month + 1);
-    if (!isMonthEndClosing(cardName)) {
-      final c = closingDayOf(cardName);
-      final lastDay = DateTime(d.year, d.month + 1, 0).day;
-      final closing = c > lastDay ? lastDay : c;
-      if (d.day > closing) payMonth = DateTime(d.year, d.month + 2);
-    }
+    final payMonth =
+        payMonthOfUsage(closingDay: closingDayOf(cardName), usageDate: usageDate);
     return drawDateOf(cardName, payMonth);
   }
 
@@ -4802,8 +4103,7 @@ class AppState extends ChangeNotifier {
       // ⚠️ 締め期間で集計するのは「利用明細」だけ。分割払い・カード払いのローン・
       //   頭金は月ごとに積まれるので、ここで足さないと丸ごと消える
       //   （注記には「うち分割払い」と出るのに合計に入っていない状態になる）。
-      final amount = cardUsageInClosingPeriod(card, payMonth) +
-          cardFoldedExtrasOf(card, useMonth);
+      final amount = cardBillAmountOf(card, payMonth);
       if (amount <= 0) continue;
       out.add((label: card, amount: amount, colorValue: cardColorOf(card).toARGB32()));
     }
@@ -4827,6 +4127,21 @@ class AppState extends ChangeNotifier {
     return out;
   }
 
+  // 💡 そのカードの payMonth の請求額（ゲートなし）。予想（drawBreakdownOf）と確認待ち（pendingDraws）が使う。
+  //   ・締め日が月末以外 … 締め期間の利用（銀行確定があれば確定額）＋分割・カード払いのローン・頭金
+  //   ・月末締め … 前月の支出（expenseBreakdownOf）のそのカードの額（同じものを合算済み）
+  int cardBillAmountOf(String card, DateTime payMonth) {
+    final useMonth = DateTime(payMonth.year, payMonth.month - 1);
+    if (!isMonthEndClosing(card)) {
+      // ⚠️ 締め期間で集計するのは「利用明細」だけ。分割払い・カード払いのローン・
+      //   頭金は月ごとに積まれるので、ここで足さないと丸ごと消える。
+      return cardUsageInClosingPeriod(card, payMonth) + cardFoldedExtrasOf(card, useMonth);
+    }
+    return expenseBreakdownOf(useMonth)
+        .where((e) => e.label == card)
+        .fold(0, (s, e) => s + e.amount);
+  }
+
   // 💡 payMonth に口座から落ちる定期支払い（1件ずつ、その引き落とし日つき）。
   //   ・口座振替・手動払い … 定期の支払日（休みなら翌営業日）
   //   ・カード払い … そのカードの引き落とし日（カードの請求として落ちるため）
@@ -4835,14 +4150,12 @@ class AppState extends ChangeNotifier {
   List<({String title, int amount, DateTime date})> subscriptionDrawsIn(DateTime payMonth) {
     final useMonth = DateTime(payMonth.year, payMonth.month - 1);
     final bank = _bankConfirmedTotalsOf(useMonth);
-    final lastDay = DateTime(payMonth.year, payMonth.month + 1, 0).day;
     final out = <({String title, int amount, DateTime date})>[];
     for (final s in subscriptions) {
       if (s.isCardPayment && _isConfirmedIn(s.method, bank)) continue;
       final date = s.isCardPayment
           ? cardDrawDateOf(s.method, payMonth)
-          : nextBusinessDay(DateTime(payMonth.year, payMonth.month,
-              s.payDay > lastDay ? lastDay : s.payDay));
+          : drawDateInMonth(s.payDay, payMonth);
       if (!_forecastInclude(date)) continue;
       out.add((title: s.title, amount: s.amount, date: date));
     }
@@ -4878,175 +4191,258 @@ class AppState extends ChangeNotifier {
   // 財布の現金（機能ONのときだけ有効）
   int get effectiveWalletCash => showWalletCash ? walletCash : 0;
 
-  // 今月末残高。起点＝デビット調整済み残高＋財布の現金、給料・引き落としは編集日より後の分のみ。
-  int get thisMonthBalance {
-    final now = DateTime.now();
-    return effectiveBalance +
-        effectiveWalletCash +
-        incomeForecastIn(now) +
-        transferForecastIn(now) -
-        drawnInMonth(now) -
-        oneTimeExpenseForecastIn(now);
+  // ════════════ 残高の予想（1 つの行の並びから全部を作る） ════════════
+  // 💡 月末の金額・内訳・日ごとの並び・最低残高・足りなくなる日は、すべて forecastMonths の行から作る。
+  //   規則（何をいつ引くか）は材料の関数（incomeForecastIn と同じ分岐・transfersForecastIn・
+  //   drawBreakdownOf・subscriptionDrawsIn・oneTimeExpensesIn）にあり、ここは行に並べるだけ。
+  //   ⚠️ 以前は「起点＋入金−引き落とし−一度きり」が 7 か所に書かれていた。
+  //     足し引きを増やすときは _forecastLinesOf にだけ足す（lib/finance/forecast.dart）。
+  //   計算中に保存・通知・状態の変更はしない（読み取りだけ）。
+
+  // 今月の起点＝デビット調整済みの残高＋財布の現金
+  int get forecastStart => effectiveBalance + effectiveWalletCash;
+
+  /// 今月から [count] か月ぶんの予想（[0] が今月）。
+  /// 💡 行は「実際の日付の月」に入れる。引落日・給料日が休みで月をまたぐと
+  ///   （月末払いの 10/31 土 → 11/2、12/31 → 1/4、1日払いの給料が前営業日へ など）、
+  ///   元の月の月末予想ではなく、実際に動く月の予想に入る。
+  ///   ⚠️ 以前は元の月で引いていたので、日ごとの並び（谷）と月末予想が食い違っていた。
+  ///   ・前月分の行は、今月以降にずれ込んだものだけ拾う（前月中の動きは今まで通り予想に入れない）
+  ///   ・今月分で、日付が今月より前にずれたものは今月に入れる（まだ残高に入っていない可能性があるため。
+  ///     残高を書いた日より前のものは、行を作る時点でゲートが外している）
+  List<MonthForecast> forecastMonths({int count = 3}) {
+    final now = clockNow();
+    final first = DateTime(now.year, now.month, 1);
+    int bucketOf(DateTime d) =>
+        (d.year - first.year) * 12 + (d.month - first.month); // 0 = 今月
+    final buckets = List.generate(count, (_) => <ForecastLine>[]);
+    // 今月以降の分を先に、前月からずれ込んだ分を後に並べる（今月の並びを今までと同じにするため）
+    for (final s in [for (var i = 0; i <= count; i++) i, -1]) {
+      final source = DateTime(first.year, first.month + s, 1);
+      for (final l in _forecastLinesOf(source)) {
+        var b = bucketOf(l.date);
+        if (s >= 0 && b < 0) b = 0; // 今月以降の分が前月の日付にずれた → 今月に入れる
+        if (b < 0 || b >= count) continue;
+        // 入金のまとめ名は、入った月で決める（今月だけ「編集後」）
+        buckets[b].add(l.kind == ForecastKind.income
+            ? ForecastLine(
+                kind: l.kind,
+                label: l.label,
+                group: b == 0 ? '給料入金（編集後）' : '給料入金',
+                amount: l.amount,
+                date: l.date,
+                certainty: l.certainty,
+                needsReview: l.needsReview,
+              )
+            : l);
+      }
+    }
+    final out = <MonthForecast>[];
+    var start = forecastStart;
+    for (var i = 0; i < count; i++) {
+      final f = MonthForecast(
+          month: DateTime(first.year, first.month + i, 1), start: start, lines: buckets[i]);
+      out.add(f);
+      start = f.end;
+    }
+    return out;
   }
+
+  // 💡 実給料が入っていれば確定、無ければシフトからの見込み
+  Certainty _salaryCertainty(DateTime workMonth, String? wpKey) {
+    if (wpKey != null) {
+      return actualSalaryOfWorkplace(workMonth, wpKey) != null
+          ? Certainty.confirmed
+          : Certainty.estimated;
+    }
+    final keys = _salaryByWorkplaceOf(workMonth).keys;
+    final allActual = keys.isNotEmpty &&
+        keys.every((k) => actualSalariesByWp[_wpSalKey(workMonth, k)] != null);
+    final legacy = keys.every((k) => actualSalariesByWp[_wpSalKey(workMonth, k)] == null) &&
+        actualSalaries[_ymKey(workMonth)] != null;
+    return allActual || legacy ? Certainty.confirmed : Certainty.estimated;
+  }
+
+  // 💡 その月の引き落としが銀行の引落確定で決まっているか（カード・口座払いローン）
+  Certainty _drawCertainty(String label, DateTime payMonth) {
+    final useMonth = DateTime(payMonth.year, payMonth.month - 1);
+    if (cardPaymentDays.containsKey(label) || payments.any((p) => p.cardName == label)) {
+      return isCardConfirmedByBank(label, useMonth) ? Certainty.confirmed : Certainty.estimated;
+    }
+    if (label == '分割払い（カード未設定）') return Certainty.estimated;
+    return Certainty.scheduled; // 口座払いのローンなど、自分で登録したもの
+  }
+
+  // 予想の行（その月ぶん）。並び順: 入金 → 予定入金 → PayPay → 引き落とし（金額の大きい順）→ 一度きり
+  List<ForecastLine> _forecastLinesOf(DateTime m) {
+    final out = <ForecastLine>[];
+    final lastDay = DateTime(m.year, m.month + 1, 0).day;
+    final isThisMonth = () {
+      final n = clockNow();
+      return n.year == m.year && n.month == m.month;
+    }();
+    final incomeGroup = isThisMonth ? '給料入金（編集後）' : '給料入金';
+
+    // ── 入金（incomeForecastIn と同じ分岐） ──
+    if (balanceUpdatedAt == null || workplaces.isEmpty) {
+      // 💡 勤務先ごとに分けられない経路。日付は給料日に寄せる
+      //   （勤務先があればいちばん早い給料日、無ければ既定の25日）。
+      final amount = incomeArrivingIn(m);
+      if (amount != 0) {
+        final dates = [for (final w in workplaces) w.paydayIn(m)]..sort();
+        final wm = DateTime(m.year, m.month - paydayOffsetMonths);
+        out.add(ForecastLine(
+          kind: ForecastKind.income,
+          label: '給料',
+          group: incomeGroup,
+          amount: amount,
+          date: dates.isEmpty ? DateTime(m.year, m.month, 25 > lastDay ? lastDay : 25) : dates.first,
+          certainty: _salaryCertainty(wm, null),
+        ));
+      }
+    } else {
+      for (final w in workplaces) {
+        final wm = DateTime(m.year, m.month - w.paydayMonthOffset);
+        final payDate = w.paydayIn(m);
+        if (!_forecastInclude(payDate)) continue;
+        final amount = takeHomeOfWorkplace(wm, w.id);
+        if (amount == 0) continue;
+        out.add(ForecastLine(
+          kind: ForecastKind.income,
+          label: w.name,
+          group: incomeGroup,
+          amount: amount,
+          date: payDate,
+          certainty: _salaryCertainty(wm, w.id),
+        ));
+      }
+    }
+    for (final e in plannedIncomesIn(m)) {
+      if (!_forecastInclude(e.date)) continue;
+      out.add(ForecastLine(
+        kind: ForecastKind.income,
+        label: e.income.title,
+        group: incomeGroup,
+        amount: e.income.amount,
+        date: e.date,
+        certainty: Certainty.scheduled,
+      ));
+    }
+    // PayPayからの出金（振込予定日に入る）
+    for (final t in transfersForecastIn(m)) {
+      out.add(ForecastLine(
+        kind: ForecastKind.transfer,
+        label: 'PayPayからの入金',
+        group: 'PayPayからの入金（${t.scheduledDate.month}/${t.scheduledDate.day}頃）',
+        amount: t.amount,
+        date: t.scheduledDate,
+        certainty: Certainty.scheduled,
+      ));
+    }
+
+    // ── 引き落とし（drawBreakdownOf がゲート済み。日付と確からしさを付ける） ──
+    final review = _billsNeedingReview;
+    for (final e in drawBreakdownOf(m)) {
+      final group = drawLabelOf(e.label, m);
+      if (e.label == '定期支払い') {
+        // 定期は1件ずつの引き落とし日に置く（まとめた日付にすると谷の日がずれる）
+        for (final d in subscriptionDrawsIn(m)) {
+          out.add(ForecastLine(
+            kind: ForecastKind.draw,
+            label: '定期: ${d.title}',
+            group: group,
+            amount: -d.amount,
+            date: d.date,
+            certainty: Certainty.scheduled,
+          ));
+        }
+        continue;
+      }
+      out.add(ForecastLine(
+        kind: ForecastKind.draw,
+        label: e.label,
+        group: group,
+        amount: -e.amount,
+        date: drawDateOf(e.label, m), // 判定と同じ日付に置く
+        certainty: _drawCertainty(e.label, m),
+        // 💡 請求の月を判定できない銀行確定があるカードは、その前後の請求を「要確認」にする
+        needsReview: review.contains('${e.label}|${_ym(m)}'),
+      ));
+    }
+
+    // ── 一度きりの出費（頭金・予定支出。月ズレさせず日付どおり） ──
+    for (final e in oneTimeExpensesIn(m)) {
+      if (!_forecastInclude(e.date)) continue;
+      out.add(ForecastLine(
+        kind: ForecastKind.oneTime,
+        label: e.label,
+        group: '${e.label}（${e.date.month}/${e.date.day}）',
+        amount: -e.amount,
+        date: e.date,
+        certainty: Certainty.scheduled,
+      ));
+    }
+    return out;
+  }
+
+  // 今月末・来月末・翌々月末の予想残高
+  int get thisMonthBalance => forecastMonths(count: 1)[0].end;
+  int get nextMonthBalance => forecastMonths(count: 2)[1].end;
+  int get monthAfterNextBalance => forecastMonths(count: 3)[2].end;
 
   // ────── 予想の谷（月末と月末のあいだ） ──────
   // 💡 月末の予想は「その月の引き落としを全部引いた後」なので、
   //   月末を越えてから次の給料日までに落ちるぶん（例：10日引き落としのカード）で
   //   足りなくなる谷が見えない。日付に並べ直して、いちばん減る日を出す。
-  // ⚠️ 材料は月ごとの予想（incomeForecastIn / drawBreakdownOf / oneTimeExpensesIn）と
-  //   同じものだけを使い、並べ替えるだけにする。ここで独自に足し引きすると
-  //   月末の金額と食い違う。test/cash_flow_test.dart で月末との一致を固定している。
-  List<CashEvent> cashEventsAhead({int monthsAhead = 2}) {
-    final now = DateTime.now();
-    final out = <CashEvent>[];
-    for (var i = 0; i <= monthsAhead; i++) {
-      final m = DateTime(now.year, now.month + i, 1);
-      final lastDay = DateTime(m.year, m.month + 1, 0).day;
+  List<CashEvent> cashEventsAhead({int monthsAhead = 2}) => [
+        for (final l in linesByDate(forecastMonths(count: monthsAhead + 1)))
+          CashEvent(date: l.date, label: l.label, amount: l.amount),
+      ];
 
-      // ── 入金（incomeForecastIn と同じ分岐にする） ──
-      if (balanceUpdatedAt == null || workplaces.isEmpty) {
-        // 💡 勤務先ごとに分けられない経路。日付は給料日に寄せる
-        //   （勤務先があればいちばん早い給料日、無ければ既定の25日）。
-        final amount = incomeArrivingIn(m);
-        if (amount != 0) {
-          final dates = [for (final w in workplaces) w.paydayIn(m)]..sort();
-          out.add(CashEvent(
-            date: dates.isEmpty
-                ? DateTime(m.year, m.month, 25 > lastDay ? lastDay : 25)
-                : dates.first,
-            label: '給料',
-            amount: amount,
-          ));
-        }
-      } else {
-        for (final w in workplaces) {
-          final wm = DateTime(m.year, m.month - w.paydayMonthOffset);
-          final payDate = w.paydayIn(m);
-          if (!_forecastInclude(payDate)) continue;
-          final amount = takeHomeOfWorkplace(wm, w.id);
-          if (amount != 0) {
-            out.add(CashEvent(date: payDate, label: w.name, amount: amount));
-          }
-        }
-      }
-      for (final e in plannedIncomesIn(m)) {
-        if (!_forecastInclude(e.date)) continue;
-        out.add(CashEvent(
-            date: e.date, label: e.income.title, amount: e.income.amount));
-      }
-      // PayPayからの出金（振込予定日に入る。月末予想と同じ transfersForecastIn を使う）
-      for (final t in transfersForecastIn(m)) {
-        out.add(CashEvent(date: t.scheduledDate, label: 'PayPayからの入金', amount: t.amount));
-      }
+  // 日付順の予想の行（確からしさつき）。次の引き落としの一覧などに使う
+  List<ForecastLine> forecastLinesAhead({int monthsAhead = 2}) =>
+      linesByDate(forecastMonths(count: monthsAhead + 1));
 
-      // ── 引き落とし（drawBreakdownOf がゲート済み。日付だけ付け直す） ──
-      for (final e in drawBreakdownOf(m)) {
-        if (e.label == '定期支払い') {
-          // 定期は1件ずつの引き落とし日に置く（まとめた日付にすると谷の日がずれる）
-          for (final d in subscriptionDrawsIn(m)) {
-            out.add(CashEvent(date: d.date, label: '定期: ${d.title}', amount: -d.amount));
-          }
-          continue;
-        }
-        out.add(CashEvent(
-          date: drawDateOf(e.label, m), // 判定と同じ日付に置く
-          label: e.label,
-          amount: -e.amount,
-        ));
-      }
+  // 💡 これから口座から出ていくもの（今日から [days] 日以内、日付順）。ホームの「次の引き落とし」。
+  //   予想と同じ行なので、金額・日付・確定／見込みは月末の予想と一致する。
+  List<ForecastLine> upcomingOutflows({int days = 30}) {
+    final n = clockNow();
+    final today = DateTime(n.year, n.month, n.day);
+    final until = today.add(Duration(days: days));
+    return [
+      for (final l in forecastLinesAhead())
+        if (l.amount < 0 && !l.date.isBefore(today) && l.date.isBefore(until)) l,
+    ];
+  }
 
-      // ── 一度きりの出費（頭金・予定支出。月ズレさせず日付どおり） ──
-      for (final e in oneTimeExpensesIn(m)) {
-        if (!_forecastInclude(e.date)) continue;
-        out.add(CashEvent(date: e.date, label: e.label, amount: -e.amount));
-      }
-    }
-    out.sort((a, b) => a.date.compareTo(b.date));
-    return out;
+  // 💡 残高を書いてから何日たったか（未入力なら null）。古い残高は予想もずれるので画面で知らせる。
+  int? get daysSinceBalanceUpdate {
+    final at = balanceUpdatedAt;
+    if (at == null) return null;
+    final n = clockNow();
+    return DateTime(n.year, n.month, n.day)
+        .difference(DateTime(at.year, at.month, at.day))
+        .inDays;
   }
 
   // 💡 今日から先で、残高がいちばん少なくなる日とそのときの残高。
-  //   同じ日の入金と引き落としは相殺してから見る（一瞬のヘコみで騒がない）。
-  //   ⚠️ 残高の編集日より後なら、日付が今日より前の引き落としも「まだ落ちていない」
-  //     ものとして積む（月末予想と同じ扱い）。ただし谷の候補にはしない。
-  ({DateTime date, int balance})? lowestBalanceAhead({int monthsAhead = 2}) {
-    final now = DateTime.now();
-    final today = DateTime(now.year, now.month, now.day);
-    final events = cashEventsAhead(monthsAhead: monthsAhead);
-    if (events.isEmpty) return null; // 何も動かないなら出すものが無い
-    var running = effectiveBalance + effectiveWalletCash;
-    var i = 0;
-    // 今日より前の日付のもの（基準日より後で、まだ反映していないもの）は今の残高に織り込む
-    while (i < events.length && events[i].date.isBefore(today)) {
-      running += events[i].amount;
-      i++;
-    }
-    // ⚠️ 今この時点の残高も候補にする。入金が先に来るとき、入金後の額を
-    //   「最低残高」と出してしまっていた（実際はそれまでの今の残高の方が低い）。
-    var low = running;
-    var lowDate = today;
-    while (i < events.length) {
-      final date = events[i].date;
-      while (i < events.length && events[i].date == date) {
-        running += events[i].amount;
-        i++;
-      }
-      if (running < low) {
-        low = running;
-        lowDate = date;
-      }
-    }
-    return (date: lowDate, balance: low);
-  }
+  ({DateTime date, int balance})? lowestBalanceAhead({int monthsAhead = 2}) => lowestBalance(
+        start: forecastStart,
+        events: forecastLinesAhead(monthsAhead: monthsAhead),
+        today: clockNow(),
+      );
 
   // 💡 残高が足りなくなる日と、その日の引き落とし。
   //   最低残高（＝いちばん低い1日）だけだと「どの引き落としで割ったか」が分からず、
   //   どれを遅らせればいいか判断できないので、割る日を全部返す。
   List<({DateTime date, int balance, List<String> labels})> shortfallDaysAhead(
-      {int monthsAhead = 2}) {
-    final now = DateTime.now();
-    final today = DateTime(now.year, now.month, now.day);
-    final events = cashEventsAhead(monthsAhead: monthsAhead);
-    var running = effectiveBalance + effectiveWalletCash;
-    final out = <({DateTime date, int balance, List<String> labels})>[];
-    var i = 0;
-    while (i < events.length) {
-      final date = events[i].date;
-      final draws = <String>[];
-      while (i < events.length && events[i].date == date) {
-        running += events[i].amount;
-        if (events[i].amount < 0) draws.add(events[i].label);
-        i++;
-      }
-      if (date.isBefore(today)) continue; // 今の残高に織り込み済み
-      // ⚠️ 引き落としがある日だけ。入金だけの日（給料日など）はマイナスのままでも
-      //   「引き落としに足りない日」ではない（以前は「引き落とし」と出ていた）。
-      if (running < 0 && draws.isNotEmpty) {
-        out.add((date: date, balance: running, labels: draws));
-      }
-    }
-    return out;
-  }
+          {int monthsAhead = 2}) =>
+      shortfallDays(
+        start: forecastStart,
+        events: forecastLinesAhead(monthsAhead: monthsAhead),
+        today: clockNow(),
+      );
 
-  // 来月末残高
-  int get nextMonthBalance {
-    final next = DateTime(DateTime.now().year, DateTime.now().month + 1, 1);
-    return thisMonthBalance +
-        incomeForecastIn(next) +
-        transferForecastIn(next) -
-        drawnInMonth(next) -
-        oneTimeExpenseForecastIn(next);
-  }
-
-  // 翌々月末残高（#2）
-  int get monthAfterNextBalance {
-    final m2 = DateTime(DateTime.now().year, DateTime.now().month + 2, 1);
-    return nextMonthBalance +
-        incomeForecastIn(m2) +
-        transferForecastIn(m2) -
-        drawnInMonth(m2) -
-        oneTimeExpenseForecastIn(m2);
-  }
 
   Future<void> setShowMonthAfterNext(bool on) async {
     showMonthAfterNext = on;
@@ -5099,54 +4495,55 @@ class AppState extends ChangeNotifier {
     ).toList();
   }
 
-  // 指定日に表示するカード別集約引き落とし情報。
-  // 銀行確定(bank)はその日付優先、未確定はcardPaymentDaysの日に前月billing合計を表示。
+  // 💡 カレンダー: その日に口座から落ちるカードの請求（カード別）。
+  //   請求額と実際の引落日は予想と同じもの（cardBillAmountOf・drawDateOf・請求の月の判定）を使う。
+  //   ・締め日が月末以外のカードは締め期間、分割・カード払いのローン・頭金も合算した額
+  //   ・休みで翌月にずれた引落（10/31土 → 11/2）は、ずれた先の日に出す
+  //   ・銀行確定があれば確定（日付も確定の日付）
+  //   ⚠️ 予想のゲート（残高を書いた日）は使わない。残高を書く前の引落もカレンダーには残す。
+  //   ⚠️ 以前は前月の暦月の利用合計だけで、締め期間・分割・ずれた引落を見ていなかった。
   List<({String cardName, int amount, bool isConfirmed})> cardPaymentSummaryOnDay(DateTime date) {
+    final day = DateTime(date.year, date.month, date.day);
+    final months = [DateTime(day.year, day.month - 1), DateTime(day.year, day.month)];
     final result = <({String cardName, int amount, bool isConfirmed})>[];
+    final shown = <String>{};
 
-    // 銀行確定: この日のbank支払いをカード別集計
-    final bankByCard = <String, int>{};
+    // 設定したカード（請求の月ごとに、予想と同じ額）。まだ利用が無ければ 0 円で引落日だけ出す
+    for (final card in cardPaymentDays.keys) {
+      if (_excludedFromDraw(card)) continue;
+      for (final m in months) {
+        if (drawDateOf(card, m) != day) continue;
+        final confirmed = payments.any((p) =>
+            p.source == PaymentSource.bank && !p.infoOnly && p.cardName == card && _isBillOf(p, m));
+        result.add((cardName: card, amount: cardBillAmountOf(card, m), isConfirmed: confirmed));
+        shown.add(card);
+      }
+    }
+    // 設定していない名前の銀行確定（ローンの請求元など）は、確定の日にその額を出す
+    final bankOnly = <String, int>{};
     for (final p in payments) {
-      if (p.source == PaymentSource.bank &&
-          p.paymentDate.year == date.year &&
-          p.paymentDate.month == date.month &&
-          p.paymentDate.day == date.day) {
-        bankByCard[p.cardName] = (bankByCard[p.cardName] ?? 0) + p.amount;
-      }
+      if (p.source != PaymentSource.bank || p.infoOnly || shown.contains(p.cardName)) continue;
+      if (DateTime(p.paymentDate.year, p.paymentDate.month, p.paymentDate.day) != day) continue;
+      bankOnly[p.cardName] = (bankOnly[p.cardName] ?? 0) + p.amount;
     }
-    for (final e in bankByCard.entries) {
-      result.add((cardName: e.key, amount: e.value, isConfirmed: true));
-    }
-
-    // 予定: cardPaymentDaysに登録済みカードで、この日が引き落とし日なら前月billing合計を表示
-    final confirmedCards = bankByCard.keys.toSet();
-    final prevMonth = DateTime(date.year, date.month - 1);
-    for (final e in cardPaymentDays.entries) {
-      if (confirmedCards.contains(e.key)) continue;
-      // 土日祝は翌営業日にずれた日で判定
-      if (cardDrawDateOf(e.key, DateTime(date.year, date.month)) !=
-          DateTime(date.year, date.month, date.day)) {
-        continue;
-      }
-      // 前月の利用ぶん（まだ無ければ0＝「引き落とし日」だけ表示する）
-      final total = paymentTotalsByCardOf(prevMonth)[e.key] ?? 0;
-      result.add((cardName: e.key, amount: total, isConfirmed: false));
-    }
-
+    bankOnly.forEach((card, amount) {
+      result.add((cardName: card, amount: amount, isConfirmed: true));
+    });
     return result;
   }
 
   void setCardPaymentDay(String cardName, int day) {
+    _ensureEditable();
     cardPaymentDays[cardName] = day;
     _saveCardPaymentDays();
     notifyListeners();
   }
 
-  Future<void> _saveCardPaymentDays() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('saved_card_payment_days', jsonEncode(cardPaymentDays));
-    await prefs.setString('saved_card_closing_days', jsonEncode(cardClosingDays));
-  }
+  // 💡 カード設定の保存も、ふつうの保存（saveData）の列を通す。
+  // ⚠️ 以前はここだけ SharedPreferences に直接書いていたため、ふつうの保存の途中で設定を変えると、
+  //   後から書かれた古い値で上書きされ、再起動すると変更前の引落日に戻っていた（GPT 実装レビュー P1）。
+  //   保存の入口は saveData 1 つにする（一時保存・直列化・失敗の扱いがそろう）。
+  Future<void> _saveCardPaymentDays() => saveData();
 
   // 💡 カード選択に出す一覧。設定で登録したカードに加え、
   //   既存の明細・分割・定期に出てくるカード名も拾う。
@@ -5180,11 +4577,12 @@ class AppState extends ChangeNotifier {
   // カードの締め日（未設定＝31＝月末締め）
   int closingDayOf(String cardName) => cardClosingDays[cardName] ?? 31;
 
-  bool isMonthEndClosing(String cardName) => closingDayOf(cardName) >= 31;
+  bool isMonthEndClosing(String cardName) => isMonthEndClosingDay(closingDayOf(cardName));
 
   // 💡 カードを設定から外す。明細は消さない（過去の記録は残す）。
   //   cardChoices は明細に出てくるカード名も拾うので、過去データの表示は壊れない。
   void removeCard(String cardName) {
+    _ensureEditable();
     cardPaymentDays.remove(cardName);
     cardClosingDays.remove(cardName);
     _saveCardPaymentDays();
@@ -5192,6 +4590,7 @@ class AppState extends ChangeNotifier {
   }
 
   void setCardClosingDay(String cardName, int day) {
+    _ensureEditable();
     cardClosingDays[cardName] = day.clamp(1, 31);
     _saveCardPaymentDays();
     notifyListeners();
@@ -5212,19 +4611,8 @@ class AppState extends ChangeNotifier {
   // 💡 payMonth に引き落とされる利用の対象期間。
   //   締め日 C なら「前々月C日の翌日 〜 前月C日」。
   //   月末締め(31)ならちょうど前月1日〜前月末日になり、従来の暦月集計と一致する。
-  ({DateTime start, DateTime end}) cardClosingPeriodOf(String cardName, DateTime payMonth) {
-    final c = closingDayOf(cardName);
-    DateTime closingIn(DateTime m) {
-      final last = DateTime(m.year, m.month + 1, 0).day;
-      return DateTime(m.year, m.month, c > last ? last : c);
-    }
-
-    final endMonth = DateTime(payMonth.year, payMonth.month - 1);
-    final end = closingIn(endMonth);
-    final start = closingIn(DateTime(endMonth.year, endMonth.month - 1))
-        .add(const Duration(days: 1));
-    return (start: start, end: end);
-  }
+  ({DateTime start, DateTime end}) cardClosingPeriodOf(String cardName, DateTime payMonth) =>
+      closingPeriod(closingDay: closingDayOf(cardName), payMonth: payMonth);
 
   // 💡 締め期間で集計したカード利用額。
   //   銀行の引落確定メールが来ている月は、その確定額を正本にする（従来と同じ扱い）。
@@ -5233,9 +4621,7 @@ class AppState extends ChangeNotifier {
     for (final p in payments) {
       if (p.source != PaymentSource.bank) continue;
       if (p.cardName != cardName) continue;
-      if (p.paymentDate.year == payMonth.year && p.paymentDate.month == payMonth.month) {
-        bank += p.amount;
-      }
+      if (_isBillOf(p, payMonth)) bank += p.amount;
     }
     if (bank > 0) return bank;
 
@@ -5252,94 +4638,47 @@ class AppState extends ChangeNotifier {
     return total;
   }
 
-  // 今月末残高の内訳（タップ詳細用）。現在の残高→デビット調整(#5#6)→給料入金→引き落とし。
-  // 💡 内訳に「PayPayからの入金（10/15頃）」を足す。同じ日が2件あれば合算する。
-  void _addTransferLines(Map<String, int> out, DateTime month) {
-    for (final t in transfersForecastIn(month)) {
-      final key = 'PayPayからの入金（${t.scheduledDate.month}/${t.scheduledDate.day}頃）';
-      out[key] = (out[key] ?? 0) + t.amount;
+  // 💡 月末の予想の内訳（タップ詳細用）。forecastMonths と同じ行を group ごとにまとめる。
+  //   今月は起点を「現在の残高・財布・デビット」に分けて見せ、翌月以降は前月末から始める。
+  Map<String, int> _breakdownOf(int offset) {
+    final months = forecastMonths(count: offset + 1);
+    final f = months[offset];
+    final out = <String, int>{};
+    if (offset == 0) {
+      out['現在の残高'] = currentBalance;
+      if (showWalletCash && walletCash != 0) out['財布の現金'] = walletCash;
+      final debit = debitsAfterSnapshot();
+      if (debit > 0) out['デビット利用（編集後・即時引落）'] = -debit;
+    } else {
+      out[offset == 1 ? '今月末残高' : '来月末残高'] = f.start;
     }
-  }
-
-  Map<String, int> get thisMonthBreakdown {
-    final now = DateTime.now();
-    final out = <String, int>{'現在の残高': currentBalance};
-    if (showWalletCash && walletCash != 0) out['財布の現金'] = walletCash;
-    final debit = debitsAfterSnapshot();
-    if (debit > 0) out['デビット利用（編集後・即時引落）'] = -debit;
-    final income = incomeForecastIn(now);
-    if (income != 0) out['給料入金（編集後）'] = income;
-    _addTransferLines(out, now);
-    for (final e in drawBreakdownOf(now)) {
-      out[drawLabelOf(e.label, now)] = -e.amount;
-    }
-    // 一度だけ出ていくお金（頭金・予定支出）は、その日付の月にそのまま引く
-    for (final e in oneTimeExpensesIn(now)) {
-      if (!_forecastInclude(e.date)) continue;
-      out['${e.label}（${e.date.month}/${e.date.day}）'] = -e.amount;
+    for (final g in f.grouped()) {
+      out[g.group] = (out[g.group] ?? 0) + g.amount;
     }
     return out;
   }
 
-  // 来月末残高の内訳。
-  Map<String, int> get nextMonthBreakdown {
-    final next = DateTime(DateTime.now().year, DateTime.now().month + 1, 1);
-    final out = <String, int>{'今月末残高': thisMonthBalance};
-    final income = incomeForecastIn(next);
-    if (income != 0) out['給料入金'] = income;
-    _addTransferLines(out, next);
-    for (final e in drawBreakdownOf(next)) {
-      out[drawLabelOf(e.label, next)] = -e.amount;
-    }
-    // 一度だけ出ていくお金（頭金・予定支出）は、その日付の月にそのまま引く
-    for (final e in oneTimeExpensesIn(next)) {
-      if (!_forecastInclude(e.date)) continue;
-      out['${e.label}（${e.date.month}/${e.date.day}）'] = -e.amount;
-    }
-    return out;
-  }
+  Map<String, int> get thisMonthBreakdown => _breakdownOf(0);
+  Map<String, int> get nextMonthBreakdown => _breakdownOf(1);
+  Map<String, int> get monthAfterNextBreakdown => _breakdownOf(2);
 
-  // 翌々月末残高の内訳。
-  Map<String, int> get monthAfterNextBreakdown {
-    final m2 = DateTime(DateTime.now().year, DateTime.now().month + 2, 1);
-    final out = <String, int>{'来月末残高': nextMonthBalance};
-    final income = incomeForecastIn(m2);
-    if (income != 0) out['給料入金'] = income;
-    _addTransferLines(out, m2);
-    for (final e in drawBreakdownOf(m2)) {
-      out[drawLabelOf(e.label, m2)] = -e.amount;
-    }
-    // 一度だけ出ていくお金（頭金・予定支出）は、その日付の月にそのまま引く
-    for (final e in oneTimeExpensesIn(m2)) {
-      if (!_forecastInclude(e.date)) continue;
-      out['${e.label}（${e.date.month}/${e.date.day}）'] = -e.amount;
-    }
-    return out;
-  }
-
-  // 残高不足アラート（マイナスになる支払い予定）
-  List<Payment> get shortagePayments {
-    final balance = thisMonthBalance;
-    return balance < 0
-        ? (payments.where((p) => !p.paid).toList()
-          ..sort((a, b) => a.paymentDate.compareTo(b.paymentDate)))
-        : [];
-  }
 
   // ════════════════ バックアップ（エクスポート/インポート）════════════════
   // 全データを1つのJSON文字列に書き出す（機種変・バックアップ用）。
   String exportJson() {
     final map = {
       'version': 1,
-      'exportedAt': DateTime.now().toIso8601String(),
+      'exportedAt': clockNow().toIso8601String(),
       'shifts': shifts.map((k, v) => MapEntry(k, v.map((e) => e.toJson()).toList())),
       'workplaces': workplaces.map((e) => e.toJson()).toList(),
       'actualSalaries': actualSalaries,
       'actualSalariesByWp': actualSalariesByWp,
       'balanceUpdatedAt': balanceUpdatedAt?.toIso8601String(),
+      'balanceEnteredAt': balanceEnteredAt?.toIso8601String(),
       'paymentNotes': paymentNotes,
       'amazonCardOverrides': amazonCardOverrides,
       'cardAliases': cardAliases,
+      'bankBillMonths': bankBillMonths,
       // 💡 カレンダーのイベントIDは同じGoogleアカウントで共通。別の端末で同じ給料日を
       //   二重に作らないよう、同期データにも入れる。
       'specialCalendarIds': specialCalendarIds,
@@ -5402,6 +4741,7 @@ class AppState extends ChangeNotifier {
   // 💡 CSVには交通費・深夜/残業/休日の割増が載らないので、「給与」列から逆算して
   //    復元する（そうしないと取り込んだ月の収入がズレる）。
   CsvImportResult importShiftsCsv(String text, {bool replace = false}) {
+    _ensureEditable();
     final lines = const LineSplitter()
         .convert(text.replaceAll('﻿', ''))
         .where((l) => l.trim().isNotEmpty)
@@ -5588,14 +4928,15 @@ class AppState extends ChangeNotifier {
   Future<void> doAutoBackup() async {
     if (kIsWeb) return; // Webはファイル保存できない（設定→書き出しで手動保存）
     if (!autoBackupEnabled) return;
+    if (_dataLock != null || uploadsBlocked) return; // ⚠️ 取り込み中・保存が整っていない間は書き出さない
     try {
       final dir = await getApplicationDocumentsDirectory();
       final backupDir = Directory('${dir.path}/backups');
       if (!await backupDir.exists()) await backupDir.create(recursive: true);
-      final ts = DateFormat('yyyyMMdd_HHmmss').format(DateTime.now());
+      final ts = DateFormat('yyyyMMdd_HHmmss').format(clockNow());
       final file = File('${backupDir.path}/pocket_maid_$ts.json');
       await file.writeAsString(exportJson());
-      lastAutoBackupAt = DateTime.now();
+      lastAutoBackupAt = clockNow();
       // 古い7件超えのバックアップを削除
       final files = (await backupDir.list().toList())
           .whereType<File>()
@@ -5631,7 +4972,7 @@ class AppState extends ChangeNotifier {
   // バックアップファイルからリストア。
   Future<void> restoreFromBackup(File file) async {
     final text = await file.readAsString();
-    importJson(text);
+    await importJson(text, label: 'バックアップから復元しています');
   }
 
   Future<void> setAutoBackupEnabled(bool on) async {
@@ -5643,25 +4984,183 @@ class AppState extends ChangeNotifier {
   }
 
   // エクスポートしたJSONを取り込んで全データを置き換える。
-  void importJson(String text) {
-    // ⚠️ _importJson は項目ごとに「消してから読む」。途中の項目が壊れていると
-    //   （日付が読めない・型が違うなど）そこで例外になり、前半だけ置き換わった状態が残る。
-    //   そのまま保存やドライブ同期が走ると、半端なデータで上書きしてしまう。
-    //   取り込む前の状態を書き出しておき、失敗したらそれで丸ごと戻す。
-    //   復元はメモリ内だけで行い、失敗時は保存・通知・更新時刻の変更をしない。
-    final before = exportJson();
+  // 💡 保存が終わるまで待つ（Future）。呼び出し側（ドライブの取り込み・復元）は、
+  //   保存まで成功したときだけ「同期済み」「復元しました」にする。
+  //   手順:
+  //   1) メモリで読み込む（壊れていたらメモリを戻して終わり。端末には何も書かない）
+  //   2) 取り込む前の全キーを「復旧点」に書く。⚠️ 書けなければ上書きを始めない（メモリを戻して例外）
+  //   3) 取り込んだ状態を保存（一時保存 → 全キー）。成功で一時保存と復旧点を消す
+  //   4) 3 が失敗したら、メモリを戻し、復旧点の値で端末も戻す。それも失敗したら「回復待ち」にして、
+  //      次の起動で復旧点から戻す（復旧点は消さずに残る）
+  //   ⚠️ 取り込みの間は家計データの変更を断る（DataLock）。成功しても失敗しても最後に外す。
+  //   [lock]: 呼び出し側が先に鍵を取っているとき（ドライブ: 取得から取り込みまでを 1 つの処理にする）
+  Future<void> importJson(String text, {DataLock? lock, String label = 'データを取り込んでいます'}) {
+    if (lock != null) {
+      if (!identical(lock, _dataLock)) {
+        return Future.error(StateError('取り込みの鍵が有効ではありません'));
+      }
+      return _importJsonLocked(text);
+    }
+    // 💡 JSON として読めないものは、鍵を取る前に断る（何も変えない・表示も切り替えない）
+    try {
+      if (jsonDecode(text) is! Map) throw const FormatException('取り込むデータの形が違います');
+    } catch (e) {
+      return Future.error(e);
+    }
+    final DataLock own;
+    try {
+      own = acquireDataLock(label);
+    } catch (e) {
+      return Future.error(e); // 二重の取り込み → 後から来た方を断る（先の取り込みはそのまま続く）
+    }
+    // 💡 鍵の取得とメモリでの読み込みは同じ同期区間で行う（間に他の変更が入らない）
+    return _importJsonLocked(text).whenComplete(() => releaseDataLock(own));
+  }
+
+  Future<void> _importJsonLocked(String text) async {
+    final beforeJson = exportJson();
+    final beforeValues = _persistedValues(includeUpdatedAt: true);
     try {
       _importJson(text);
     } catch (_) {
-      _importJson(before);
+      _importJson(beforeJson, repair: false);
       rethrow;
     }
-    // 💡 成功した取り込みも「この端末での編集」には数えない。
-    saveData(markModified: false);
-    notifyListeners();
+    _lockSnapshot = exportJson();
+    // 💡 成功した取り込みも「この端末での編集」には数えない（更新時刻は変えない）
+    final afterValues = _persistedValues(includeUpdatedAt: false);
+    // ⚠️ 取り込み前に始まっていた保存を終わらせてから復旧点を書く。
+    //   走っている保存は成功すると復旧点を消すので、先に書くと「戻す先」が消えて、
+    //   取り込みの保存が途中で止まったときに取り込む前の状態へ戻せなくなる。
+    //   （書く値はその保存を頼んだ時点のものなので、取り込んだ内容とは混ざらない。
+    //    失敗しても、取り込む前の状態は beforeValues として復旧点に入る）
+    await _drainWrites();
+    final prefs = await SharedPreferences.getInstance();
+    try {
+      await _putRecord(
+          prefs,
+          kRestorePointKey,
+          jsonEncode({
+            'v': 1,
+            'before': beforeValues,
+            'afterKeys': afterValues.keys.toList(),
+            'afterHash': _fingerprint(afterValues),
+          }));
+    } catch (e) {
+      _importJson(beforeJson, repair: false);
+      throw StorageWriteFailure('復旧点の保存', e);
+    }
+    try {
+      await saveData(markModified: false);
+    } catch (_) {
+      final wasUnrecoverable = storageIssue == StorageIssue.unrecoverable;
+      _importJson(beforeJson, repair: false);
+      try {
+        if (wasUnrecoverable) rethrow; // 元が混ざっている可能性 → 書き戻さず、そのまま
+        for (final e in beforeValues.entries) {
+          await _putValue(prefs, e.key, e.value);
+        }
+        await _remove(prefs, kPendingWriteKey);
+        await _remove(prefs, kRestorePointKey);
+        storageIssue = null;
+      } catch (_) {
+        if (!wasUnrecoverable) storageIssue = StorageIssue.recoveryPending; // 復旧点が残る → 次の起動で戻す
+      }
+      rethrow;
+    }
+    storageIssue = null; // 💡 取り込み直し・復元が保存まで成功した＝整った状態になった
+    _importSucceededUnderLock = true;
+    // 💡 画面への通知は、鍵を外すとき（releaseDataLock）にまとめて行う
   }
 
-  void _importJson(String text) {
+  // ════════════════ 取り込み中の変更の停止 ════════════════
+  // 💡 取り込みの間（鍵を持っている間）は:
+  //   ・画面: 全体を「取り込み中」の表示で覆い、操作できなくする（DataLockOverlay）
+  //   ・AppState の変更（追加・削除・残高の入力など）: 始める前に DataLockedException で断る（_ensureEditable）
+  //   ・自動の処理（Gmail の反映・カレンダーの記録）: 取り込みが終わるまで待ってから行う（runWhenEditable）
+  //   ・ドライブへの保存・自動バックアップ: 行わない（終わったあとの変更通知でまた予約される）
+  //   ・二重の取り込み: 後から来た方を断る
+  //   ⚠️ 変更を受け付けてから巻き戻すと、入力した内容が黙って消える（GPT 再レビューの残件）。
+  DataLock? _dataLock;
+  // 💡 取り込みの始まりと終わりで増える。自動の処理は、始めたときの値と比べて「中身が置き換わったか」を知る
+  int _dataGeneration = 0;
+  String? _lockSnapshot; // 鍵を持っている間の正しい中身（安全網の巻き戻し用）
+  bool _importSucceededUnderLock = false;
+  Completer<void>? _unlocked;
+
+  /// 取り込み中なら true（画面はこれで全体を覆う）
+  bool get dataLocked => _dataLock != null;
+
+  /// いま何をしているか（取り込み中でなければ null）
+  String? get dataLockLabel => _dataLock?.label;
+
+  /// 鍵を取る。もう取り込み中なら DataLockedException（二重の取り込みを断る）。
+  DataLock acquireDataLock(String label) {
+    final held = _dataLock;
+    if (held != null) throw DataLockedException(held.label);
+    final lock = _dataLock = DataLock._(label);
+    _dataGeneration++;
+    _lockSnapshot = exportJson();
+    _importSucceededUnderLock = false;
+    _unlocked = Completer<void>();
+    notifyListeners();
+    return lock;
+  }
+
+  /// 鍵を外す（成功でも失敗でも必ず呼ぶ）。待っていた自動の処理を動かす。
+  void releaseDataLock(DataLock lock) {
+    if (!identical(lock, _dataLock)) return;
+    _dataLock = null;
+    _dataGeneration++; // 失敗で巻き戻した場合も、中身の物は作り直されている
+    _lockSnapshot = null;
+    final waiting = _unlocked;
+    _unlocked = null;
+    waiting?.complete();
+    notifyListeners(); // 💡 ドライブの自動保存・不足の見込みの書き直しは、この通知でまた予約される
+    if (_importSucceededUnderLock) {
+      _importSucceededUnderLock = false;
+      _maybeAutoBackup(); // 取り込みの保存の直後は鍵を持っていて見送ったため
+    }
+  }
+
+  /// 鍵を持ったまま処理する（ドライブの取り込み: 取得 → 判定 → 取り込み を 1 つの処理にする）
+  Future<T> runWithDataLock<T>(String label, Future<T> Function(DataLock lock) body) async {
+    final lock = acquireDataLock(label);
+    try {
+      return await body(lock);
+    } finally {
+      releaseDataLock(lock);
+    }
+  }
+
+  /// 自動の処理の変更は、取り込みが終わるまで待ってから行う（断らずに保留する）。
+  /// 💡 「取り込み中でない」の確認と変更を同じ同期区間で行う（間に取り込みが始まらない）。
+  Future<T> runWhenEditable<T>(T Function() action) async {
+    while (_dataLock != null) {
+      await _unlocked!.future;
+    }
+    return action();
+  }
+
+  void _ensureEditable() {
+    final held = _dataLock;
+    if (held != null) throw DataLockedException(held.label);
+  }
+
+  // 走っている保存・並んでいる保存が全部終わるまで待つ（失敗は storageIssue に出る）。
+  // ⚠️ 鍵を持っている間に呼ぶ（新しい保存が並ばないので、必ず終わる）
+  Future<void> _drainWrites() async {
+    while (true) {
+      final waiting = _queuedDone?.future ?? _runningWrite;
+      if (waiting == null) return;
+      try {
+        await waiting;
+      } catch (_) {}
+    }
+  }
+
+  // [repair]: 取り込んだ後に自己修復するか。⚠️ 失敗時の巻き戻しでは修復しない（元の状態にそのまま戻す）
+  void _importJson(String text, {bool repair = true}) {
     final map = jsonDecode(text) as Map<String, dynamic>;
 
     shifts.clear();
@@ -5682,6 +5181,9 @@ class AppState extends ChangeNotifier {
     });
     final buaStr = map['balanceUpdatedAt'] as String?;
     balanceUpdatedAt = (buaStr != null && buaStr.isNotEmpty) ? DateTime.tryParse(buaStr) : null;
+    // 💡 旧版の書き出しには無い → null（含まれているか判断できない＝利用者に聞く）
+    final beaStr = map['balanceEnteredAt'] as String?;
+    balanceEnteredAt = (beaStr != null && beaStr.isNotEmpty) ? DateTime.tryParse(beaStr) : null;
     paymentNotes.clear();
     (map['paymentNotes'] as Map?)?.forEach((k, v) {
       if (v is String) paymentNotes['$k'] = v;
@@ -5693,6 +5195,10 @@ class AppState extends ChangeNotifier {
     cardAliases.clear();
     (map['cardAliases'] as Map?)?.forEach((k, v) {
       if (v is String) cardAliases['$k'] = v;
+    });
+    bankBillMonths.clear();
+    (map['bankBillMonths'] as Map?)?.forEach((k, v) {
+      if (v is String) bankBillMonths['$k'] = v;
     });
     specialCalendarIds.clear();
     (map['specialCalendarIds'] as Map?)?.forEach((k, v) {
@@ -5736,7 +5242,6 @@ class AppState extends ChangeNotifier {
         .map((e) => ScheduleSuggestion.fromJson(e))
         .toList();
     _setMailEntityLinks(map['mailEntityLinks'] as List? ?? const []);
-    retireOldScheduleSuggestions();
     paidPlannedExpenseKeys
       ..clear()
       ..addAll((map['paidPlannedExpenseKeys'] as List? ?? []).map((e) => '$e'));
@@ -5804,82 +5309,265 @@ class AppState extends ChangeNotifier {
     (map['budgets'] as Map?)?.forEach((k, v) {
       if (v is int) budgets[k] = v;
     });
-    repairLoanBillingLinks();
+    if (repair) repairData(); // 起動時と同じ自己修復（B8）。保存は importJson がまとめて行う
   }
 
   // ════════════════ 保存・読込 ════════════════
-  Future<void> saveData({bool markModified = true}) async {
-    final prefs = await SharedPreferences.getInstance();
-    if (markModified) {
-      dataUpdatedAt = DateTime.now();
-      await prefs.setString('saved_data_updated_at', dataUpdatedAt!.toIso8601String());
+  // 💡 保存は「全部そろったときだけ有効」にする（保存キーと JSON の形は以前のまま）。
+  //   1) 書く値を同じ瞬間にまとめて作る（途中で状態が変わっても混ざらない）
+  //   2) その全部を一時保存（saved_pending_write）に書く。⚠️ 書けなければ既存のキーの上書きを始めない
+  //   3) 各キーを書く → 4) 一時保存を消す
+  //   途中で失敗・アプリ終了しても、次の起動で一時保存から全キーを書き直す（_recoverInterruptedWrite）。
+  //   ⚠️ 以前は各キーを順に書くだけで、途中で失敗し続けると新旧のキーが混ざったまま残った
+  //     （docs/prepublish-review-plan.md §3）。
+  static const String kPendingWriteKey = 'saved_pending_write';
+  // 💡 取り込み（ドライブ・バックアップ・貼り付け）の前の状態。取り込みの保存が終わる前に止まったら、
+  //   次の起動でこの状態に戻す（取り込みは「失敗」と伝えているので、その前の状態が正しい）。
+  static const String kRestorePointKey = 'saved_restore_point';
+
+  // 💡 保存の状態（null＝正常）。正常でない間は、ドライブへの保存・自動バックアップを止める（uploadsBlocked）。
+  StorageIssue? storageIssue;
+  // 前回の保存が途中で止まっていて、起動時に整った状態へ戻したか（ホームで一度知らせる）
+  bool recoveredOnStartup = false;
+
+  // 💡 容量が足りないときに、作り直せるもの（Gmail の解析キャッシュなど）を消す。main.dart から渡す。
+  //   ⚠️ 補助策。空きができる保証は無いので、これに頼らず「書けなければ上書きしない」で守る。
+  Future<void> Function()? freeStorageSpace;
+
+  /// 保存データが整っていない可能性がある間は、正常なコピー（ドライブ・バックアップ）を上書きしない
+  bool get uploadsBlocked =>
+      storageIssue == StorageIssue.recoveryPending || storageIssue == StorageIssue.unrecoverable;
+
+  // 保存する全キーと値（この瞬間の状態）。キー・型は以前の saveData と同じ。
+  Map<String, Object> _persistedValues({required bool includeUpdatedAt}) => {
+        if (includeUpdatedAt && dataUpdatedAt != null)
+          'saved_data_updated_at': dataUpdatedAt!.toIso8601String(),
+      'saved_shifts': jsonEncode(shifts),
+      'saved_payment_notes': jsonEncode(paymentNotes),
+      'saved_amazon_overrides': jsonEncode(amazonCardOverrides),
+      'saved_card_aliases': jsonEncode(cardAliases),
+      'saved_bank_bill_months': jsonEncode(bankBillMonths),
+      'saved_special_calendar_ids': jsonEncode(specialCalendarIds),
+      'saved_special_calendar_sigs': jsonEncode(specialCalendarSigs),
+      'saved_actual_salaries': jsonEncode(actualSalaries),
+      'saved_actual_salaries_by_wp': jsonEncode(actualSalariesByWp),
+      'saved_balance_updated_at': balanceUpdatedAt?.toIso8601String() ?? '',
+      'saved_balance_entered_at': balanceEnteredAt?.toIso8601String() ?? '',
+      'saved_goal_amount': goalAmount,
+      'saved_goal_date': goalDate?.toIso8601String() ?? '',
+      'saved_budgets': jsonEncode(budgets),
+      'saved_workplaces': jsonEncode(workplaces.map((e) => e.toJson()).toList()),
+      'saved_events': jsonEncode(events),
+      'saved_todos': jsonEncode(todos.map( (k, v) => MapEntry(k, v.map((t) => t.toJson()).toList()))),
+      'saved_payments': jsonEncode(payments.map((e) => e.toJson()).toList()),
+      'saved_installments': jsonEncode(installments.map((e) => e.toJson()).toList()),
+      'saved_subscriptions': jsonEncode(subscriptions.map((e) => e.toJson()).toList()),
+      'saved_loans': jsonEncode(loans.map((e) => e.toJson()).toList()),
+      'saved_planned_expenses': jsonEncode(plannedExpenses.map((e) => e.toJson()).toList()),
+      'saved_schedule_suggestions': jsonEncode(scheduleSuggestions.map((e) => e.toJson()).toList()),
+      'saved_mail_entity_links': jsonEncode(mailEntityLinks.values.map((e) => e.toJson()).toList()),
+      'saved_paid_planned_expenses': paidPlannedExpenseKeys.toList(),
+      'saved_withdrawals': jsonEncode(withdrawals.map((e) => e.toJson()).toList()),
+      'saved_balance': currentBalance,
+      'saved_wallet_cash': walletCash,
+      'saved_pending_deposits': jsonEncode(pendingDeposits.map((e) => e.toJson()).toList()),
+      'saved_handled_deposit_ids': handledDepositIds.toList(),
+      'saved_paypay_transfers': jsonEncode(paypayTransfers.map((e) => e.toJson()).toList()),
+      'saved_received_transfers': jsonEncode(receivedTransfers),
+      'saved_handled_draw_ids': handledDrawIds.toList(),
+      'saved_balance_history': jsonEncode(balanceHistory.map((e) => e.toJson()).toList()),
+      'saved_paid_salary_keys': paidSalaryKeys.toList(),
+      'saved_planned_incomes': jsonEncode(plannedIncomes.map((e) => e.toJson()).toList()),
+      'saved_received_planned_keys': receivedPlannedKeys.toList(),
+      'saved_salary_paid_through': salaryPaidThroughMonth?.toIso8601String() ?? '',
+      'saved_card_rates': jsonEncode(cardInterestRates),
+      'saved_converted_keys': convertedPaymentKeys.toList(),
+      'saved_folded_debit_keys': foldedDebitKeys.toList(),
+      'saved_converted_source_ids': convertedSourceIds.toList(),
+      'saved_trashed_payments': jsonEncode(trashedPayments.map((e) => e.toJson()).toList()),
+      'saved_deleted_source_ids': deletedSourceIds.toList(),
+      'saved_deleted_dup_keys': deletedDupKeys.toList(),
+      'saved_calendar_autosync': calendarAutoSync,
+      'saved_first_sync': gmailFirstSyncDone,
+        // ⚠️ カードの引落日・締め日も毎回書く（B1）。空でもキーを書く（無いと初回起動とみなされる）
+        'saved_card_payment_days': jsonEncode(cardPaymentDays),
+        'saved_card_closing_days': jsonEncode(cardClosingDays),
+      };
+
+  // ⚠️ SharedPreferences の保存・削除は、失敗を例外ではなく false で返すことがある（API の約束）。
+  //   false を見落とすと、復旧点を書けていないのに上書きを始めたり、保存できていないのに成功扱いにしたりする
+  //   （GPT 実装レビュー P2）。保存・削除はすべてここを通し、false は例外にする。
+  static Future<void> _checked(Future<bool> op, String what) async {
+    if (!await op) throw StateError('保存先が失敗を返しました: $what');
+  }
+
+  static Future<void> _remove(SharedPreferences prefs, String key) =>
+      _checked(prefs.remove(key), '$key の削除');
+
+  static Future<void> _putValue(SharedPreferences prefs, String key, Object value) {
+    if (value is int) return _checked(prefs.setInt(key, value), key);
+    if (value is bool) return _checked(prefs.setBool(key, value), key);
+    if (value is List) {
+      return _checked(prefs.setStringList(key, [for (final e in value) '$e']), key);
     }
-    await prefs.setString('saved_shifts', jsonEncode(shifts));
-    await prefs.setString('saved_payment_notes', jsonEncode(paymentNotes));
-    await prefs.setString('saved_amazon_overrides', jsonEncode(amazonCardOverrides));
-    await prefs.setString('saved_card_aliases', jsonEncode(cardAliases));
-    await prefs.setString('saved_special_calendar_ids', jsonEncode(specialCalendarIds));
-    await prefs.setString('saved_special_calendar_sigs', jsonEncode(specialCalendarSigs));
-    await prefs.setString('saved_actual_salaries', jsonEncode(actualSalaries));
-    await prefs.setString('saved_actual_salaries_by_wp', jsonEncode(actualSalariesByWp));
-    await prefs.setString('saved_balance_updated_at', balanceUpdatedAt?.toIso8601String() ?? '');
-    await prefs.setInt('saved_goal_amount', goalAmount);
-    await prefs.setString('saved_goal_date', goalDate?.toIso8601String() ?? '');
-    await prefs.setString('saved_budgets', jsonEncode(budgets));
-    await prefs.setString('saved_workplaces',
-        jsonEncode(workplaces.map((e) => e.toJson()).toList()));
-    await prefs.setString('saved_events', jsonEncode(events));
-    await prefs.setString(
-        'saved_todos',
-        jsonEncode(todos.map(
-            (k, v) => MapEntry(k, v.map((t) => t.toJson()).toList()))));
-    await prefs.setString(
-        'saved_payments', jsonEncode(payments.map((e) => e.toJson()).toList()));
-    await prefs.setString('saved_installments',
-        jsonEncode(installments.map((e) => e.toJson()).toList()));
-    await prefs.setString('saved_subscriptions',
-        jsonEncode(subscriptions.map((e) => e.toJson()).toList()));
-    await prefs.setString(
-        'saved_loans', jsonEncode(loans.map((e) => e.toJson()).toList()));
-    await prefs.setString('saved_planned_expenses',
-        jsonEncode(plannedExpenses.map((e) => e.toJson()).toList()));
-    await prefs.setString('saved_schedule_suggestions',
-        jsonEncode(scheduleSuggestions.map((e) => e.toJson()).toList()));
-    await prefs.setString('saved_mail_entity_links',
-        jsonEncode(mailEntityLinks.values.map((e) => e.toJson()).toList()));
-    await prefs.setStringList(
-        'saved_paid_planned_expenses', paidPlannedExpenseKeys.toList());
-    await prefs.setString('saved_withdrawals',
-        jsonEncode(withdrawals.map((e) => e.toJson()).toList()));
-    await prefs.setInt('saved_balance', currentBalance);
-    await prefs.setInt('saved_wallet_cash', walletCash);
-    await prefs.setString(
-        'saved_pending_deposits', jsonEncode(pendingDeposits.map((e) => e.toJson()).toList()));
-    await prefs.setStringList('saved_handled_deposit_ids', handledDepositIds.toList());
-    await prefs.setString('saved_paypay_transfers',
-        jsonEncode(paypayTransfers.map((e) => e.toJson()).toList()));
-    await prefs.setString('saved_received_transfers', jsonEncode(receivedTransfers));
-    await prefs.setStringList('saved_handled_draw_ids', handledDrawIds.toList());
-    await prefs.setString(
-        'saved_balance_history', jsonEncode(balanceHistory.map((e) => e.toJson()).toList()));
-    await prefs.setStringList('saved_paid_salary_keys', paidSalaryKeys.toList());
-    await prefs.setString(
-        'saved_planned_incomes', jsonEncode(plannedIncomes.map((e) => e.toJson()).toList()));
-    await prefs.setStringList('saved_received_planned_keys', receivedPlannedKeys.toList());
-    await prefs.setString(
-        'saved_salary_paid_through', salaryPaidThroughMonth?.toIso8601String() ?? '');
-    await prefs.setString('saved_card_rates', jsonEncode(cardInterestRates));
-    await prefs.setStringList('saved_converted_keys', convertedPaymentKeys.toList());
-    await prefs.setStringList('saved_folded_debit_keys', foldedDebitKeys.toList());
-    await prefs.setStringList('saved_converted_source_ids', convertedSourceIds.toList());
-    await prefs.setString(
-        'saved_trashed_payments', jsonEncode(trashedPayments.map((e) => e.toJson()).toList()));
-    await prefs.setStringList('saved_deleted_source_ids', deletedSourceIds.toList());
-    await prefs.setStringList('saved_deleted_dup_keys', deletedDupKeys.toList());
-    await prefs.setBool('saved_calendar_autosync', calendarAutoSync);
-    await prefs.setBool('saved_first_sync', gmailFirstSyncDone);
+    return _checked(prefs.setString(key, value as String), key);
+  }
+
+  // 1つのキーに全部を書く（一時保存・復旧点）。書けなければ空きを作って一度だけやり直す。
+  Future<void> _putRecord(SharedPreferences prefs, String key, String json) async {
+    try {
+      await _checked(prefs.setString(key, json), key);
+    } catch (_) {
+      final free = freeStorageSpace;
+      if (free == null) rethrow;
+      try {
+        await free();
+      } catch (_) {}
+      await _checked(prefs.setString(key, json), key);
+    }
+  }
+
+  // 一時保存 → 全キー → 一時保存を消す。成功したら、残っていた復旧点も消す（端末の保存＝いまの状態になったため）。
+  Future<void> _writeValues(Map<String, Object> values) async {
+    final prefs = await SharedPreferences.getInstance();
+    try {
+      await _putRecord(prefs, kPendingWriteKey, jsonEncode({'v': 1, 'values': values}));
+    } catch (e) {
+      throw StorageWriteFailure('一時保存', e); // ⚠️ 既存のキーは何も書き換えていない
+    }
+    try {
+      for (final e in values.entries) {
+        await _putValue(prefs, e.key, e.value);
+      }
+      await _remove(prefs, kPendingWriteKey);
+      await _remove(prefs, kRestorePointKey);
+    } catch (e) {
+      throw StorageWriteFailure('保存', e); // 一時保存が残るので、次の起動で書き直せる
+    }
+  }
+
+  // 💡 保存は1つずつ順に行い、待っている間に頼まれた分は1回にまとめる（書く値は新しい方）。
+  Map<String, Object>? _queuedValues;
+  Completer<void>? _queuedDone;
+  Future<void>? _runningWrite;
+
+  Future<void> _enqueueWrite(Map<String, Object> values) {
+    final queued = _queuedValues;
+    if (queued != null) {
+      _queuedValues = {...queued, ...values};
+      return _queuedDone!.future;
+    }
+    _queuedValues = values;
+    final done = _queuedDone = Completer<void>();
+    () async {
+      while (_runningWrite != null) {
+        try {
+          await _runningWrite;
+        } catch (_) {}
+      }
+      final v = _queuedValues!;
+      _queuedValues = null;
+      _queuedDone = null;
+      final f = _writeValues(v);
+      _runningWrite = f;
+      Object? error;
+      StackTrace? stack;
+      try {
+        await f;
+        _onWriteSucceeded();
+      } catch (e, st) {
+        _onWriteFailed();
+        error = e;
+        stack = st;
+      } finally {
+        if (identical(_runningWrite, f)) _runningWrite = null;
+      }
+      // 💡 書いている間に頼まれた保存（後ろに並んだもの）が終わるまで待ってから完了にする。
+      //   「保存した」と返った時点で、それまでの変更がすべて端末に入っているようにするため。
+      final next = _queuedDone?.future;
+      if (next != null) {
+        try {
+          await next;
+        } catch (_) {} // 後ろの保存の失敗は、その保存を頼んだ側と storageIssue に出る
+      }
+      if (error != null) {
+        done.completeError(error, stack);
+      } else {
+        done.complete();
+      }
+    }();
+    return done.future;
+  }
+
+  void _onWriteSucceeded() {
+    // ⚠️ 回復不能（混ざっている可能性）は、ふつうの保存が成功しても解消しない。
+    //   取り込み直し・復元（importJson の成功）でだけ解消する。
+    if (storageIssue != null && storageIssue != StorageIssue.unrecoverable) {
+      storageIssue = null;
+      notifyListeners();
+    }
+  }
+
+  void _onWriteFailed() {
+    // 回復待ち・回復不能のときはそのまま（保存の失敗より重い状態）
+    if (storageIssue == null) {
+      storageIssue = StorageIssue.saveFailed;
+      notifyListeners();
+    }
+  }
+
+  // 💡 変更時刻・同期の基準時刻は、時計が同じ値を返しても必ず増える値にする。
+  //   ⚠️ 取り込みを始めた時刻と、その後の編集の時刻が同じだと、編集が「同期済み」に紛れる（GPT 実装レビュー P1）。
+  DateTime? _lastStamp;
+  DateTime issueStamp() {
+    var t = clockNow();
+    final last = _lastStamp;
+    if (last != null && !t.isAfter(last)) t = last.add(const Duration(microseconds: 1));
+    _lastStamp = t;
+    return t;
+  }
+
+  Future<void> saveData({bool markModified = true}) {
+    if (markModified && _dataLock != null) {
+      // ⚠️ 安全網: 取り込み中に、断る確認（_ensureEditable）を通らずに書き換えた経路がある。
+      //   その変更は保存せず、取り込み中の正しい中身へ戻して断る（取り込みの保存に混ぜない）。
+      //   ここに来るのは不具合なので、見つけたら書き換える側に _ensureEditable / runWhenEditable を足す。
+      final label = _dataLock!.label;
+      final snap = _lockSnapshot;
+      if (snap != null) {
+        _importJson(snap, repair: false);
+        notifyListeners();
+      }
+      final f = Future<void>.error(DataLockedException(label));
+      f.catchError((_) {});
+      return f;
+    }
+    if (markModified) dataUpdatedAt = issueStamp();
+    final f = _enqueueWrite(_persistedValues(includeUpdatedAt: markModified));
+    // ⚠️ 呼び出し側の多くは待たない。失敗は storageIssue で画面に出すので、未処理の例外にしない
+    //   （待っている呼び出し側には、そのまま例外が届く）。
+    f.catchError((_) {});
+    f.then((_) => _maybeAutoBackup(), onError: (_) {});
+    return f;
+  }
+
+  /// 保存をやり直す（保存に失敗・回復待ちのとき、画面のボタンから）。成功したら true。
+  Future<bool> retryStorage() async {
+    if (_dataLock != null) return false; // 取り込み中は取り込みの保存を待つ
+    try {
+      await saveData(markModified: false);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  void _maybeAutoBackup() {
+    // ⚠️ 取り込み中は書き出さない（保存が終わる前の中身をバックアップにしない）。終わったら releaseDataLock から呼ぶ
+    if (_dataLock != null) return;
+    if (uploadsBlocked) return; // ⚠️ 整っていない状態で、正常なバックアップを押し出さない
     // 自動バックアップ（1日1回）
-    final now = DateTime.now();
+    final now = clockNow();
     if (autoBackupEnabled &&
         (lastAutoBackupAt == null ||
             lastAutoBackupAt!.year != now.year ||
@@ -5901,41 +5589,105 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  static Map<String, Object> _decodeValues(Object? raw) {
+    final m = (raw as Map).cast<String, Object?>();
+    return {
+      for (final e in m.entries)
+        if (e.value != null) e.key: e.value is List ? [for (final x in e.value as List) '$x'] : e.value!,
+    };
+  }
+
+  static String _fingerprint(Map<String, Object> values) =>
+      sha256.convert(utf8.encode(jsonEncode(values))).toString();
+
+  // 今の端末の保存から、指定したキーの値を読み直す（復旧点の照合用）
+  static Map<String, Object> _currentValues(SharedPreferences prefs, Iterable<String> keys) => {
+        for (final k in keys)
+          if (prefs.get(k) != null) k: prefs.get(k) is List ? [for (final x in prefs.get(k) as List) '$x'] : prefs.get(k)!,
+      };
+
+  // 💡 起動時に、途中で止まった保存・取り込みを整った状態へ戻す。
+  //   ・復旧点があり、取り込み後の保存が最後まで終わっていない → 取り込む前の状態へ戻す
+  //   ・復旧点があるが、端末の保存が取り込み後の状態と一致 → 取り込みは終わっていた（記録を消すだけ）
+  //   ・一時保存だけがある → その状態（最後に保存しようとした状態）を書き直す
+  //   書き戻せなかったら、記録を残したまま「回復待ち」にし、記録の値で読む（戻り値）。
+  Future<Map<String, Object>?> _recoverInterruptedWrite(SharedPreferences prefs) async {
+    final rpRaw = prefs.getString(kRestorePointKey);
+    final walRaw = prefs.getString(kPendingWriteKey);
+    if (rpRaw == null && walRaw == null) return null;
+    Map<String, Object> target;
+    try {
+      if (rpRaw != null) {
+        final rp = jsonDecode(rpRaw) as Map<String, dynamic>;
+        final afterKeys = [for (final k in (rp['afterKeys'] as List)) '$k'];
+        final done = walRaw == null &&
+            _fingerprint(_currentValues(prefs, afterKeys)) == rp['afterHash'];
+        if (done) {
+          await _remove(prefs, kRestorePointKey);
+          return null;
+        }
+        target = _decodeValues(rp['before']);
+      } else {
+        target = _decodeValues((jsonDecode(walRaw!) as Map<String, dynamic>)['values']);
+      }
+    } catch (_) {
+      // ⚠️ 記録が壊れている。端末の保存は混ざっている可能性がある（正常なデータとして扱わない）
+      storageIssue = StorageIssue.unrecoverable;
+      return null;
+    }
+    try {
+      for (final e in target.entries) {
+        await _putValue(prefs, e.key, e.value);
+      }
+      await _remove(prefs, kPendingWriteKey);
+      await _remove(prefs, kRestorePointKey);
+      recoveredOnStartup = true;
+      return null;
+    } catch (_) {
+      storageIssue = StorageIssue.recoveryPending;
+      return target;
+    }
+  }
+
   Future<void> _loadDataInner() async {
     final prefs = await SharedPreferences.getInstance();
+    // 💡 前回の保存・取り込みが途中で止まっていたら、まず整った状態へ戻す
+    final pv = _PrefsView(prefs, await _recoverInterruptedWrite(prefs));
 
-    final shiftsStr = prefs.getString('saved_shifts');
+    final shiftsStr = pv.getString('saved_shifts');
     if (shiftsStr != null) {
       (jsonDecode(shiftsStr) as Map<String, dynamic>).forEach((k, v) {
         shifts[k] = (v as List).map((e) => ShiftData.fromJson(e)).toList();
       });
     }
 
-    final actualSalStr = prefs.getString('saved_actual_salaries');
+    final actualSalStr = pv.getString('saved_actual_salaries');
     if (actualSalStr != null) {
       (jsonDecode(actualSalStr) as Map<String, dynamic>).forEach((k, v) {
         if (v is int) actualSalaries[k] = v;
       });
     }
-    final actualSalWpStr = prefs.getString('saved_actual_salaries_by_wp');
+    final actualSalWpStr = pv.getString('saved_actual_salaries_by_wp');
     if (actualSalWpStr != null) {
       (jsonDecode(actualSalWpStr) as Map<String, dynamic>).forEach((k, v) {
         if (v is int) actualSalariesByWp[k] = v;
       });
     }
-    final buaStr = prefs.getString('saved_balance_updated_at');
+    final buaStr = pv.getString('saved_balance_updated_at');
     balanceUpdatedAt = (buaStr != null && buaStr.isNotEmpty) ? DateTime.tryParse(buaStr) : null;
-    goalAmount = prefs.getInt('saved_goal_amount') ?? 0;
-    final goalStr = prefs.getString('saved_goal_date');
+    final beaStr = pv.getString('saved_balance_entered_at');
+    balanceEnteredAt = (beaStr != null && beaStr.isNotEmpty) ? DateTime.tryParse(beaStr) : null;
+    goalAmount = pv.getInt('saved_goal_amount') ?? 0;
+    final goalStr = pv.getString('saved_goal_date');
     goalDate = (goalStr != null && goalStr.isNotEmpty) ? DateTime.tryParse(goalStr) : null;
-    final budgetsStr = prefs.getString('saved_budgets');
+    final budgetsStr = pv.getString('saved_budgets');
     if (budgetsStr != null) {
       (jsonDecode(budgetsStr) as Map<String, dynamic>).forEach((k, v) {
         if (v is int) budgets[k] = v;
       });
     }
 
-    final workplacesStr = prefs.getString('saved_workplaces');
+    final workplacesStr = pv.getString('saved_workplaces');
     if (workplacesStr != null) {
       workplaces
         ..clear()
@@ -5943,21 +5695,21 @@ class AppState extends ChangeNotifier {
             .map((e) => Workplace.fromJson(e)));
     }
 
-    final eventsStr = prefs.getString('saved_events');
+    final eventsStr = pv.getString('saved_events');
     if (eventsStr != null) {
       (jsonDecode(eventsStr) as Map<String, dynamic>).forEach((k, v) {
         events[k] = (v as List).map((e) => EventData.fromJson(e)).toList();
       });
     }
 
-    final todosStr = prefs.getString('saved_todos');
+    final todosStr = pv.getString('saved_todos');
     if (todosStr != null) {
       (jsonDecode(todosStr) as Map<String, dynamic>).forEach((k, v) {
         todos[k] = (v as List).map((e) => TodoData.fromJson(e)).toList();
       });
     }
 
-    final paymentsStr = prefs.getString('saved_payments');
+    final paymentsStr = pv.getString('saved_payments');
     if (paymentsStr != null) {
       payments = (jsonDecode(paymentsStr) as List)
           .map((e) => Payment.fromJson(e))
@@ -5974,96 +5726,96 @@ class AppState extends ChangeNotifier {
       if (dedupped) saveData();
     }
 
-    final installStr = prefs.getString('saved_installments');
+    final installStr = pv.getString('saved_installments');
     if (installStr != null) {
       installments = (jsonDecode(installStr) as List)
           .map((e) => Installment.fromJson(e))
           .toList();
     }
 
-    final subsStr = prefs.getString('saved_subscriptions');
+    final subsStr = pv.getString('saved_subscriptions');
     if (subsStr != null) {
       subscriptions = (jsonDecode(subsStr) as List)
           .map((e) => Subscription.fromJson(e))
           .toList();
     }
 
-    final loanStr = prefs.getString('saved_loans');
+    final loanStr = pv.getString('saved_loans');
     if (loanStr != null) {
       loans = (jsonDecode(loanStr) as List).map((e) => Loan.fromJson(e)).toList();
     }
 
-    final peStr = prefs.getString('saved_planned_expenses');
+    final peStr = pv.getString('saved_planned_expenses');
     if (peStr != null) {
       plannedExpenses = (jsonDecode(peStr) as List)
           .map((e) => PlannedExpense.fromJson(e))
           .toList();
     }
-    final sgStr = prefs.getString('saved_schedule_suggestions');
+    final sgStr = pv.getString('saved_schedule_suggestions');
     if (sgStr != null) {
       scheduleSuggestions = (jsonDecode(sgStr) as List)
           .map((e) => ScheduleSuggestion.fromJson(e))
           .toList();
     }
-    final mlStr = prefs.getString('saved_mail_entity_links');
+    final mlStr = pv.getString('saved_mail_entity_links');
     if (mlStr != null) _setMailEntityLinks(jsonDecode(mlStr) as List);
     paidPlannedExpenseKeys
       ..clear()
-      ..addAll(prefs.getStringList('saved_paid_planned_expenses') ?? []);
+      ..addAll(pv.getStringList('saved_paid_planned_expenses') ?? []);
 
-    final wdStr = prefs.getString('saved_withdrawals');
+    final wdStr = pv.getString('saved_withdrawals');
     if (wdStr != null) {
       withdrawals = (jsonDecode(wdStr) as List)
           .map((e) => Withdrawal.fromJson(e))
           .toList();
     }
 
-    currentBalance = prefs.getInt('saved_balance') ?? 0;
-    walletCash = prefs.getInt('saved_wallet_cash') ?? 0;
-    final ptStr = prefs.getString('saved_paypay_transfers');
-    final rtStr = prefs.getString('saved_received_transfers');
+    currentBalance = pv.getInt('saved_balance') ?? 0;
+    walletCash = pv.getInt('saved_wallet_cash') ?? 0;
+    final ptStr = pv.getString('saved_paypay_transfers');
+    final rtStr = pv.getString('saved_received_transfers');
     _loadTransfers(ptStr == null ? null : jsonDecode(ptStr),
         rtStr == null ? null : jsonDecode(rtStr));
-    final pdStr = prefs.getString('saved_pending_deposits');
+    final pdStr = pv.getString('saved_pending_deposits');
     if (pdStr != null) {
       pendingDeposits =
           (jsonDecode(pdStr) as List).map((e) => DepositNotice.fromJson(e)).toList();
     }
     handledDepositIds
       ..clear()
-      ..addAll(prefs.getStringList('saved_handled_deposit_ids') ?? const []);
+      ..addAll(pv.getStringList('saved_handled_deposit_ids') ?? const []);
     handledDrawIds
       ..clear()
-      ..addAll(prefs.getStringList('saved_handled_draw_ids') ?? const []);
-    final histStr = prefs.getString('saved_balance_history');
+      ..addAll(pv.getStringList('saved_handled_draw_ids') ?? const []);
+    final histStr = pv.getString('saved_balance_history');
     if (histStr != null) {
       balanceHistory =
           (jsonDecode(histStr) as List).map((e) => BalanceEntry.fromJson(e)).toList();
     }
     paidSalaryKeys
       ..clear()
-      ..addAll(prefs.getStringList('saved_paid_salary_keys') ?? const []);
-    final planStr = prefs.getString('saved_planned_incomes');
+      ..addAll(pv.getStringList('saved_paid_salary_keys') ?? const []);
+    final planStr = pv.getString('saved_planned_incomes');
     if (planStr != null) {
       plannedIncomes =
           (jsonDecode(planStr) as List).map((e) => PlannedIncome.fromJson(e)).toList();
     }
     receivedPlannedKeys
       ..clear()
-      ..addAll(prefs.getStringList('saved_received_planned_keys') ?? const []);
-    final sptStr = prefs.getString('saved_salary_paid_through');
+      ..addAll(pv.getStringList('saved_received_planned_keys') ?? const []);
+    final sptStr = pv.getString('saved_salary_paid_through');
     salaryPaidThroughMonth =
         (sptStr != null && sptStr.isNotEmpty) ? DateTime.tryParse(sptStr) : null;
     // 💡 一度だけの移行: 2026年8月までの給料は受け取り済みとして扱う
     //   （既存ユーザーは8月分まで入金済みのため、9月分から選択肢に出す）
-    if (!(prefs.getBool('migrated_salary_paid_through_202608') ?? false)) {
+    if (!(pv.getBool('migrated_salary_paid_through_202608') ?? false)) {
       salaryPaidThroughMonth ??= DateTime(2026, 8);
       await prefs.setString(
           'saved_salary_paid_through', salaryPaidThroughMonth!.toIso8601String());
       await prefs.setBool('migrated_salary_paid_through_202608', true);
     }
 
-    final ratesStr = prefs.getString('saved_card_rates');
+    final ratesStr = pv.getString('saved_card_rates');
     if (ratesStr != null) {
       (jsonDecode(ratesStr) as Map<String, dynamic>).forEach((k, v) {
         cardInterestRates[k] = (v as num).toDouble();
@@ -6071,38 +5823,38 @@ class AppState extends ChangeNotifier {
     }
     convertedPaymentKeys
       ..clear()
-      ..addAll(prefs.getStringList('saved_converted_keys') ?? const []);
+      ..addAll(pv.getStringList('saved_converted_keys') ?? const []);
     foldedDebitKeys
       ..clear()
-      ..addAll(prefs.getStringList('saved_folded_debit_keys') ?? const []);
+      ..addAll(pv.getStringList('saved_folded_debit_keys') ?? const []);
     convertedSourceIds
       ..clear()
-      ..addAll(prefs.getStringList('saved_converted_source_ids') ?? const []);
+      ..addAll(pv.getStringList('saved_converted_source_ids') ?? const []);
 
-    final trashStr = prefs.getString('saved_trashed_payments');
+    final trashStr = pv.getString('saved_trashed_payments');
     if (trashStr != null) {
       trashedPayments =
           (jsonDecode(trashStr) as List).map((e) => Payment.fromJson(e)).toList();
     }
     deletedSourceIds
       ..clear()
-      ..addAll(prefs.getStringList('saved_deleted_source_ids') ?? const []);
+      ..addAll(pv.getStringList('saved_deleted_source_ids') ?? const []);
     deletedDupKeys
       ..clear()
-      ..addAll(prefs.getStringList('saved_deleted_dup_keys') ?? const []);
-    calendarAutoSync = prefs.getBool('saved_calendar_autosync') ?? false;
-    final reminderIdx = prefs.getInt('saved_shift_reminder');
+      ..addAll(pv.getStringList('saved_deleted_dup_keys') ?? const []);
+    calendarAutoSync = pv.getBool('saved_calendar_autosync') ?? false;
+    final reminderIdx = pv.getInt('saved_shift_reminder');
     shiftReminder = reminderIdx != null &&
             reminderIdx >= 0 &&
             reminderIdx < ShiftReminder.values.length
         ? ShiftReminder.values[reminderIdx]
         : ShiftReminder.calendarDefault;
-    shortfallAlerts = prefs.getBool('saved_shortfall_alerts') ?? true;
-    autoBackupEnabled = prefs.getBool('saved_auto_backup_enabled') ?? true;
-    showMonthAfterNext = prefs.getBool('saved_show_month_after_next') ?? true;
-    showWalletCash = prefs.getBool('saved_show_wallet_cash') ?? true;
-    backgroundTheme = prefs.getString('saved_background_theme') ?? 'pink';
-    final cpdStr = prefs.getString('saved_card_payment_days');
+    shortfallAlerts = pv.getBool('saved_shortfall_alerts') ?? true;
+    autoBackupEnabled = pv.getBool('saved_auto_backup_enabled') ?? true;
+    showMonthAfterNext = pv.getBool('saved_show_month_after_next') ?? true;
+    showWalletCash = pv.getBool('saved_show_wallet_cash') ?? true;
+    backgroundTheme = pv.getString('saved_background_theme') ?? 'pink';
+    final cpdStr = pv.getString('saved_card_payment_days');
     if (cpdStr == null) {
       // 初回起動：種をデータとして書き込む（以後はここを通らない）
       cardPaymentDays = Map<String, int>.from(kSeedCardPaymentDays);
@@ -6116,7 +5868,13 @@ class AppState extends ChangeNotifier {
             if (e.value is int) e.key: e.value as int
         });
     }
-    final caStr = prefs.getString('saved_card_aliases');
+    final bbmStr = pv.getString('saved_bank_bill_months');
+    if (bbmStr != null) {
+      (jsonDecode(bbmStr) as Map<String, dynamic>).forEach((k, v) {
+        if (v is String) bankBillMonths[k] = v;
+      });
+    }
+    final caStr = pv.getString('saved_card_aliases');
     if (caStr != null) {
       (jsonDecode(caStr) as Map<String, dynamic>).forEach((k, v) {
         if (v is String) cardAliases[k] = v;
@@ -6126,39 +5884,39 @@ class AppState extends ChangeNotifier {
       ('saved_special_calendar_ids', specialCalendarIds),
       ('saved_special_calendar_sigs', specialCalendarSigs),
     ]) {
-      final s = prefs.getString(key);
+      final s = pv.getString(key);
       if (s == null) continue;
       (jsonDecode(s) as Map<String, dynamic>).forEach((k, v) {
         if (v is String) target[k] = v;
       });
     }
-    final aoStr = prefs.getString('saved_amazon_overrides');
+    final aoStr = pv.getString('saved_amazon_overrides');
     if (aoStr != null) {
       (jsonDecode(aoStr) as Map<String, dynamic>).forEach((k, v) {
         if (v is String) amazonCardOverrides[k] = v;
       });
     }
-    final pnStr = prefs.getString('saved_payment_notes');
+    final pnStr = pv.getString('saved_payment_notes');
     if (pnStr != null) {
       (jsonDecode(pnStr) as Map<String, dynamic>).forEach((k, v) {
         if (v is String) paymentNotes[k] = v;
       });
     }
-    final ccdStr = prefs.getString('saved_card_closing_days');
+    final ccdStr = pv.getString('saved_card_closing_days');
     if (ccdStr != null) {
       (jsonDecode(ccdStr) as Map<String, dynamic>).forEach((k, v) {
         if (v is int) cardClosingDays[k] = v;
       });
     }
-    final lbaStr = prefs.getString('saved_last_backup_at');
+    final lbaStr = pv.getString('saved_last_backup_at');
     if (lbaStr != null && lbaStr.isNotEmpty) lastAutoBackupAt = DateTime.tryParse(lbaStr);
 
-    gmailFirstSyncDone = prefs.getBool('saved_first_sync') ?? false;
+    gmailFirstSyncDone = pv.getBool('saved_first_sync') ?? false;
 
-    driveSyncEnabled = prefs.getBool('saved_drive_sync_enabled') ?? false;
-    requireGoogleLogin = prefs.getBool('saved_require_google_login') ?? false;
+    driveSyncEnabled = pv.getBool('saved_drive_sync_enabled') ?? false;
+    requireGoogleLogin = pv.getBool('saved_require_google_login') ?? false;
     DateTime? readAt(String key) {
-      final s = prefs.getString(key);
+      final s = pv.getString(key);
       return (s == null || s.isEmpty) ? null : DateTime.tryParse(s);
     }
 
@@ -6166,18 +5924,35 @@ class AppState extends ChangeNotifier {
     driveSyncedAt = readAt('saved_drive_synced_at');
     driveKnownRemoteAt = readAt('saved_drive_remote_at');
 
+    var migrated = repairData();
+    // 💡 IDの無い旧シフトに採番したIDを保存する（次の起動で別のIDにならないように）
+    //   ⚠️ legacyId は読み込んだ時点の印なので、起動時だけ見る（repairData に入れると冪等でなくなる）
+    if (shifts.values.any((l) => l.any((s) => s.legacyId))) migrated = true;
+    if (migrated) saveData();
+
+    notifyListeners();
+  }
+
+  // 💡 自己修復（古いデータの形をいまの形にそろえる）。起動時の読込と、取り込み（ドライブ・
+  //   バックアップ）の両方でここを通す。⚠️ 以前は取り込み時にローンの紐づけしか直しておらず、
+  //   古い端末が上げたデータは次の起動まで直らないまま計算されていた（B8）。
+  //   ・何度走らせても結果が同じ（2回目は何も変えず false を返す）
+  //   ・失った情報を推測で作らない（例: 消えた予定のIDは戻さない）
+  //   戻り値: 何か直したら true（呼び出し側が保存する）
+  @visibleForTesting
+  bool repairData() {
     // 💡 「三井住友」は「三井OLIVE」に統合
-    var migrated = retireOldScheduleSuggestions() > 0;
+    var changed = retireOldScheduleSuggestions() > 0;
     for (final p in payments) {
       if (p.cardName == '三井住友') {
         p.cardName = '三井OLIVE';
-        migrated = true;
+        changed = true;
       }
     }
     for (final i in installments) {
       if (i.cardName == '三井住友') {
         i.cardName = '三井OLIVE';
-        migrated = true;
+        changed = true;
       }
       // 旧データ: startDate が無ければ名前内の日付 "(2026-03-11)" から復元
       if (i.startDate == null) {
@@ -6185,19 +5960,15 @@ class AppState extends ChangeNotifier {
         if (m != null) {
           i.startDate =
               DateTime(int.parse(m.group(1)!), int.parse(m.group(2)!), int.parse(m.group(3)!));
-          migrated = true;
+          changed = true;
         }
       }
     }
-    if (_migrateWorkplaces()) migrated = true;
+    if (_migrateWorkplaces()) changed = true;
     // 分割へ移した決済がカード側に残っていたら掃除（旧バージョンの取りこぼしを自己修復）
-    if (cleanupInstallmentDuplicates() > 0) migrated = true;
-    if (repairLoanBillingLinks()) migrated = true;
-    // 💡 IDの無い旧シフトに採番したIDを保存する（次の起動で別のIDにならないように）
-    if (shifts.values.any((l) => l.any((s) => s.legacyId))) migrated = true;
-    if (migrated) saveData();
-
-    notifyListeners();
+    if (cleanupInstallmentDuplicates() > 0) changed = true;
+    if (repairLoanBillingLinks()) changed = true;
+    return changed;
   }
 
   // 💡 既存の手入力シフト（workplace文字列）から勤務先マスタを自動生成し、
@@ -6247,7 +6018,12 @@ class AppState extends ChangeNotifier {
         if (s.workplaceId != null) continue;
         final w = byName[s.workplace.trim()];
         if (w == null) continue;
+        // ⚠️ ID と予定のIDを引き継ぐ。以前は作り直しで新しいIDになり、予定IDも消えていた
+        //   （カレンダーに同じ予定が二重にでき、メールの予定提案との対応も外れる＝B2）。
         list[i] = ShiftData(
+          id: s.id,
+          legacyId: s.legacyId,
+          calendarEventId: s.calendarEventId,
           workplace: s.workplace,
           workplaceId: w.id,
           hourlyWage: s.hourlyWage,

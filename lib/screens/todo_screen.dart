@@ -325,7 +325,7 @@ class _TodoScreenState extends State<TodoScreen> {
                                       borderRadius: BorderRadius.circular(6),
                                     ),
                                     child: Text(t.label,
-                                        style: TextStyle(fontSize: 11, color: _labelColor(t.label), fontWeight: FontWeight.bold)),
+                                        style: TextStyle(fontSize: 12, color: _labelColor(t.label), fontWeight: FontWeight.bold)),
                                   ),
                                   const SizedBox(width: 6),
                                 ],

@@ -193,7 +193,7 @@ Future<void> _edit(
               contentPadding: EdgeInsets.zero,
               title: const Text('毎月くり返す', style: TextStyle(fontSize: 14)),
               subtitle: const Text('毎月同じ日に出ていくとき',
-                  style: TextStyle(fontSize: 11, color: Colors.grey)),
+                  style: TextStyle(fontSize: 12, color: Colors.grey)),
               value: monthly,
               onChanged: (v) => setLocal(() => monthly = v),
             ),

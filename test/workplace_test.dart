@@ -399,32 +399,29 @@ void main() {
       expect(apr['楽天カード'], 1980);
     });
 
-    test('楽天カードの引き落としは翌月27日（1ヶ月後）', () {
+    test('楽天カードの引き落としは翌月27日（設定した引落日。1ヶ月後）', () async {
       SharedPreferences.setMockInitialValues({});
       final app = AppState();
+      await app.loadData();
+      app.cardPaymentDays['楽天カード'] = 27;
       // 4月利用 → 5月27日引き落とし（銀行確定データと一致）
-      final d = app.debitDateFor('楽天カード', DateTime(2026, 4, 15));
-      expect(d.year, 2026);
-      expect(d.month, 5); // 翌々月(6月)ではなく翌月(5月)
+      // 💡 以前はカード名で決め打ちした規則（debitDateFor）を見ていた。今は設定の引落日。
+      final d = app.drawDateForUsage('楽天カード', DateTime(2026, 4, 15))!;
+      expect(d, DateTime(2026, 5, 27)); // 翌々月(6月)ではなく翌月(5月)
     });
 
     test('分割の残り回数: 楽天4月購入5回払い→7月末で残り2回', () async {
       SharedPreferences.setMockInitialValues({});
-      final app = AppState();
+      // 引落: 5/27, 6/29(6/27土), 7/27, 8/27, 9/28(9/27日) → 2026-07-31時点で5,6,7が支払済み=残り2
+      final app = AppState(clock: () => DateTime(2026, 7, 31));
       await app.loadData();
+      app.cardPaymentDays['楽天カード'] = 27;
       final inst = Installment(
         id: 'r1', name: '楽天の分割', totalAmount: 37172, monthlyAmount: 7434,
         installmentCount: 5, remainingMonths: 5,
         cardName: '楽天カード', startDate: DateTime(2026, 4, 10),
       );
-      // 引落: 5/27, 6/27, 7/27, 8/27, 9/27 → 2026-07-31時点で5,6,7が支払済み=残り2
-      // （テスト実行日に依存しないよう、経過回数の算出ロジックを直接検証）
-      var paid = 0;
-      final now = DateTime(2026, 7, 31);
-      for (var k = 0; k < inst.installmentCount; k++) {
-        if (!app.debitDateForNth('楽天カード', inst.startDate!, k).isAfter(now)) paid++;
-      }
-      expect(inst.installmentCount - paid, 2);
+      expect(app.remainingMonthsOf(inst), 2);
     });
 
     test('分割は利用開始月(startDate)を1回目として集計', () async {

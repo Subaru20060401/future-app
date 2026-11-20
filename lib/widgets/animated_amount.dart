@@ -16,7 +16,6 @@ class AnimatedAmount extends StatefulWidget {
     super.key,
     required this.value,
     required this.style,
-    this.prefix = '¥ ',
     this.showDelta = true,
     this.duration = const Duration(milliseconds: 250),
     this.deltaVisibleFor = const Duration(seconds: 4),
@@ -25,7 +24,6 @@ class AnimatedAmount extends StatefulWidget {
 
   final int value;
   final TextStyle style;
-  final String prefix;
   final bool showDelta;
   final Duration duration;
   final Duration deltaVisibleFor;
@@ -88,7 +86,7 @@ class _AnimatedAmountState extends State<AnimatedAmount>
     );
     return Semantics(
       // 読み上げは最終の金額を一度だけ
-      label: '${widget.prefix}${yenNum(widget.value)}',
+      label: yenSpoken(widget.value),
       excludeSemantics: true,
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -96,14 +94,14 @@ class _AnimatedAmountState extends State<AnimatedAmount>
         children: [
           AnimatedBuilder(
             animation: _c,
-            builder: (context, _) => Text('${widget.prefix}${yenNum(_displayed)}', style: style),
+            builder: (context, _) => Text(yen(_displayed), style: style),
           ),
           if (widget.showDelta && delta != 0)
             Text(
               // 💡 理由までは分からないので「今回の更新」とだけ言う（カード利用分などと断定しない）
-              '今回の更新 ${delta > 0 ? '+' : '−'}¥${yenNum(delta.abs())}',
+              '今回の更新 ${yen(delta, signed: true)}',
               style: TextStyle(
-                fontSize: 11,
+                fontSize: 12,
                 fontWeight: FontWeight.bold,
                 color: delta > 0 ? Colors.green[700] : Colors.red[700],
               ),

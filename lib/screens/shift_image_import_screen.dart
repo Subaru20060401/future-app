@@ -661,7 +661,7 @@ class _CandidateTile extends StatelessWidget {
               ),
               ListTile(
                 title: const Text('終了'),
-                subtitle: const Text('開始より前なら翌日として扱います', style: TextStyle(fontSize: 11)),
+                subtitle: const Text('開始より前なら翌日として扱います', style: TextStyle(fontSize: 12)),
                 trailing: Text(end.format(ctx)),
                 onTap: () async {
                   final t = await showTimePicker(context: ctx, initialTime: end);
@@ -707,7 +707,7 @@ class _Tag extends StatelessWidget {
         color: color[50],
         borderRadius: BorderRadius.circular(4),
       ),
-      child: Text(text, style: TextStyle(fontSize: 11, color: color[800])),
+      child: Text(text, style: TextStyle(fontSize: 12, color: color[800])),
     );
   }
 }
@@ -761,7 +761,7 @@ Future<void> showGeminiSettingsSheet(BuildContext context) async {
               onChanged: (v) => setSheet(() => remember = v ?? false),
               title: const Text('この端末に保存する', style: TextStyle(fontSize: 14)),
               subtitle: const Text('オフにすると、アプリを開き直すたびに入力が必要です',
-                  style: TextStyle(fontSize: 11)),
+                  style: TextStyle(fontSize: 12)),
             ),
             const SizedBox(height: 4),
             TextField(
