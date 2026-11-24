@@ -66,6 +66,8 @@ Future<void> openHomeNotice(
       await showDepositDialog(context, appState, notice.deposit!);
     case HomeNoticeKind.plannedIncome:
       await showPlannedIncomeSheet(context, appState);
+    case HomeNoticeKind.salary:
+      await showSalaryDialog(context, appState, notice.salary!);
     case HomeNoticeKind.scheduleSuggestion:
       await showSuggestionReviewSheet(context, appState, notice.suggestion!);
     case HomeNoticeKind.bankBillMonthUnknown:
@@ -94,6 +96,7 @@ IconData _iconOf(HomeNoticeKind kind) => switch (kind) {
       HomeNoticeKind.draw => Icons.north_east,
       HomeNoticeKind.deposit => Icons.south_west,
       HomeNoticeKind.plannedIncome => Icons.event_available,
+      HomeNoticeKind.salary => Icons.payments_outlined,
       HomeNoticeKind.installmentWithoutCard => Icons.credit_card_off,
       HomeNoticeKind.scheduleSuggestion => Icons.mark_email_unread_outlined,
       HomeNoticeKind.bankBillMonthUnknown => Icons.help_outline,
@@ -103,6 +106,7 @@ Color _colorOf(HomeNoticeKind kind) => switch (kind) {
       HomeNoticeKind.draw => Colors.red,
       HomeNoticeKind.deposit => Colors.green,
       HomeNoticeKind.plannedIncome => Colors.teal,
+      HomeNoticeKind.salary => Colors.green,
       HomeNoticeKind.installmentWithoutCard => Colors.orange,
       HomeNoticeKind.scheduleSuggestion => Colors.indigo,
       HomeNoticeKind.bankBillMonthUnknown => Colors.orange,

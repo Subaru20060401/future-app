@@ -727,3 +727,56 @@ class _ManualSubtractRowState extends State<_ManualSubtractRow> {
     );
   }
 }
+
+// 💡 給料の入金確認（確認待ちから）。給料日が過ぎて、まだ受け取っていない給料。
+//   ・受け取った → 金額（見込みが入っている。実際の額に直せる）を残高に足し、受け取り済みにする
+//   ・もう残高に入っている → 残高は変えず、受け取り済みにする（予想でも二重に足さない）
+//   ⚠️ 受け取ると残高の基準日が進むので、先に未処理の引き落としを確かめる（confirmDrawsBeforeDeposit）。
+Future<void> showSalaryDialog(BuildContext context, AppState appState,
+    ({Workplace workplace, DateTime payDate, int amount}) salary) async {
+  final ctrl = TextEditingController(text: salary.amount.toString());
+  final w = salary.workplace;
+  final choice = await showDialog<String>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: Text('給料の入金：${w.name}'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('${DateFormat('M/d').format(salary.payDate)} の給料日です。'
+              '見込みは ${yen(salary.amount)}（シフトからの計算）。',
+              style: const TextStyle(fontSize: 13)),
+          const SizedBox(height: 8),
+          TextField(
+            key: const Key('salary-amount'),
+            controller: ctrl,
+            keyboardType: TextInputType.number,
+            decoration: const InputDecoration(labelText: '受け取った金額', suffixText: '円'),
+          ),
+          const SizedBox(height: 8),
+          const Text('残高をすでに書き直していて、この給料が入っているなら「もう残高に入っている」を選んでください。',
+              style: TextStyle(fontSize: 12, color: AppColors.subtle)),
+        ],
+      ),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(context), child: const Text('あとで')),
+        TextButton(
+            onPressed: () => Navigator.pop(context, 'included'),
+            child: const Text('もう残高に入っている')),
+        FilledButton(
+            onPressed: () => Navigator.pop(context, 'receive'),
+            child: const Text('受け取った（残高に足す）')),
+      ],
+    ),
+  );
+  if (choice == null || !context.mounted) return;
+  if (choice == 'included') {
+    appState.markSalaryIncluded(w.id, salary.payDate);
+    return;
+  }
+  final amount = int.tryParse(ctrl.text.replaceAll(',', '').trim()) ?? 0;
+  if (!await confirmDrawsBeforeDeposit(context, appState)) return;
+  appState.receiveSalary(w.id, salary.payDate, amount);
+}
+

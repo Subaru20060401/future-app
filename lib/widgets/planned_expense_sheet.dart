@@ -99,8 +99,9 @@ Future<void> showPlannedExpenseSheet(
                                 icon: const Icon(Icons.check_circle_outline,
                                     color: Colors.green),
                                 onPressed: () async {
-                                  if (await _confirmPaid(ctx, e, next) != true) return;
-                                  appState.markPlannedExpensePaid(e.id, next);
+                                  final choice = await _confirmPaid(ctx, e, next);
+                                  if (choice == null) return;
+                                  appState.payPlannedExpense(e.id, next, subtract: choice);
                                   setLocal(() {});
                                 },
                               ),
@@ -129,20 +130,23 @@ Future<void> showPlannedExpenseSheet(
 
 // 💡 予定日より前に払ったとき用。払ったお金は今の口座残高に入っている前提なので、
 //   予想からこの回を外す（外さないと、残高と予想の両方で二重に引かれる）。
+// 払った予定支出を、残高から引くか（true）、もう残高に入っているか（false）。やめたら null。
+// 💡 以前は予想から外すだけで残高からは引かず、「先に残高を書き直して」と頼んでいた。
 Future<bool?> _confirmPaid(BuildContext context, PlannedExpense e, DateTime date) {
   return showDialog<bool>(
     context: context,
     builder: (context) => AlertDialog(
-      title: const Text('払い済みにする'),
+      title: const Text('払った'),
       content: Text(
-        '「${e.title}」（${DateFormat('M/d').format(date)}・¥${yenNum(e.amount)}）を予想から外します。\n\n'
-        '払ったぶんが今の口座残高に入っている（残高を書き直した）ときに使ってください。'
-        'まだ残高に入れていないなら、先に残高を書き直してください。',
+        '「${e.title}」（${DateFormat('M/d').format(date)}・¥${yenNum(e.amount)}）を払い済みにします。\n\n'
+        'いまの口座残高から引きますか？ 残高をすでに書き直していて、この支払いが入っているなら'
+        '「もう残高に入っている」を選んでください。どちらも予想からは外れます。',
         style: const TextStyle(fontSize: 13),
       ),
       actions: [
-        TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('やめる')),
-        ElevatedButton(onPressed: () => Navigator.pop(context, true), child: const Text('払い済みにする')),
+        TextButton(onPressed: () => Navigator.pop(context), child: const Text('やめる')),
+        TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('もう残高に入っている')),
+        FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('残高から引く')),
       ],
     ),
   );

@@ -426,7 +426,7 @@ class MonthFlowCard extends StatelessWidget {
       subtitle: '月末の見込みと同じ計算です',
       child: Column(
         children: [
-          _flowRow('いまの残高（財布を含む）', f.start),
+          _flowRow('いまの口座残高', f.start), // 💡 財布は口座の予想に入れない（2026-11）
           _flowRow('入金', f.incomeTotal, signed: true),
           _flowRow('出金', -total, signed: true),
           const Divider(height: AppSpace.l),
