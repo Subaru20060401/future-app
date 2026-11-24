@@ -255,6 +255,7 @@ enum HomeNoticeKind {
   draw, // 引き落としの反映待ち
   deposit, // 入金の反映待ち（メールに金額が無いので入力が要る）
   plannedIncome, // 予定入金の受け取り確認
+  salary, // 給料の入金確認（給料日が過ぎて、まだ受け取っていない）
   installmentWithoutCard, // カード未設定の分割払い（予想から漏れる可能性）
   scheduleSuggestion, // メールから見つけた予定・単発バイトの提案（承認するまで何も登録しない）
   bankBillMonthUnknown, // 請求の月を判定できない銀行確定（利用者が選ぶ）
@@ -270,6 +271,7 @@ class HomeNotice {
   final ({String id, String label, int amount, DateTime date})? draw;
   final DepositNotice? deposit;
   final ({PlannedIncome income, DateTime date})? planned;
+  final ({Workplace workplace, DateTime payDate, int amount})? salary;
   final ScheduleSuggestion? suggestion;
   final Payment? bankRecord;
 
@@ -282,6 +284,7 @@ class HomeNotice {
     this.draw,
     this.deposit,
     this.planned,
+    this.salary,
     this.suggestion,
     this.bankRecord,
   });
@@ -2075,6 +2078,55 @@ class AppState extends ChangeNotifier {
     return paidSalaryKeys.contains(_paidKey(wpId, payDate));
   }
 
+  // 💡 給料日が過ぎて、まだ受け取っていない給料（確認待ちに出す。直近 62 日）。
+  //   ⚠️ 以前は入金のお知らせメールが来ないと確認が出ず、残高を書き直すと（基準日が進むと）
+  //     受け取っていない給料まで予想から黙って消えた。
+  //   金額は予想と同じ見込み（takeHomeOfWorkplace）。入金のお知らせ（pendingDeposits）がその給料日の近くに
+  //   来ていて、その勤務先が候補なら出さない（お知らせのほうで勤務先を選んで反映する。二重にしない）。
+  List<({Workplace workplace, DateTime payDate, int amount})> get dueSalaries {
+    final now = clockNow();
+    final today = DateTime(now.year, now.month, now.day);
+    final oldest = today.subtract(const Duration(days: 62));
+    final out = <({Workplace workplace, DateTime payDate, int amount})>[];
+    for (final w in workplaces) {
+      for (var back = 0; back < 3; back++) {
+        final m = DateTime(now.year, now.month - back);
+        final payDate = w.paydayIn(m);
+        if (payDate.isAfter(today) || payDate.isBefore(oldest)) continue;
+        if (isSalaryPaid(w.id, payDate)) continue;
+        final wm = DateTime(m.year, m.month - w.paydayMonthOffset); // 予想と同じ労働月
+        final amount = takeHomeOfWorkplace(wm, w.id);
+        if (amount <= 0) continue;
+        final noticed = pendingDeposits.any((n) =>
+            workplacesWithPaydayNear(n.date).any((c) => c.id == w.id) &&
+            n.date.difference(payDate).inDays.abs() <= 3);
+        if (noticed) continue;
+        out.add((workplace: w, payDate: payDate, amount: amount));
+      }
+    }
+    out.sort((a, b) => a.payDate.compareTo(b.payDate));
+    return out;
+  }
+
+  /// 給料を受け取った → 残高に足して、その月の給料を受け取り済みにする（実給料にも記録）。
+  /// [amount] が 0 以下なら、残高は変えずに受け取り済みだけにする。
+  void receiveSalary(String workplaceId, DateTime payDate, int amount) {
+    _ensureEditable();
+    if (amount <= 0) {
+      markSalaryIncluded(workplaceId, payDate);
+      return;
+    }
+    addDeposit(amount, workplaceId: workplaceId, date: payDate);
+  }
+
+  /// 給料はもう入力した残高に入っている → 残高は変えず、受け取り済みにする（予想でも二重に足さない）。
+  void markSalaryIncluded(String workplaceId, DateTime payDate) {
+    _ensureEditable();
+    paidSalaryKeys.add(_paidKey(workplaceId, payDate));
+    saveData();
+    notifyListeners();
+  }
+
   // 入金の選択肢に出す勤務先（もう受け取った分は除く）
   List<Workplace> workplacesAwaitingSalary(DateTime payDate) =>
       workplaces.where((w) => !isSalaryPaid(w.id, payDate)).toList();
@@ -2181,6 +2233,8 @@ class AppState extends ChangeNotifier {
       }
     }
     if (key != null && key.isNotEmpty) {
+      final planned = _plannedKeyOfDrawId(key);
+      if (planned != null) paidPlannedExpenseKeys.remove(planned); // 予定支出は未払いに戻る
       handledDrawIds.remove(key);
       handledDepositIds.remove(key);
       pendingDeposits.removeWhere((d) => d.sourceId == key);
@@ -2440,15 +2494,69 @@ class AppState extends ChangeNotifier {
         // 💡 予想（subscriptionDrawsIn）と同じく、休みなら翌営業日（以前はそのままの日付だった）
         final date = drawDateInMonth(sub.payDay, m);
         if (!inWindow(date)) continue;
-        final id = 'sub:${sub.id}:${DateFormat('yyyy-MM').format(m)}';
+        final id = _subDrawId(sub.id, m);
         if (handledDrawIds.contains(id)) continue;
         final label = sub.isManualPay ? '${sub.title}（手動）' : sub.title;
         out.add((id: id, label: label, amount: sub.amount, date: date));
       }
     }
 
+    // ③ 予定支出（一度きり・毎月）。予定日が過ぎたら、払ったか確かめてもらう。
+    // ⚠️ 以前は確認待ちに出ず、日付が過ぎても「いまの残高」から引かれなかった。さらに、入金などで
+    //   残高の基準日が進むと予想からも黙って消えた（払ったお金が口座にも予想にも反映されない）。
+    //   日付・金額は予想（plannedExpensesIn）と同じ。払い済みにしたもの（paidPlannedExpenseKeys）は出さない。
+    for (var back = 0; back < 3; back++) {
+      final m = DateTime(now.year, now.month - back);
+      for (final e in plannedExpensesIn(m)) {
+        if (!inWindow(e.date)) continue;
+        final id = _plannedDrawId(e.expense.id, e.date);
+        if (handledDrawIds.contains(id)) continue;
+        out.add((id: id, label: '${e.expense.title}（予定支出）', amount: e.expense.amount, date: e.date));
+      }
+    }
+
+    // ④ 口座払いのローンの月々の返済。銀行の引落確定がある月は ① に出るので、ここでは出さない。
+    //   日付・金額は予想（accountLoanDrawsIn）と同じ。
+    for (var back = 0; back < 4; back++) {
+      final payMonth = DateTime(now.year, now.month - back);
+      for (final d in accountLoanDrawsIn(payMonth)) {
+        if (!inWindow(d.date)) continue;
+        final id = _loanDrawId(d.loan.id, payMonth);
+        if (handledDrawIds.contains(id)) continue;
+        out.add((id: id, label: '${d.loan.name}（返済）', amount: d.amount, date: d.date));
+      }
+    }
+
+    // ⑤ 口座払いの頭金（一度きり）。日付・金額は予想（oneTimeExpensesIn）と同じ。
+    for (final l in loans) {
+      final d = _accountDownPaymentDateOf(l);
+      if (d == null || !inWindow(d)) continue;
+      final id = _downPaymentDrawId(l.id);
+      if (handledDrawIds.contains(id)) continue;
+      out.add((id: id, label: '${l.name} 頭金', amount: l.downPayment, date: d));
+    }
+
     out.sort((a, b) => a.date.compareTo(b.date)); // 古い順
     return out;
+  }
+
+  // 確認待ちの ID（処理済みの記録 handledDrawIds のキー）。
+  // 💡 予想もこの ID で「処理済み（残高に反映した／入っていると確かめた）」を見て、二重に引かない。
+  static String _subDrawId(String subId, DateTime payMonth) =>
+      'sub:$subId:${DateFormat('yyyy-MM').format(payMonth)}';
+  static String _plannedDrawId(String expenseId, DateTime date) =>
+      'plan:$expenseId:${DateFormat('yyyy-MM').format(date)}';
+  static String _loanDrawId(String loanId, DateTime payMonth) =>
+      'loan:$loanId:${DateFormat('yyyy-MM').format(payMonth)}';
+  static String _downPaymentDrawId(String loanId) => 'down:$loanId';
+
+  // 確認待ちの予定支出の ID から、払い済みの記録（paidPlannedExpenseKeys）のキーへ
+  static String? _plannedKeyOfDrawId(String drawId) {
+    if (!drawId.startsWith('plan:')) return null;
+    final rest = drawId.substring('plan:'.length);
+    final i = rest.lastIndexOf(':');
+    if (i <= 0) return null;
+    return '${rest.substring(0, i)}|${rest.substring(i + 1)}';
   }
 
   // 💡 入金などで残高の基準日が進んだら、予想から外れてしまう未処理の引き落とし。
@@ -2490,6 +2598,20 @@ class AppState extends ChangeNotifier {
         date: n.date,
         amount: t?.amount,
         deposit: n,
+      ));
+    }
+    for (final e in dueSalaries) {
+      out.add(HomeNotice(
+        kind: HomeNoticeKind.salary,
+        title: '給料の入金確認：${e.workplace.name}',
+        detail: '${e.payDate.month}/${e.payDate.day} の給料日・${switch (drawReflectionOf(e.payDate)) {
+          DrawReflection.maybeIncluded => '入力した残高に含まれている可能性があります',
+          DrawReflection.likelyNotIncluded => '受け取ったら金額を入れて反映します',
+          DrawReflection.unknown => '受け取ったか確かめてください',
+        }}',
+        date: e.payDate,
+        amount: e.amount,
+        salary: e,
       ));
     }
     for (final e in duePlannedIncomes) {
@@ -2969,6 +3091,9 @@ class AppState extends ChangeNotifier {
       );
     }
     handledDrawIds.add(id);
+    // 💡 予定支出は「払い済み」にもする（予定の一覧と予想から外れる。基準日が進まなくても二重に引かない）
+    final planned = _plannedKeyOfDrawId(id);
+    if (planned != null) paidPlannedExpenseKeys.add(planned);
     saveData();
     notifyListeners();
     return true;
@@ -2979,6 +3104,8 @@ class AppState extends ChangeNotifier {
   bool skipDraw(String id) {
     _ensureEditable();
     if (!handledDrawIds.add(id)) return false;
+    final planned = _plannedKeyOfDrawId(id);
+    if (planned != null) paidPlannedExpenseKeys.add(planned);
     saveData();
     notifyListeners();
     return true;
@@ -3855,6 +3982,34 @@ class AppState extends ChangeNotifier {
         .toList();
   }
 
+  // 💡 payMonth に口座から落ちる、口座払いのローンの返済（予想の drawBreakdownOf と同じ規則）。
+  //   n月の返済＝n-1月の利用月のぶん。銀行の引落確定がある月は確定のほうを使うので出さない。
+  //   日付は返済日（休みなら翌営業日）。確認待ちで処理済みかどうかは見ない（呼び出し側で見る）。
+  List<({Loan loan, int amount, DateTime date})> accountLoanDrawsIn(DateTime payMonth) {
+    final useMonth = DateTime(payMonth.year, payMonth.month - 1);
+    final out = <({Loan loan, int amount, DateTime date})>[];
+    for (final l in activeLoansIn(useMonth)) {
+      if (!l.isFromAccount) continue;
+      if (_hasLoanBankBill(l, payMonth)) continue;
+      final amount = l.amountIn(useMonth);
+      if (amount <= 0) continue;
+      out.add((loan: l, amount: amount, date: drawDateOf(l.name, payMonth)));
+    }
+    return out;
+  }
+
+  // 口座払いの頭金の日付（頭金が無い・カード払い・銀行確定済みなら null）。予想と確認待ちで同じ判定。
+  DateTime? _accountDownPaymentDateOf(Loan l) {
+    final d = l.downPaymentDate;
+    if (!l.hasDownPayment || !l.isDownPaymentFromAccount || d == null) return null;
+    final month = DateTime(d.year, d.month);
+    // ⚠️ 頭金は日付どおりの月。翌月の請求では消さない。
+    if (_hasLoanBankBill(l, month, onDate: nextBusinessDay(d), minimumAmount: l.downPayment)) {
+      return null;
+    }
+    return d;
+  }
+
   // ───── ローン ─────
   // 💡 口座から直接引かれるローンは、返済日が個別なので1本ずつのスライスにする。
   //   （まとめて1つにすると、分割払いで起きたのと同じ「引き落とし日のズレ」が出る）
@@ -3961,10 +4116,35 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
-  // 払い済みを取り消す（押し間違えたとき）
+  /// 予定支出を払った（一覧の「払った」・予定日より前に払ったときも）。
+  /// [subtract] が true なら残高から引く（確認待ちの「引く」と同じ。入出金の履歴に残る）。
+  /// false なら、もう残高に入っているとして払い済みにだけする。どちらも予想から外れる。
+  /// 💡 確認待ちと同じ ID で処理するので、確認待ちにも二度と出ない（二重に引かない）。
+  bool payPlannedExpense(String id, DateTime date, {required bool subtract, int? amount}) {
+    _ensureEditable();
+    final e = plannedExpenses.where((x) => x.id == id).firstOrNull;
+    if (e == null) return false;
+    final drawId = _plannedDrawId(id, date);
+    if (!subtract) {
+      final changed = skipDraw(drawId);
+      paidPlannedExpenseKeys.add(_plannedExpenseKey(id, date));
+      return changed;
+    }
+    return applyDraw(drawId, amount ?? e.amount, label: '${e.title}（予定支出）');
+  }
+
+  // 払い済みを取り消す（押し間違えたとき）。
+  // 💡 「払った」で残高から引いていたら、その引いた分も戻す（入出金の履歴の取り消しと同じ）。
   void unmarkPlannedExpensePaid(String id, DateTime date) {
     _ensureEditable();
+    final drawId = _plannedDrawId(id, date);
+    final entry = balanceHistory.where((e) => e.sourceKey == drawId).firstOrNull;
+    if (entry != null) {
+      undoBalanceEntry(entry.id); // 残高を戻し、未払い・未処理に戻す
+      return;
+    }
     paidPlannedExpenseKeys.remove(_plannedExpenseKey(id, date));
+    handledDrawIds.remove(drawId);
     saveData();
     notifyListeners();
   }
@@ -4004,14 +4184,10 @@ class AppState extends ChangeNotifier {
   List<({String label, int amount, DateTime date})> oneTimeExpensesIn(DateTime month) {
     final out = <({String label, int amount, DateTime date})>[];
     for (final l in loans) {
-      final d = l.downPaymentDate;
-      if (!l.hasDownPayment || !l.isDownPaymentFromAccount) continue;
-      if (d!.year != month.year || d.month != month.month) continue;
-      // ⚠️ 頭金は日付どおりの月。翌月の請求では消さない。
-      if (_hasLoanBankBill(l, month, onDate: nextBusinessDay(d),
-          minimumAmount: l.downPayment)) {
-        continue;
-      }
+      final d = _accountDownPaymentDateOf(l);
+      if (d == null || d.year != month.year || d.month != month.month) continue;
+      // 💡 確認待ちで処理した頭金は、もう残高に反映した（または入っていると確かめた）
+      if (handledDrawIds.contains(_downPaymentDrawId(l.id))) continue;
       out.add((label: '${l.name} 頭金', amount: l.downPayment, date: d));
     }
     for (final e in plannedExpensesIn(month)) {
@@ -4188,10 +4364,16 @@ class AppState extends ChangeNotifier {
       out.add((label: card, amount: amount, colorValue: cardColorOf(card).toARGB32()));
     }
 
+    // 💡 確認待ちで処理した口座払いのローン（残高に反映した／入っていると確かめた）は、この月の予想から外す
+    final handledLoans = {
+      for (final l in loans)
+        if (l.isFromAccount && handledDrawIds.contains(_loanDrawId(l.id, payMonth))) l.name,
+    };
     for (final e in expenseBreakdownOf(useMonth)) {
       if (byPeriod.contains(e.label)) continue; // 締め期間で集計済み
       if (_excludedFromDraw(e.label)) continue;
       if (e.label == '定期支払い') continue; // 下で 1 件ずつ足す
+      if (handledLoans.contains(e.label)) continue;
       if (!afterEdit(e.label)) continue;
       out.add(e);
     }
@@ -4239,6 +4421,9 @@ class AppState extends ChangeNotifier {
       if (s.isCardPayment && _isConfirmedIn(s.method, bank)) continue;
       // 💡 開始月＝最初の利用月。口座振替・手動払いは利用した月に、カード払いは翌月に口座から落ちる
       if (!s.isUsedIn(s.isCardPayment ? useMonth : payMonth)) continue;
+      // 💡 確認待ちで処理した口座振替・手動払いの定期は、もう残高に反映した（または入っていると確かめた）。
+      //   ⚠️ 以前は「スキップ（入っている）」を選んでも、日付が残高を書いた日より後なら予想でも引いていた（二重）
+      if (!s.isCardPayment && handledDrawIds.contains(_subDrawId(s.id, payMonth))) continue;
       final date = s.isCardPayment
           ? cardDrawDateOf(s.method, payMonth)
           : drawDateInMonth(s.payDay, payMonth);
@@ -4268,6 +4453,7 @@ class AppState extends ChangeNotifier {
     for (final w in workplaces) {
       final wm = DateTime(payMonth.year, payMonth.month - w.paydayMonthOffset);
       final payDate = w.paydayIn(payMonth); // 土日祝の調整を反映
+      if (paidSalaryKeys.contains(_paidKey(w.id, payDate))) continue; // 受け取り済み（予想の行と同じ）
       if (_forecastInclude(payDate)) total += takeHomeOfWorkplace(wm, w.id);
     }
     total += plannedIncomeForecastIn(payMonth); // 予定入金も足す
@@ -4394,6 +4580,8 @@ class AppState extends ChangeNotifier {
         final wm = DateTime(m.year, m.month - w.paydayMonthOffset);
         final payDate = w.paydayIn(m);
         if (!_forecastInclude(payDate)) continue;
+        // 💡 受け取り済み（確認待ちで「入っている」にした・入金で反映した）なら足さない（二重にしない）
+        if (paidSalaryKeys.contains(_paidKey(w.id, payDate))) continue;
         final amount = takeHomeOfWorkplace(wm, w.id);
         if (amount == 0) continue;
         out.add(ForecastLine(

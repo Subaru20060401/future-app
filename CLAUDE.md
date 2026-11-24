@@ -62,6 +62,10 @@ iOS のビルドは macOS + Xcode でしかできない。Windows では Web と
 - 銀行の休業日は土日祝＋年末年始（12/31〜1/3）。年末年始は `isBankHoliday` だけで、祝日（`isJapaneseHoliday`）には入れない
 - 確認待ちの引き落とし（`pendingDraws`）は予想と同じ日付・金額の規則（`cardBillAmountOf`）。
   ただし予想のゲートでは消さない（処理したときだけ消える）
+- **日付が過ぎた支払い・入金は確認待ちに出す**（`pendingDraws`・`dueSalaries`・`duePlannedIncomes`）。カードの引き落とし・
+  口座振替/手動の定期・予定支出・口座払いのローン（月々・頭金）・給料・予定入金。⚠️ 出さないと、残高を書き直す
+  （基準日が進む）だけで予想から黙って消える。処理済み（引いた／入っていると確かめた）は予想からも外す
+  （`handledDrawIds`・`paidPlannedExpenseKeys`・`paidSalaryKeys`）。新しい支払いの種類を足すときは確認待ちにも足す
 - **確認待ちは二重に引かない**: `applyDraw`・`skipDraw` は処理済みなら何もしない（判定は AppState）。
   「入力した残高に含まれているか」は `drawReflectionOf` の推定で、断定しない（同じ日は判断できない）。
   判断には `balanceEnteredAt`（残高そのものを入力した時刻）を使い、入金・引落の反映で進む `balanceUpdatedAt` は使わない
